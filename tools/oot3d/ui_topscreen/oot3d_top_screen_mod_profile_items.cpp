@@ -22,7 +22,7 @@ TopScreenVerifiedItemQueryContracts() noexcept {
 std::array<bool, 4> BuildTopScreenItemCompatibilityOverrides(
     const TopScreenExtendedInputFrame &input, std::uint8_t itemISlotIdentity,
     std::uint8_t itemIISlotIdentity) noexcept {
-  if (input.RestorationLayout || input.GameplayDpadActionsOwned) {
+  if (input.GameplayDpadActionsOwned) {
     return {};
   }
   const bool itemI = input.DpadLeftHeld && itemISlotIdentity == 0x45U;
@@ -32,7 +32,7 @@ std::array<bool, 4> BuildTopScreenItemCompatibilityOverrides(
 
 bool HasTopScreenSlotItemOverrideInput(
     const TopScreenExtendedInputFrame &input) noexcept {
-  return !input.RestorationLayout && !input.GameplayDpadActionsOwned &&
+  return !input.GameplayDpadActionsOwned &&
          (input.DpadLeftHeld || input.DpadRightHeld);
 }
 
@@ -41,11 +41,6 @@ bool HasTopScreenItemQueryOverrideInput(
   if (HasTopScreenSlotItemOverrideInput(input)) {
     return true;
   }
-  if (input.RestorationLayout) {
-    return (input.ZrHeld &&
-            (input.XPressed || input.YPressed || input.XHeld || input.YHeld)) ||
-           (input.ZrPressed && (input.XHeld || input.YHeld));
-  }
   return input.ZrPressed || input.ZlPressed || input.ZrHeld || input.ZlHeld;
 }
 
@@ -53,21 +48,6 @@ bool ResolveTopScreenItemQuery(TopScreenItemQuery query,
                                const TopScreenItemQueryState &state) noexcept {
   const auto index = ItemQueryIndex(query);
   const bool extendedButton = [&]() {
-    if (state.Input.RestorationLayout) {
-      switch (query) {
-      case TopScreenItemQuery::ItemIPressed:
-        return (state.Input.ZrHeld && state.Input.XPressed) ||
-               (state.Input.ZrPressed && state.Input.XHeld);
-      case TopScreenItemQuery::ItemIIPressed:
-        return (state.Input.ZrHeld && state.Input.YPressed) ||
-               (state.Input.ZrPressed && state.Input.YHeld);
-      case TopScreenItemQuery::ItemIHeld:
-        return state.Input.ZrHeld && state.Input.XHeld;
-      case TopScreenItemQuery::ItemIIHeld:
-        return state.Input.ZrHeld && state.Input.YHeld;
-      }
-      return false;
-    }
     switch (query) {
     case TopScreenItemQuery::ItemIPressed:
       return state.Input.ZrPressed;

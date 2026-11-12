@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Mesa (GL) x deko3d no console: compara dois logs/perf.txt (última sessão de cada).
+"""Mesa (GL) vs deko3d on the console: compares two logs/perf.txt (last session of each).
 
-Por janela de 150 quadros o perf.txt traz fps, ms por fase, clocks, CPU % por
-papel de thread (linha "threads:"), memória usada; o GL traz "glperf"
-(config/gpu_timing: <tipo>_gpu_ms) e o deko3d traz "dkperf" (gpu_ms por quadro,
-timestamps do começo e do fim do quadro). Só compare medições no mesmo clock,
-no mesmo trecho do jogo e com o deko3d sem config/deko3d_sync_check e sem a
+Per window of 150 frames perf.txt holds fps, ms per phase, clocks, CPU % per
+thread role ("threads:" line), used memory; GL holds "glperf"
+(config/gpu_timing: <kind>_gpu_ms) and deko3d holds "dkperf" (gpu_ms per frame,
+timestamps of the frame's start and end). Only compare measurements at the same clock,
+in the same stretch of the game and with deko3d without config/deko3d_sync_check and without
 libdeko3dd (TRIAEVUM_DEKO3D_DEBUG=OFF).
 
-Uso: compare_backends.py mesa/perf.txt deko3d/perf.txt [--skip 4]
-     compare_backends.py perf.txt            # um arquivo: a última sessão GL e a última deko3d
+Usage: compare_backends.py mesa/perf.txt deko3d/perf.txt [--skip 4]
+     compare_backends.py perf.txt            # one file: the last GL session and the last deko3d one
 """
 import argparse
 import re
@@ -34,10 +34,10 @@ def all_sessions(path):
         elif cur and line.startswith(('glperf ', 'dkperf ')):
             kv = dict(KV.findall(line))
             if line.startswith('dkperf'):
-                # busy_ms (p6m+) tira a espera do acquire; antes só havia gpu_ms com ela.
+                # busy_ms (p6m+) excludes the acquire wait; before there was only gpu_ms including it.
                 gpu = float(kv.get('busy_ms', kv.get('gpu_ms', 'nan')))
             else:
-                # Média dos tipos de quadro com amostra de GPU, ponderada pelos quadros.
+                # Average of the frame kinds with a GPU sample, weighted by frames.
                 tot = n = 0.0
                 for kind in ('step', 'interp', 'hold'):
                     if f'{kind}_gpu_ms' in kv:
@@ -51,7 +51,7 @@ def all_sessions(path):
 
 
 def last_session(path, deko3d=None):
-    """A última sessão; com deko3d=True/False, a última com/sem linha dkperf."""
+    """The last session; with deko3d=True/False, the last one with/without a dkperf line."""
     for session in reversed(all_sessions(path)):
         if deko3d is None or any(w.get('dk', False) for w in session) == deko3d:
             return session
@@ -65,16 +65,16 @@ def summary(wins):
     out = {
         'fps': col(lambda w: float(w['main'].get('fps', 'nan'))),
         'guest_fps': col(lambda w: float(w['main'].get('guest_fps', 'nan'))),
-        'quadro ms (total_ms)': col(lambda w: float(w['main'].get('total_ms', 'nan'))),
-        'GPU ms/quadro': col(lambda w: w['gpu']),
+        'frame ms (total_ms)': col(lambda w: float(w['main'].get('total_ms', 'nan'))),
+        'GPU ms/frame': col(lambda w: w['gpu']),
         'present ms': col(lambda w: float(w['main'].get('present', 'nan'))),
         'pica_backend ms': col(lambda w: float(w['main'].get('pica_backend', 'nan'))),
-        'memória usada MB': col(lambda w: float(w['main'].get('used_mb', 'nan'))),
+        'used memory MB': col(lambda w: float(w['main'].get('used_mb', 'nan'))),
     }
     roles = sorted({r for w in wins for r in w['cpu']})
     for r in roles:
         out[f'CPU {r} %'] = col(lambda w, r=r: w['cpu'].get(r))
-    # Arredondado a 50 MHz: a leitura oscila alguns MHz entre janelas.
+    # Rounded to 50 MHz: the reading oscillates a few MHz between windows.
     r50 = lambda v: int(round(float(v) / 50) * 50) if v not in (None, '-1') else None
     clocks = {(r50(w['main'].get('cpu_mhz')), r50(w['main'].get('gpu_mhz')), r50(w['main'].get('mem_mhz')))
               for w in wins}
@@ -85,7 +85,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mesa')
     ap.add_argument('deko3d', nargs='?')
-    ap.add_argument('--skip', type=int, default=4, help='janelas iniciais ignoradas (carregamento)')
+    ap.add_argument('--skip', type=int, default=4, help='initial windows ignored (loading)')
     a = ap.parse_args()
     res = []
     picks = [(a.mesa, None), (a.deko3d, None)] if a.deko3d else [(a.mesa, False), (a.mesa, True)]
@@ -93,13 +93,13 @@ def main():
         wins = last_session(path, kind)[a.skip:]
         s, clocks = summary(wins)
         res.append((len(wins), s, clocks))
-    print(f"janelas: mesa {res[0][0]}, deko3d {res[1][0]}")
+    print(f"windows: mesa {res[0][0]}, deko3d {res[1][0]}")
     for name, (n, s, clocks) in zip(('mesa', 'deko3d'), res):
         print(f"clocks {name} (cpu, gpu, mem MHz): {sorted(clocks)}")
     if res[0][2] != res[1][2]:
-        print("AVISO: clocks diferentes entre as medições; a comparação não vale")
+        print("WARNING: different clocks between the measurements; the comparison is not valid")
     keys = list(dict.fromkeys(list(res[0][1]) + list(res[1][1])))
-    print(f"{'métrica':26} {'mesa méd':>9} {'máx':>8}  {'deko3d méd':>10} {'máx':>8}  {'Δ%':>7}")
+    print(f"{'metric':26} {'mesa avg':>9} {'max':>8}  {'deko3d avg':>10} {'max':>8}  {'Δ%':>7}")
     for k in keys:
         m = res[0][1].get(k, (float('nan'),) * 2)
         d = res[1][1].get(k, (float('nan'),) * 2)

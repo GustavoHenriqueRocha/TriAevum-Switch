@@ -210,35 +210,37 @@ struct PicaTevInputs {
 vec4 pica_tev_round(vec4 v) {
     return floor(v * 255.0 + 0.5) / 255.0;
 }
-vec4 pica_tev_source(uint selector, int stage, PicaTevInputs inputs, vec4 combiner_buffer, vec4 previous) {
-    switch (selector) {
-    case 0u: return inputs.primary;
-    case 1u: return inputs.primary_fragment;
-    case 2u: return inputs.secondary_fragment;
-    case 3u: return inputs.textures[0];
-    case 4u: return inputs.textures[1];
-    case 5u: return inputs.textures[2];
-    case 6u: return inputs.textures[3];
-    case 13u: return combiner_buffer;
-    case 14u: return inputs.constants[stage];
-    case 15u: return previous;
-    }
-    return vec4(0.0);
+// Source and operand selections are if chains, not switches with returns:
+// the switch form kept every candidate in registers (uam: 97 GPRs unlit).
+vec4 pica_tev_source(uint selector, PicaTevInputs inputs, vec4 constant, vec4 combiner_buffer, vec4 previous) {
+    vec4 value = vec4(0.0);
+    if (selector == 0u) value = inputs.primary;
+    else if (selector == 1u) value = inputs.primary_fragment;
+    else if (selector == 2u) value = inputs.secondary_fragment;
+    else if (selector == 3u) value = inputs.textures[0];
+    else if (selector == 4u) value = inputs.textures[1];
+    else if (selector == 5u) value = inputs.textures[2];
+    else if (selector == 6u) value = inputs.textures[3];
+    else if (selector == 13u) value = combiner_buffer;
+    else if (selector == 14u) value = constant;
+    else if (selector == 15u) value = previous;
+    return value;
 }
 vec3 pica_tev_color_operand(vec4 v, uint op) {
+    uint channel = op & 14u;
     vec3 value = v.rgb;
-    switch (op & 14u) {
-    case 2u: value = v.aaa; break;
-    case 4u: value = v.rrr; break;
-    case 8u: value = v.ggg; break;
-    case 12u: value = v.bbb; break;
-    }
+    if (channel == 2u) value = v.aaa;
+    else if (channel == 4u) value = v.rrr;
+    else if (channel == 8u) value = v.ggg;
+    else if (channel == 12u) value = v.bbb;
     return (op & 1u) != 0u ? vec3(1.0) - value : value;
 }
 float pica_tev_alpha_operand(vec4 v, uint op) {
     float value = op < 2u ? v.a : (op < 4u ? v.r : (op < 6u ? v.g : v.b));
     return (op & 1u) != 0u ? 1.0 - value : value;
 }
+// Stays a switch: as an if chain the driver contracted some operations
+// differently (1/255 steps in a few lavapipe pixels against the switch form).
 vec4 pica_tev_operation(uint op, vec4 a, vec4 b, vec4 c) {
     vec4 result;
     switch (op) {
@@ -256,7 +258,7 @@ vec4 pica_tev_operation(uint op, vec4 a, vec4 b, vec4 c) {
     return result;
 }
 void pica_tev_input(uvec4 words, int stage, uint input_index,
-                    PicaTevInputs inputs, vec4 combiner_buffer, vec4 previous,
+                    PicaTevInputs inputs, vec4 constant, vec4 combiner_buffer, vec4 previous,
                     out vec4 color, out vec4 alpha_value) {
     uint rgb = (words.x >> (input_index * 4u)) & 15u;
     uint alpha = (words.x >> (16u + input_index * 4u)) & 15u;
@@ -265,10 +267,35 @@ void pica_tev_input(uvec4 words, int stage, uint input_index,
         if (rgb == 15u) rgb = (words.x >> 8u) & 15u;
         if (alpha == 15u) alpha = (words.x >> 24u) & 15u;
     }
-    vec4 cv = pica_tev_source(rgb, stage, inputs, combiner_buffer, previous);
-    vec4 av = pica_tev_source(alpha, stage, inputs, combiner_buffer, previous);
+    vec4 cv = pica_tev_source(rgb, inputs, constant, combiner_buffer, previous);
+    vec4 av = pica_tev_source(alpha, inputs, constant, combiner_buffer, previous);
     color = vec4(pica_tev_color_operand(cv, (words.y >> (input_index * 4u)) & 15u), 0.0);
     alpha_value = vec4(pica_tev_alpha_operand(av, (words.y >> (12u + input_index * 4u)) & 7u));
+}
+// One combiner stage: `words` is PicaTevProgram.stages[stage],
+// `buffer_control` PicaTevProgram.control.x, `constant` the stage's colour.
+void pica_tev_stage(uvec4 words, int stage, uint buffer_control, vec4 constant, PicaTevInputs inputs,
+                    inout vec4 combiner_buffer, inout vec4 next_buffer, inout vec4 previous) {
+    vec4 colors[3];
+    vec4 alphas[3];
+    // Fixed operand slots must not become dynamically indexed local arrays.
+    pica_tev_input(words, stage, 0u, inputs, constant, combiner_buffer, previous, colors[0], alphas[0]);
+    pica_tev_input(words, stage, 1u, inputs, constant, combiner_buffer, previous, colors[1], alphas[1]);
+    pica_tev_input(words, stage, 2u, inputs, constant, combiner_buffer, previous, colors[2], alphas[2]);
+    uint color_op = words.z & 15u;
+    vec4 color = pica_tev_round(clamp(pica_tev_operation(color_op, colors[0], colors[1], colors[2]), 0.0, 1.0));
+    float alpha = color_op == 7u ? color.r : pica_tev_round(clamp(
+        pica_tev_operation((words.z >> 16u) & 15u, alphas[0], alphas[1], alphas[2]), 0.0, 1.0)).x;
+    uint rgb_scale = words.w & 3u;
+    uint alpha_scale = (words.w >> 16u) & 3u;
+    previous = clamp(vec4(color.rgb * float(rgb_scale < 3u ? 1u << rgb_scale : 1u),
+                          alpha * float(alpha_scale < 3u ? 1u << alpha_scale : 1u)), 0.0, 1.0);
+    // Buffer updates become visible one stage later than PREVIOUS.
+    combiner_buffer = next_buffer;
+    if (stage < 4) {
+        if ((buffer_control & (1u << (8 + stage))) != 0u) next_buffer.rgb = previous.rgb;
+        if ((buffer_control & (1u << (12 + stage))) != 0u) next_buffer.a = previous.a;
+    }
 }
 // Resolved primary includes native quantization and authorized lighting hooks.
 vec4 pica_evaluate_tev_resolved(PicaTevProgram program, PicaTevInputs inputs) {
@@ -279,34 +306,33 @@ vec4 pica_evaluate_tev_resolved(PicaTevProgram program, PicaTevInputs inputs) {
     // source/operation switch was most of the parametric program's code) and
     // skips the trailing pass-through stages; 0 comes from old savestates.
     int stage_count = program.control.z == 0u ? 6 : int(program.control.z);
-    for (int stage = 0; stage < stage_count; ++stage) {
-        uvec4 words = program.stages[stage];
-        vec4 colors[3];
-        vec4 alphas[3];
-        // Fixed operand slots must not become dynamically indexed local arrays.
-        pica_tev_input(words, stage, 0u, inputs, combiner_buffer, previous, colors[0], alphas[0]);
-        pica_tev_input(words, stage, 1u, inputs, combiner_buffer, previous, colors[1], alphas[1]);
-        pica_tev_input(words, stage, 2u, inputs, combiner_buffer, previous, colors[2], alphas[2]);
-        uint color_op = words.z & 15u;
-        vec4 color = pica_tev_round(clamp(pica_tev_operation(color_op, colors[0], colors[1], colors[2]), 0.0, 1.0));
-        float alpha = color_op == 7u ? color.r : pica_tev_round(clamp(
-            pica_tev_operation((words.z >> 16u) & 15u, alphas[0], alphas[1], alphas[2]), 0.0, 1.0)).x;
-        uint rgb_scale = words.w & 3u;
-        uint alpha_scale = (words.w >> 16u) & 3u;
-        previous = clamp(vec4(color.rgb * float(rgb_scale < 3u ? 1u << rgb_scale : 1u),
-                              alpha * float(alpha_scale < 3u ? 1u << alpha_scale : 1u)), 0.0, 1.0);
-        // Buffer updates become visible one stage later than PREVIOUS.
-        combiner_buffer = next_buffer;
-        if (stage < 4) {
-            if ((program.control.x & (1u << (8 + stage))) != 0u) next_buffer.rgb = previous.rgb;
-            if ((program.control.x & (1u << (12 + stage))) != 0u) next_buffer.a = previous.a;
-        }
-    }
+    for (int stage = 0; stage < stage_count; ++stage)
+        pica_tev_stage(program.stages[stage], stage, program.control.x, inputs.constants[stage], inputs,
+                       combiner_buffer, next_buffer, previous);
     return previous;
 }
 vec4 pica_evaluate_tev(PicaTevProgram program, PicaTevInputs inputs) {
     inputs.primary = pica_tev_round(inputs.primary);
     return pica_evaluate_tev_resolved(program, inputs);
+}
+)glsl";
+}
+
+std::string_view PicaTevUniformEvaluatorGlsl() noexcept {
+    return R"glsl(// The parametric program's combiner: program, constants and buffer colour
+// are read where they are used, never copied into locals (the copies held
+// 28 more GPRs under uam); inputs.constants and inputs.buffer_color are unused.
+vec4 pica_evaluate_tev_uniform(PicaTevInputs inputs) {
+    vec4 combiner_buffer = vec4(0.0);
+    vec4 next_buffer = fragment_uniforms.combiner_buffer_color;
+    vec4 previous = vec4(0.0);
+    // The same uniform bound as pica_evaluate_tev_resolved: the loop stays
+    // rolled and the trailing pass-through stages are skipped.
+    int stage_count = fragment_uniforms.tev_program.control.z == 0u ? 6 : int(fragment_uniforms.tev_program.control.z);
+    for (int stage = 0; stage < stage_count; ++stage)
+        pica_tev_stage(fragment_uniforms.tev_program.stages[stage], stage, fragment_uniforms.tev_program.control.x,
+                       fragment_uniforms.tev_constants[stage], inputs, combiner_buffer, next_buffer, previous);
+    return previous;
 }
 )glsl";
 }

@@ -89,8 +89,62 @@ float pica_program_lut(PicaLightingProgram p, int sampler_index, int table_index
 }
 )glsl";
 
+// The parametric (always-available) program's forms of the two functions
+// above: they read the program from the fragment uniform block where it is
+// used instead of taking a copy. A copy of the 256-byte program, whose light
+// table the loop indexes dynamically, went to scratch under uam (105 GPRs,
+// 4096 bytes per warp). Same operations in the same order.
+inline constexpr std::string_view PicaLightingUniformProgramFunctions = R"glsl(
+void pica_uniform_program_surface(vec4 bump_sample, vec4 shadow_sample,
+                                  out vec3 n, out vec3 t, out vec4 shadow) {
+    uint control = fragment_uniforms.lighting_program.control.w;
+    n = vec3(0.0, 0.0, 1.0);
+    t = vec3(1.0, 0.0, 0.0);
+    uint mode = (control >> 4u) & 3u;
+    if (mode == 1u) {
+        precise vec3 bump_normal = 2.0 * bump_sample.rgb - vec3(1.0);
+        if ((control & 64u) != 0u)
+            bump_normal.z = sqrt(max(1.0 - pica_lighting_dot(bump_normal.xy, bump_normal.xy), 0.0));
+        n = bump_normal;
+    } else if (mode == 2u) {
+        precise vec3 bump_tangent = 2.0 * bump_sample.rgb - vec3(1.0);
+        t = bump_tangent;
+    }
+    shadow = vec4(1.0);
+    if ((control & 128u) != 0u)
+        shadow = (control & 256u) != 0u ? vec4(1.0) - shadow_sample : shadow_sample;
+}
+float pica_uniform_program_lut(int sampler_index, int table_index,
+    bool two_sided, vec3 n, vec3 t, vec3 v, vec3 l, vec3 h, vec3 spot) {
+    vec4 config = fragment_uniforms.lighting_program.luts[sampler_index];
+    precise float x = 0.0;
+    switch (int(config.x)) {
+    case 0: x = pica_lighting_dot(n, pica_lighting_normalize(h)); break;
+    case 1: x = pica_lighting_dot(v, pica_lighting_normalize(h)); break;
+    case 2: x = pica_lighting_dot(n, v); break;
+    case 3: x = pica_lighting_dot(l, n); break;
+    case 4: x = pica_lighting_dot(l, spot); break;
+    case 5:
+        if (fragment_uniforms.lighting_program.control.y == 8u)
+            x = pica_lighting_dot(pica_lighting_normalize(h) - n * pica_lighting_dot(n, pica_lighting_normalize(h)), t);
+        break;
+    }
+    if (config.y != 0.0) {
+        x = two_sided ? abs(x) : max(x, 0.0);
+        precise float unsigned_value = config.z * pica_lighting_lut_unsigned(table_index, x);
+        return unsigned_value;
+    }
+    precise float signed_value = config.z * pica_lighting_lut_signed(table_index, x);
+    return signed_value;
+}
+)glsl";
+
+// The specialized program runs this body with `lp` its constant program. The
+// parametric program runs it without the copy: every `lp.` reads
+// fragment_uniforms.lighting_program and pica_program_lut(lp, ...) is
+// pica_uniform_program_lut(...) (oot3d_native_pica_fragment_lighting_gen.cpp).
 inline constexpr std::string_view PicaLightingProgramBody = R"glsl(
-    PicaLightingProgram lp = fragment_uniforms.lighting_program;
+    PicaLightingProgram lp = pica_lighting_constant_program;
     for (uint slot = 0u; slot < lp.control.x; ++slot) {
         uint i = lp.lights[slot].x;
         uint flags = lp.lights[slot].y;

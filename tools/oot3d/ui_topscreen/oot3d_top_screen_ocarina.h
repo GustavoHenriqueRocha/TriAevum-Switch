@@ -72,14 +72,15 @@ struct TopScreenOcarinaNavigationGeometry {
   std::array<TopScreenTexturedQuad, 2> Quads{};
 };
 
-// Ocarina navigation arrows: 2.1.1 producers 0x005CBC54/0x005CA7B8.
+// Ocarina navigation arrows: 2.1.1 producers 0x005CBC54/0x005CA7B8, drawn
+// from custom_ui01 as SingleScreen 3.0 does (0x005CBFB8).
 // Direction is derived from the native OoT3D input frame: -1 left, +1 right.
 TopScreenOcarinaNavigationGeometry
 BuildTopScreenOcarinaNavigationGeometry(std::int8_t direction) noexcept;
 
 std::size_t AppendTopScreenOcarinaNavigationPresentation(
     const TopScreenOcarinaNavigationGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output);
 
 } // namespace Oot3dNativeGame

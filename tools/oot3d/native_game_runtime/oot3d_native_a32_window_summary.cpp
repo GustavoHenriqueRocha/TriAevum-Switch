@@ -1195,9 +1195,6 @@ void WriteNativeA32WindowRuntimeSummary(const NativeA32WindowSummaryInputs &in) 
                launch.TopScreenConfigPath.empty()
                    ? nlohmann::json("built_in_defaults")
                    : nlohmann::json("external_json")},
-              {"hud_layout",
-               Oot3dNativeGame::TopScreenHudLayoutName(
-                   activeTopScreenConfig.HudLayout)},
               {"hud_scale",
                std::round(static_cast<double>(
                               activeTopScreenConfig.HudScale) *
@@ -1241,6 +1238,26 @@ void WriteNativeA32WindowRuntimeSummary(const NativeA32WindowSummaryInputs &in) 
                         activeTopScreenConfig.AdultDpad[2]),
                     Oot3dNativeGame::TopScreenDpadActionName(
                         activeTopScreenConfig.AdultDpad[3])})},
+              {"dpad_child_items",
+               nlohmann::json::array(
+                   {Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.ChildDpadItemSlots[0]),
+                    Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.ChildDpadItemSlots[1]),
+                    Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.ChildDpadItemSlots[2]),
+                    Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.ChildDpadItemSlots[3])})},
+              {"dpad_adult_items",
+               nlohmann::json::array(
+                   {Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.AdultDpadItemSlots[0]),
+                    Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.AdultDpadItemSlots[1]),
+                    Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.AdultDpadItemSlots[2]),
+                    Oot3dNativeGame::TopScreenDpadItemSlotName(
+                        activeTopScreenConfig.AdultDpadItemSlots[3])})},
               {"free_camera_enabled",
                activeTopScreenConfig.FreeCameraEnabled},
               {"free_camera_speed_level",
@@ -2616,6 +2633,14 @@ void WriteNativeA32WindowRuntimeSummary(const NativeA32WindowSummaryInputs &in) 
                     nativeCandidateDispatch.TopScreenItems.SelectionBegins},
                    {"topscreen_items_selection_completions",
                     nativeCandidateDispatch.TopScreenItems.SelectionCompletions},
+                   {"topscreen_dpad_item_buttons",
+                    nativeCandidateDispatch.TopScreenItems.DpadItemButtons},
+                   {"topscreen_dpad_item_resolves",
+                    nativeCandidateDispatch.TopScreenItems.DpadItemResolves},
+                   {"topscreen_dpad_items_kept",
+                    nativeCandidateDispatch.TopScreenItems.DpadItemsKept},
+                   {"topscreen_dpad_bottle_updates",
+                    nativeCandidateDispatch.TopScreenItems.DpadBottleUpdates},
                    {"candidate_samples", nativeCandidateDispatch.Samples},
                    {"candidate_estimated_seconds",
                     candidateSampleNanoseconds * kA32RuntimeSampleDenominator *

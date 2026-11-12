@@ -2,8 +2,9 @@
 """Build the optional TopScreen O3TU v2 texture override pack.
 
 Accepts the official TopScreen 2.1.1 archive (localized CTXB overrides plus
-custom_menu00/custom_font00) or the verified TopScreen 3.0 archive
-(custom_ui01 relocated into the 2.1.1 profile-texture layout).
+custom_menu00/custom_font00) or a verified "Single Screen Experience" 3.x
+archive, 3.0, 3.2.1 or 3.2.2 (custom_ui01 relocated into the 2.1.1 profile-texture
+layout).
 """
 
 from __future__ import annotations
@@ -45,16 +46,30 @@ PICA_FORMATS = {
 NCCH_ROMFS_SUPERBLOCK_SIZE = 0x1000
 INVALID_ROMFS_OFFSET = 0xFFFFFFFF
 
-# TopScreen / Single Screen Experience 3.0 (GameBanana 695893). 2.1.1 is no
-# longer downloadable; 3.0 replaces the localized menu CTXBs and the separate
+# TopScreen / Single Screen Experience 3.x (GameBanana 695893). 2.1.1 is no
+# longer downloadable; 3.0 replaced the localized menu CTXBs and the separate
 # custom_menu00/custom_font00 atlases with one 512x256 ETC1A4 atlas,
 # romfs/menu/custom_ui01.ctxb (byte-identical for every region and target).
-TOPSCREEN_30_ARCHIVE_BYTES = 28_883_512
-TOPSCREEN_30_ARCHIVE_SHA256 = (
-    "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993")
+# 3.2.1 (dl/1875895, singlescreen_321.zip) keeps the 3.0 layout under its own
+# root and the byte-identical custom_ui01.ctxb; it only adds
+# romfs/menu/hud_rupee00.ctxb, a texture the original game does not have
+# (only the mod's code.ips reads it), so both build the same pack. 3.2.2
+# (dl/1879915, singlescreen_322.zip) replaced 3.2.1, which GameBanana deleted;
+# it has the same custom_ui01.ctxb and builds the same pack.
+# Archive root directory -> (archive bytes, archive SHA-256).
+TOPSCREEN_3X_ARCHIVES = {
+    "SingleScreen_3.0": (
+        28_883_512,
+        "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993"),
+    "SingleScreen_3.2.1": (
+        56_466_735,
+        "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0"),
+    "SingleScreen_3.2.2": (
+        56_493_832,
+        "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0"),
+}
 TOPSCREEN_30_UI_ATLAS_SHA256 = (
     "20290e417c56973cd19daa1f61a6c3963f075d61776db3d996954ee3296d07d8")
-TOPSCREEN_30_ROOT = "SingleScreen_3.0"
 TOPSCREEN_30_TITLE_IDS = {
     "EUR": "0004000000033600",
     "USA": "0004000000033500",
@@ -439,18 +454,20 @@ def build_texture_pack(*, archive: Path | None = None,
         raise ValueError("provide exactly one replacement source")
     if (original_romfs is None) == (original_romfs_image is None):
         raise ValueError("provide exactly one original RomFS source")
-    if archive is not None and is_topscreen_30_archive(archive):
-        verify_topscreen_30_archive(archive)
+    root = topscreen_3x_root(archive) if archive is not None else None
+    if root is not None:
+        verify_topscreen_3x_archive(archive, root)
         if region is None:
             region = detect_romfs_region(
                 original_romfs=original_romfs,
                 original_romfs_image=original_romfs_image)
         return build_topscreen_30_pack(
-            archive=archive, region=region, original_romfs=original_romfs,
+            archive=archive, root=root, region=region,
+            original_romfs=original_romfs,
             original_romfs_image=original_romfs_image,
             extra_romfs_images=extra_romfs_images)
     if extra_romfs_images:
-        raise ValueError("--extra-romfs-image only applies to TopScreen 3.0")
+        raise ValueError("--extra-romfs-image only applies to TopScreen 3.x")
     entries_by_original: dict[int, tuple[int, bytes, str]] = {}
     profile_textures: list[tuple[str, int, int, int, bytes]] = []
 
@@ -564,25 +581,29 @@ def serialize_pack(
     return bytes(output)
 
 
-def is_topscreen_30_archive(archive: Path) -> bool:
+def topscreen_3x_root(archive: Path) -> str | None:
+    """The known 3.x root directory the archive is laid out under, if any."""
     with zipfile.ZipFile(archive) as source:
-        return any(name.startswith(TOPSCREEN_30_ROOT + "/")
-                   for name in source.namelist())
+        roots = {name.split("/", 1)[0] for name in source.namelist()
+                 if "/" in name}
+    found = sorted(roots & TOPSCREEN_3X_ARCHIVES.keys())
+    if len(found) > 1:
+        raise ValueError(f"archive mixes TopScreen 3.x roots: {found}")
+    return found[0] if found else None
 
 
-def verify_topscreen_30_archive(archive: Path) -> None:
+def verify_topscreen_3x_archive(archive: Path, root: str) -> None:
+    expected_size, expected_sha256 = TOPSCREEN_3X_ARCHIVES[root]
     size = archive.stat().st_size
     digest = hashlib.sha256()
     with archive.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    if (size != TOPSCREEN_30_ARCHIVE_BYTES or
-            digest.hexdigest() != TOPSCREEN_30_ARCHIVE_SHA256):
+    if size != expected_size or digest.hexdigest() != expected_sha256:
         raise ValueError(
-            "TopScreen 3.0 archive failed verification: expected "
-            f"{TOPSCREEN_30_ARCHIVE_BYTES} bytes, SHA-256 "
-            f"{TOPSCREEN_30_ARCHIVE_SHA256}; got {size} bytes, "
-            f"{digest.hexdigest()}")
+            f"TopScreen {root} archive failed verification: expected "
+            f"{expected_size} bytes, SHA-256 {expected_sha256}; got {size} "
+            f"bytes, {digest.hexdigest()}")
 
 
 def detect_romfs_region(*, original_romfs: Path | None = None,
@@ -658,11 +679,11 @@ def build_topscreen_30_native_entries(
             for original, (replacement_hash, payload) in entries.items()]
 
 
-def build_topscreen_30_pack(*, archive: Path, region: str,
+def build_topscreen_30_pack(*, archive: Path, root: str, region: str,
                             original_romfs: Path | None = None,
                             original_romfs_image: Path | None = None,
                             extra_romfs_images: tuple[Path, ...] = ()) -> bytes:
-    """Build an O3TU v2 pack from the TopScreen 3.0 archive.
+    """Build an O3TU v2 pack from a TopScreen 3.x archive under ``root``.
 
     3.0 ships no localized CTXB replacements; the hash-matched entries are
     rebuilt from the original RomFS: each distinct localized
@@ -685,7 +706,7 @@ def build_topscreen_30_pack(*, archive: Path, region: str,
         names = set(source.namelist())
         data = None
         for target in TOPSCREEN_30_TARGET_ROMFS:
-            name = (f"{TOPSCREEN_30_ROOT}/{region}/"
+            name = (f"{root}/{region}/"
                     f"{target.format(title_id=title_id)}{TOPSCREEN_30_UI_ATLAS}")
             if name in names:
                 data = source.read(name)
@@ -709,9 +730,9 @@ def build_topscreen_30_pack(*, archive: Path, region: str,
     entries = build_topscreen_30_native_entries(
         ui_rgba, width, height, original_romfs=original_romfs,
         original_romfs_image=original_romfs_image)
-    # Uma romfs modificada (ex.: patch PT-BR no slot espanhol) muda o payload
-    # de menu_top_parts00: sem entrada para o hash dela o override não casa e
-    # o HUD perde molduras/rótulos dos botões X/Y/I/II e a cruz do D-pad.
+    # A modified romfs (e.g. PT-BR patch in the Spanish slot) changes the payload
+    # of menu_top_parts00: without an entry for its hash the override doesn't match and
+    # the HUD loses the frames/labels of the X/Y/I/II buttons and the D-pad cross.
     known = {original for original, _, _ in entries}
     for image in extra_romfs_images:
         for entry in build_topscreen_30_native_entries(
@@ -741,8 +762,8 @@ def main() -> int:
     originals.add_argument("--original-romfs-image", type=Path)
     parser.add_argument(
         "--extra-romfs-image", type=Path, action="append", default=[],
-        help="RomFS modificada (ex.: romfs-ptbr.bin) cujas texturas "
-             "localizadas também recebem os sprites do 3.0; repetível")
+        help="Modified RomFS (e.g. romfs-ptbr.bin) whose localized "
+             "textures also get the 3.0 sprites; repeatable")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
         "--region", choices=sorted(TOPSCREEN_30_TITLE_IDS),

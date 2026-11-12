@@ -1,6 +1,8 @@
 // Scene environment runtime with developer hot reload: files changed on disk
 // while the game runs (built with TRIAEVUM_DEVELOPER_TOOLS).
 #include "oot3d_scene_environment.h"
+#include <algorithm>
+#include <vector>
 #include "oot3d_scene_environment_codec.h"
 #include <chrono>
 #include <cmath>
@@ -356,6 +358,26 @@ void CheckReleaseDefaults(const std::filesystem::path& root) {
   Check(runtime.UseGroupStandard() && source() == SceneEnvironmentSource::DefaultScene &&
             std::abs(ambient() - 0.3F) < 1e-6F,
         "removing the user's scene file did not return to the release's scene default");
+  // The Switch reads the release's profiles from resources.o2r while deko3d
+  // per-pixel lighting is on: a reader replaces the defaults folder, and the
+  // scene resolves again when it is set or cleared.
+  std::filesystem::remove(user / "group-outdoor-time-at-entry.environment.json");
+  std::filesystem::remove(defaults / "scene-0055.environment.json");
+  std::filesystem::remove(defaults / "group-outdoor-time-at-entry.environment.json");
+  runtime.ObserveScene(std::nullopt); runtime.ObserveScene(0x55, time);
+  Check(source() == SceneEnvironmentSource::Base, "no default left on disk");
+  std::vector<std::string> asked;
+  runtime.SetDefaultsReader([&](const std::string& name) -> std::optional<std::string> {
+    asked.push_back(name);
+    if (name == "group-outdoor-time-at-entry.environment.json") return groupProfile(0.6F);
+    return std::nullopt;
+  });
+  Check(source() == SceneEnvironmentSource::DefaultGroup && std::abs(ambient() - 0.6F) < 1e-6F,
+        "the archive's group default was not used when the reader was set");
+  Check(std::find(asked.begin(), asked.end(), "scene-0055.environment.json") != asked.end(),
+        "the archive was not asked for the scene default first");
+  runtime.SetDefaultsReader({});
+  Check(source() == SceneEnvironmentSource::Base, "clearing the reader did not resolve the folder again");
 }
 
 void CheckShadowScheduling() {

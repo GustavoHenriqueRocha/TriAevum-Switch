@@ -347,7 +347,7 @@ uint64_t GrassTextureSourceCache::Generation() const {
     return mGeneration;
 }
 
-void GrassTextureSourceCache::SetSignatureStore(std::filesystem::path path) {
+size_t GrassTextureSourceCache::SetSignatureStore(std::filesystem::path path) {
     std::scoped_lock lock(mMutex);
     mSignatureStore = std::move(path);
     mStoredSignatures.clear();
@@ -356,6 +356,7 @@ void GrassTextureSourceCache::SetSignatureStore(std::filesystem::path path) {
             mStoredSignatures[hash] = std::make_shared<const GrassTextureSignature>(signature);
     }
     ++mGeneration;
+    return mStoredSignatures.size();
 }
 
 void GrassTextureSourceCache::Clear() {

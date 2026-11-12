@@ -700,3 +700,52 @@ OOT3D_AOT_COLD inline void Oot3dAotRunBlockEntryHook(
 }
 
 } // namespace Oot3dNativeGame
+
+// Appended after the namespace (with its own #include) so that the lines above,
+// and the PGO data of code built from them, do not move.
+#include <span>
+#include <string>
+
+namespace Oot3dNativeGame {
+
+// Which generated blocks test the block-entry gate (Oot3dWholeAotHookGates(),
+// defined by the generated registry, whole_aot_cpp.py). The default lowering
+// gates every block. The generator's --sparse-block-entries (N4) gates only
+// the PCs of whole_aot_hook_gates.json, the union of every runtime
+// block-entry hook list (oot3d_native_block_entry_hooks.h); every other block
+// carries no gate at all, so a hook there would silently never run.
+struct Oot3dWholeAotHookGateSet final {
+    bool EveryBlock = true;
+    // Sorted and unique; only meaningful when !EveryBlock.
+    std::span<const uint32_t> Pcs{};
+};
+
+// True when generated code can see every hook of `sortedHooks` (sorted,
+// unique). An empty list asks for a callback on every block, which only the
+// default lowering provides. Otherwise `*missing` (if non-null) receives the
+// first hook PC without a gate, or 0 for the every-block request.
+inline bool Oot3dWholeAotHookGatesCover(
+    const Oot3dWholeAotHookGateSet& gates,
+    std::span<const uint32_t> sortedHooks, uint32_t* missing = nullptr) noexcept {
+    if (gates.EveryBlock) return true;
+    if (sortedHooks.empty()) {
+        if (missing != nullptr) *missing = 0U;
+        return false;
+    }
+    for (const uint32_t pc : sortedHooks) {
+        if (!std::binary_search(gates.Pcs.begin(), gates.Pcs.end(), pc)) {
+            if (missing != nullptr) *missing = pc;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Empty when generated code with `gates` can run a block-entry callback
+// whose hook list is `sortedHooks` (empty = every block); otherwise the error
+// to report, naming the first hook without a gate. Callers throw it
+// (window setup, ExecuteOot3dCompiledFunction).
+std::string Oot3dWholeAotHookGatesError(
+    const Oot3dWholeAotHookGateSet& gates, std::span<const uint32_t> sortedHooks);
+
+} // namespace Oot3dNativeGame

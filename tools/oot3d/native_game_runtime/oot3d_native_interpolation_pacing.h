@@ -34,6 +34,26 @@
 // ms (31.9 of 33.3, it fits) never came back under 90%: stuck at dropped,
 // 30 real frames a second presented irregularly.
 //
+// Entry recovery (config/pacer_entry_recover, logs20a-e, 2026-11-08): the
+// first 1-3 s in a new area carry one-off work (HD texture decode and
+// upload, grass placements, slow fences). The pair goes over, the in-between
+// frames drop, and the ratio of the in-between frame learnt in those frames
+// stays high while nothing is drawn, so only a probe brings 60 back: every
+// 60 decisions, 2 s, mostly after the work had ended (20a Kokiri: work to
+// frame 12065, dropped from ~12040 to ~12160 at the first probe). Now, in
+// the EntryDecisions after a scene entry (NoteEntry), once the known entry
+// work is done (SetEntryWork: the HD pack's scene preload, grass placements),
+// a pair estimate within EntryProbeFraction of the budget is probed every
+// EntryProbeInterval decisions. A probe whose measured pair does not fit is
+// a failed probe and doubles the interval: up to ProbeInterval in an entry
+// window, up to MaxProbeInterval outside, so a view that really is too
+// heavy sees fewer probes after the first seconds, not more. A return to
+// the preferred level or a probe that fits resets it. Render-thread holds
+// at a scene's start are not frame work (the window code leaves them out).
+// A full-frame ratio above FreshRatio left unmeasured for a second while
+// the step alone has come down far enough is probed at once (StaleRatio,
+// logs22a: a 1.24 ratio from the field entry held 30 with a 14.4 ms step).
+//
 // Pure logic (no GL, no clock): tested by
 // oot3d_native_interpolation_pacing_tests.cpp.
 
@@ -65,7 +85,8 @@ InterpolatedSampleLevelName(InterpolatedSampleLevel level) noexcept {
 
 // What a presented frame drew (perf.txt and the cost the governor learns).
 enum class RenderFrameKind : uint8_t {
-  Other = 0,   // no new sample (a reused snapshot, a menu without guest frame)
+  Other = 0,   // no new sample (a reused snapshot, a menu without guest frame,
+               // the TopScreen pause menu's in-between: oot3d_top_screen_menu_cadence.h)
   Step = 1,    // a new guest frame (its delayed sample, or the direct one)
   Full = 2,    // an in-between sample at full resolution
   Reduced = 3, // an in-between sample at the reduced scale
@@ -108,6 +129,30 @@ struct InterpolationPacingConfig {
   // After this many consecutive in-between frames below the full level, one
   // is drawn a level higher to refresh its estimate (if not hopeless).
   uint32_t ProbeInterval = 60U;
+  // config/pacer_entry_recover (on; "0": the schedule above alone, no
+  // back-off, render-thread holds counted as work). For EntryDecisions
+  // in-between decisions after a scene entry (300: 10 s at 60 FPS), once
+  // its known work is done (SetEntryWork), a probe whose pair estimate is
+  // within EntryProbeFraction of the budget comes every EntryProbeInterval
+  // decisions (1/3 s; logs20a-e: Kokiri's estimate at the drop was
+  // 1.05-1.07 of the budget, the Hyrule Field entrance with its grass at the
+  // cap 1.14-1.25). Each failed probe in a row doubles the interval, up to
+  // ProbeInterval in an entry window and MaxProbeInterval (8 s) outside.
+  bool EntryRecover = true;
+  uint32_t EntryDecisions = 300U;
+  uint32_t EntryProbeInterval = 10U;
+  double EntryProbeFraction = 1.10;
+  uint32_t MaxProbeInterval = 240U;
+  // Stale ratio (config/pacer_entry_recover; logs22a/perf.txt:366, Perf21
+  // and Perf22): below full, the full frame's ratio is not measured, and
+  // one learnt in an entry's work or a heavy view (1.19-1.24) outlives it:
+  // at 22a 6600 the step was down to 14.43 ms but 14.43 x 2.24 = 32.37
+  // missed the 32.33 return threshold. A ratio above FreshRatio (steady
+  // scenes measure 0.94-1.12) unmeasured for StaleRatioDecisions (1 s,
+  // doubled per failed stale probe in a row) is probed at once when the
+  // pair with FreshRatio would fit.
+  uint32_t StaleRatioDecisions = 30U;
+  double FreshRatio = 1.10;
   // config/interp_margin_ms: the pair must fit the budget minus this much
   // (ms). tour15 (2026-10-23, pgo5j, costs without the render thread's
   // acquire wait): areas whose measured GPU pair was 29-33 ms "fit" 33.3
@@ -191,19 +236,52 @@ ParseInterpolationMarginMs(std::string_view text) noexcept {
   return static_cast<float>(scale);
 }
 
+// deko3d has no namespace scales: there a reduced in-between frame is one
+// dynamic-resolution step for that frame alone (gl_pica_dynamic_scale.h;
+// the step frame after it sets its own scale again). config/interp_scale as
+// above when it has text ("0" or "off": none). Without it, a scene held at
+// the full scale at 60 FPS (Resolution at 60 FPS: Full, or no dynamic
+// resolution) draws an in-between frame that does not fit 0.25 lower
+// instead of dropping it (logs37: the Temple of Time cutscene at the
+// Standard GPU clock jumped between 30 and 60 FPS with a 16.1-17.0 ms
+// frame). 0: no reduced level.
+[[nodiscard]] inline float DynamicStepReducedScale(std::string_view text, float maxScale,
+                                                   bool heldAtFullScale) noexcept {
+  if (!text.empty())
+    return ParseInterpolationReducedScale(text, maxScale);
+  if (!heldAtFullScale)
+    return 0.0F;
+  // The multiple of 0.25 below the scale (2.75 at 3, 2.5 at 2.6).
+  const float reduced = std::ceil(maxScale * 4.0F - 1.0e-3F) / 4.0F - 0.25F;
+  return reduced >= 1.0F ? reduced : 0.0F;
+}
+
 struct InterpolationPacingStats {
   uint64_t StepFrames = 0;
   uint64_t FullFrames = 0;
   uint64_t ReducedFrames = 0;
   uint64_t DroppedFrames = 0;
   uint64_t Probes = 0;
+  // Probes whose measured pair did not fit (the level stayed below), and
+  // the probes of an entry's shorter interval (config/pacer_entry_recover).
+  uint64_t FailedProbes = 0;
+  uint64_t EntryProbes = 0;
+  // Probes made early because the full frame's ratio was stale (StaleRatio).
+  uint64_t StaleProbes = 0;
   uint64_t LevelChanges = 0;
+  // Scene entries (NoteEntry) and the in-between decisions of their entry
+  // windows that stayed below the preferred level: the time at 30 after an
+  // entry (both counted with config/pacer_entry_recover off too, for A/B).
+  uint64_t Entries = 0;
+  uint64_t EntryBelowDecisions = 0;
 };
 
 class InterpolationPacingGovernor {
 public:
   // pairBudgetMs: two presentation periods (33.3 ms at 60 Hz).
   // reducedAvailable: the backend accepted the reduced scale.
+  // Everything but the cumulative Stats starts over (a new rate applied at
+  // once, oot3d_native_rate_pacing.h): as a start at that rate.
   void Configure(const InterpolationPacingConfig &config, double pairBudgetMs,
                  float baseScale, bool reducedAvailable) noexcept {
     mConfig = config;
@@ -225,9 +303,17 @@ public:
         0.35 + 0.65 * pixelRatio;
     mRatio[static_cast<size_t>(InterpolatedSampleLevel::Dropped)] = 0.1;
     mMeasured = {};
+    mStepCostMs = 0.0;
     mProbing.reset();
+    mProbeAge = 0U;
     mBelowPreferred = 0U;
     mOverBudget = 0U;
+    mFailedProbes = 0U;
+    mStaleFailures = 0U;
+    mProbingStale = false;
+    mEntryLeft = 0U;
+    mEntryWork = false;
+    mRatioAge = {};
     mLevel = PreferredLevel();
   }
 
@@ -241,8 +327,20 @@ public:
   // The level of the next in-between frame.
   [[nodiscard]] InterpolatedSampleLevel Decide() noexcept {
     const auto preferred = PreferredLevel();
+    // The entry window counts in-between decisions (NoteEntry).
+    const bool entry = mEntryLeft != 0U;
+    if (entry)
+      --mEntryLeft;
+    // Decisions since each level's ratio was last measured (a stale ratio).
+    for (auto &age : mRatioAge)
+      age = age < UINT32_MAX ? age + 1U : age;
+    const auto decided = [&](InterpolatedSampleLevel level, bool probe) {
+      if (entry && level != preferred)
+        ++mStats.EntryBelowDecisions;
+      return Commit(level, probe);
+    };
     if (mStepCostMs <= 0.0) {
-      return Commit(preferred, false);
+      return decided(preferred, false);
     }
     const double budget = mDecisionBudgetMs;
     const auto index = [](InterpolatedSampleLevel level) {
@@ -293,27 +391,134 @@ public:
     // up once (at once if it was never measured), unless it clearly cannot
     // fit. A probe's cost arrives some frames later (GPU timestamps): one at
     // a time, and one whose cost never came expires.
-    if (mProbing.has_value() && ++mProbeAge > 8U)
+    if (mProbing.has_value() && ++mProbeAge > 8U) {
       mProbing.reset();
+      mProbingStale = false;
+    }
     if (chosen != preferred && !mProbing.has_value()) {
       auto probe = static_cast<InterpolatedSampleLevel>(index(chosen) - 1U);
       if (probe == InterpolatedSampleLevel::Reduced && !mReducedAvailable)
         probe = InterpolatedSampleLevel::Full;
-      if (++mBelowPreferred >= mConfig.ProbeInterval ||
-          !mMeasured[index(probe)]) {
+      const double probePair = mStepCostMs + Estimate(probe);
+      // config/pacer_entry_recover: sooner after an entry once its known
+      // work is done, when the pair is close to fitting; later after each
+      // failed probe.
+      const bool entryProbe = mConfig.EntryRecover && entry && !mEntryWork &&
+                              probePair <= mConfig.EntryProbeFraction * budget;
+      // A stale ratio (config/pacer_entry_recover): the full frame's ratio
+      // is above FreshRatio, unmeasured for StaleAfterNow() decisions, and
+      // with FreshRatio the pair would fit: probed now, bypassing the
+      // interval and the hopeless limit (the estimate is what is in doubt).
+      const bool stale = StaleRatio(probe, budget);
+      const bool due = ++mBelowPreferred >= ProbeIntervalNow(entryProbe) ||
+                       !mMeasured[index(probe)];
+      if (due || stale) {
         mBelowPreferred = 0U;
         if (index(probe) >= index(preferred) &&
-            mStepCostMs + Estimate(probe) <= 1.25 * budget) {
+            (probePair <= 1.25 * budget || stale)) {
           ++mStats.Probes;
+          if (entryProbe)
+            ++mStats.EntryProbes;
+          if (stale && !due)
+            ++mStats.StaleProbes;
+          mProbingStale = stale;
+          mRatioAge[index(probe)] = 0U;
           mProbing = probe;
           mProbeAge = 0U;
-          return Commit(probe, true);
+          return decided(probe, true);
         }
       }
     } else if (chosen == preferred) {
       mBelowPreferred = 0U;
+      mFailedProbes = 0U;
+      mStaleFailures = 0U;
     }
-    return Commit(chosen, false);
+    return decided(chosen, false);
+  }
+
+  // A scene entry (render thread, before the new scene's first frame): the
+  // next EntryDecisions in-between decisions are its entry window.
+  void NoteEntry() noexcept {
+    ++mStats.Entries;
+    mEntryLeft = mConfig.EntryDecisions;
+    mEntryWork = false;
+    if (mConfig.EntryRecover)
+      mFailedProbes = 0U;
+  }
+
+  // Known entry work still running (render thread, once a frame in an
+  // entry window: the HD pack's preload of the scene, grass placements in
+  // the making). While it runs, the probes keep the normal schedule (a probe
+  // then mostly fails); when it ends, the first entry probe comes
+  // EntryWorkSettle decisions later (the decoded images still go up to the
+  // GPU in the next frames), then every EntryProbeInterval decisions,
+  // doubled per failed probe. Without the signal (never pending) the entry
+  // probes run from the entry on.
+  void SetEntryWork(bool pending) noexcept {
+    if (pending == mEntryWork)
+      return;
+    mEntryWork = pending;
+    if (!pending && mEntryLeft != 0U && mConfig.EntryRecover) {
+      mFailedProbes = 0U;
+      mBelowPreferred = mConfig.EntryProbeInterval > kEntryWorkSettle
+                            ? mConfig.EntryProbeInterval - kEntryWorkSettle
+                            : 0U;
+    }
+  }
+  static constexpr uint32_t kEntryWorkSettle = 3U;
+
+  // Decisions below the preferred level between two probes: ProbeInterval,
+  // or EntryProbeInterval for an entry probe, doubled per failed probe in a
+  // row up to MaxProbeInterval, in an entry window up to ProbeInterval
+  // (never sparser than the former schedule there). Without
+  // config/pacer_entry_recover: always ProbeInterval.
+  [[nodiscard]] uint32_t ProbeIntervalNow(bool entryProbe) const noexcept {
+    if (!mConfig.EntryRecover)
+      return mConfig.ProbeInterval;
+    const uint32_t base = std::max<uint32_t>(
+        1U, entryProbe ? mConfig.EntryProbeInterval : mConfig.ProbeInterval);
+    const uint32_t cap = std::max(
+        base, entryProbe ? mConfig.ProbeInterval : mConfig.MaxProbeInterval);
+    uint64_t interval = base;
+    for (uint32_t failed = 0U; failed < mFailedProbes && interval < cap;
+         ++failed)
+      interval *= 2U;
+    return static_cast<uint32_t>(std::min<uint64_t>(interval, cap));
+  }
+  [[nodiscard]] uint32_t FailedProbesInRow() const noexcept {
+    return mFailedProbes;
+  }
+  [[nodiscard]] bool InEntry() const noexcept { return mEntryLeft != 0U; }
+
+  // Decisions a ratio above FreshRatio stays unmeasured before a stale
+  // probe: StaleRatioDecisions, doubled per failed stale probe in a row up
+  // to MaxProbeInterval (a ratio that really is that high is not re-probed
+  // every second). Failures of the regular probes do not count: they were
+  // measured in the heavier view the falling step has left.
+  [[nodiscard]] uint32_t StaleAfterNow() const noexcept {
+    const uint32_t base = std::max<uint32_t>(1U, mConfig.StaleRatioDecisions);
+    const uint32_t cap = std::max(base, mConfig.MaxProbeInterval);
+    uint64_t after = base;
+    for (uint32_t failed = 0U; failed < mStaleFailures && after < cap; ++failed)
+      after *= 2U;
+    return static_cast<uint32_t>(std::min<uint64_t>(after, cap));
+  }
+  // Whether the full level's ratio is stale (see Decide): only for the full
+  // level (the reduced one has no "fresh" value) and only where a fresh
+  // ratio would bring it back, so a view that is too heavy (step above
+  // 0.97 x budget / (1 + FreshRatio), 15.4 ms at 60 FPS) never gets one.
+  [[nodiscard]] bool StaleRatio(InterpolatedSampleLevel level,
+                                double budget) const noexcept {
+    const auto index = static_cast<size_t>(level);
+    return mConfig.EntryRecover && level == InterpolatedSampleLevel::Full &&
+           mMeasured[index] && mRatio[index] > mConfig.FreshRatio &&
+           mRatioAge[index] >= StaleAfterNow() &&
+           mStepCostMs * (1.0 + mConfig.FreshRatio) <=
+               mConfig.RecoverFraction * budget;
+  }
+  // Decisions since the level's ratio was last measured (drawn or probed).
+  [[nodiscard]] uint32_t RatioAge(InterpolatedSampleLevel level) const noexcept {
+    return mRatioAge[static_cast<size_t>(level)];
   }
 
   // config/fps60_mode (oot3d_native_cadence_governor.h): with "adaptive" the
@@ -360,6 +565,20 @@ public:
       mProbing.reset();
       mRatio[index] = std::min(ratio, 2.0 * mRatio[index]);
       mMeasured[index] = true;
+      mRatioAge[index] = 0U;
+      // Judged as the next decision will: a probe whose pair does not fit
+      // with the recovery margin leaves the level below (a failed probe).
+      if (mStepCostMs + Estimate(level) <=
+          mConfig.RecoverFraction * mDecisionBudgetMs) {
+        mFailedProbes = 0U;
+        mStaleFailures = 0U;
+      } else {
+        ++mFailedProbes;
+        ++mStats.FailedProbes;
+        if (mProbingStale)
+          ++mStaleFailures;
+      }
+      mProbingStale = false;
       return;
     }
     // One sample counts at most twice the average (a hitch must not keep the
@@ -369,6 +588,7 @@ public:
     mRatio[index] =
         mMeasured[index] ? (3.0 * mRatio[index] + ratio) / 4.0 : ratio;
     mMeasured[index] = true;
+    mRatioAge[index] = 0U;
   }
 
   [[nodiscard]] double Estimate(InterpolatedSampleLevel level) const noexcept {
@@ -423,6 +643,17 @@ private:
   uint32_t mProbeAge = 0U;
   uint32_t mBelowPreferred = 0U;
   uint32_t mOverBudget = 0U;
+  // config/pacer_entry_recover: failed probes in a row (the back-off) and
+  // the in-between decisions left in the entry window.
+  uint32_t mFailedProbes = 0U;
+  // Failed stale probes in a row (StaleAfterNow) and whether the probe in
+  // flight is one.
+  uint32_t mStaleFailures = 0U;
+  bool mProbingStale = false;
+  uint32_t mEntryLeft = 0U;
+  bool mEntryWork = false; // SetEntryWork
+  // Decisions since each level's ratio was measured (StaleRatio).
+  std::array<uint32_t, 3> mRatioAge{};
   InterpolationPacingStats mStats{};
 };
 

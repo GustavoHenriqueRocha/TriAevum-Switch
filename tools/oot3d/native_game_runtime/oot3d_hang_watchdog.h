@@ -1,25 +1,25 @@
 #pragma once
 
-// Watchdog de travamento (diagnóstico; oot3d_hang_watchdog.cpp).
+// Hang watchdog (diagnostics; oot3d_hang_watchdog.cpp).
 //
-// Cada thread que importa (jogo, render, planos PICA, áudio) tem um "slot"
-// com a etapa em que está e um contador de progresso. Marcar uma etapa é um
-// store relaxed no slot da própria thread (sem read-modify-write, sem
-// barreira); o progresso é um load + store da dona (quadro do jogo, comando
-// da render thread). Nada disso fica por draw.
+// Each thread that matters (game, render, PICA plans, audio) has a "slot"
+// with the stage it is in and a progress counter. Marking a stage is a
+// relaxed store into the thread's own slot (no read-modify-write, no
+// barrier); progress is a load + store by the owner (game frame, render
+// thread command). None of this is per draw.
 //
-// No Switch uma thread de serviço (0x3B) acorda a cada ~1 s; se o jogo ou a
-// render thread ficar mais de 3 s sem progresso (com o app em foco), grava
-// UMA vez sdmc:/switch/oot3dre/logs/hang.txt pela API do FS da libnx (sem
-// malloc: o travamento pode ser justamente o lock do malloc), com flush: a
-// etapa e o progresso de cada thread, PC/LR/FP e uma cadeia de retorno de
-// cada thread registrada (pausada por um instante com svcSetThreadActivity,
-// se o NPDM permitir), a última chamada de serviço e os contadores de sync.
-// Quando as threads voltam a andar, acrescenta "recuperou após N ms" e o
-// watchdog se rearma. config/no_hang_watchdog desliga.
+// On Switch a service thread (0x3B) wakes every ~1 s; if the game or the
+// render thread goes more than 3 s without progress (with the app in focus), it writes
+// sdmc:/switch/oot3dre/logs/hang.txt ONCE through libnx's FS API (no
+// malloc: the hang may be the malloc lock itself), with flush: the
+// stage and progress of each thread, PC/LR/FP and a return chain for
+// each registered thread (paused for an instant with svcSetThreadActivity,
+// if the NPDM allows it), the last service call and the sync counters.
+// When the threads move again, it appends "recovered after N ms" and the
+// watchdog rearms. config/no_hang_watchdog disables it.
 //
-// Fora do Switch só os marcadores existem (iguais, baratos) e a política de
-// detecção, testável no host (oot3d_hang_watchdog_tests).
+// Outside Switch only the markers exist (identical, cheap) plus the detection
+// policy, testable on the host (oot3d_hang_watchdog_tests).
 
 #include <atomic>
 #include <cstddef>
@@ -31,21 +31,21 @@ enum class Thread : uint8_t { Game, Render, PicaPlan, HostAudio, SdlAudio, Count
 
 enum class Stage : uint8_t {
     Unknown,
-    // thread do jogo
+    // game thread
     FrameBegin,
     GuestRefresh,
     PresentVisual,
     UiSubmit,
     PresentSubmit,
     FrameEnd,
-    PerfWindow,      // montando/gravando a linha do perf.txt
-    PerfClocks,      // IPC do sys-clk
-    PerfHeapWalk,    // varredura do heap (config/heap_check_windows)
-    PerfFileClose,   // fechando o perf.txt (escrita no SD)
-    // esperas no NativeRenderCommandStream (thread que submete)
+    PerfWindow,      // building/writing the perf.txt line
+    PerfClocks,      // sys-clk IPC
+    PerfHeapWalk,    // heap walk (config/heap_check_windows)
+    PerfFileClose,   // closing perf.txt (SD write)
+    // waits in NativeRenderCommandStream (submitting thread)
     WaitFramesInFlight,
     WaitDrain,
-    SyncCommand,     // comando síncrono (Run) na thread que submete
+    SyncCommand,     // synchronous command (Run) on the submitting thread
     // render thread
     RenderIdle,
     RenderCommand,
@@ -76,15 +76,15 @@ constexpr const char* StageName(uint8_t stage) noexcept {
 struct Slot {
     std::atomic<uint8_t> CurrentStage{0};
     std::atomic<uint8_t> Bound{0};
-    std::atomic<uint32_t> NativeHandle{0};  // handle da thread no Switch
+    std::atomic<uint32_t> NativeHandle{0};  // thread handle on Switch
     std::atomic<uint64_t> Progress{0};
 };
 
 inline Slot gSlots[static_cast<size_t>(Thread::Count)];
 inline thread_local Slot* tSlot = nullptr;
 
-// A thread que chama passa a ser `thread` (oot3d_switch_threads.cpp chama no
-// PlaceSwitchThread de cada papel).
+// The calling thread becomes `thread` (oot3d_switch_threads.cpp calls this in
+// PlaceSwitchThread for each role).
 inline void Bind(Thread thread, uint32_t nativeHandle) noexcept {
     Slot& slot = gSlots[static_cast<size_t>(thread)];
     slot.NativeHandle.store(nativeHandle, std::memory_order_relaxed);
@@ -98,14 +98,14 @@ inline Stage CurrentStage() noexcept {
                            : Stage::Unknown;
 }
 
-// Um store relaxed; nada numa thread sem slot.
+// One relaxed store; nothing on a thread without a slot.
 inline void Mark(Stage stage) noexcept {
     if (Slot* slot = tSlot) {
         slot->CurrentStage.store(static_cast<uint8_t>(stage), std::memory_order_relaxed);
     }
 }
 
-// Progresso da thread dona (load + store, sem RMW).
+// Progress of the owning thread (load + store, no RMW).
 inline void Advance() noexcept {
     if (Slot* slot = tSlot) {
         slot->Progress.store(slot->Progress.load(std::memory_order_relaxed) + 1U,
@@ -113,7 +113,7 @@ inline void Advance() noexcept {
     }
 }
 
-// Etapa durante um escopo; devolve a anterior na saída.
+// Stage during a scope; restores the previous one on exit.
 class StageScope {
   public:
     explicit StageScope(Stage stage) noexcept : mSlot(tSlot) {
@@ -135,13 +135,13 @@ class StageScope {
     uint8_t mPrevious = 0;
 };
 
-// Relógio do watchdog: ticks do contador do sistema no Switch (19,2 MHz),
-// nanossegundos no host.
+// Watchdog clock: system counter ticks on Switch (19.2 MHz),
+// nanoseconds on the host.
 uint64_t NowTicks() noexcept;
 uint64_t TicksToMicroseconds(uint64_t ticks) noexcept;
 
-// Última chamada de serviço (IPC) feita pelo app: nome (literal estático),
-// início e fim (0 = em andamento).
+// Last service call (IPC) made by the app: name (static literal),
+// start and end (0 = in progress).
 struct ServiceCallRecord {
     std::atomic<const char*> Name{nullptr};
     std::atomic<uint64_t> StartTicks{0};
@@ -167,10 +167,10 @@ class ServiceCallScope {
     ServiceCallScope& operator=(const ServiceCallScope&) = delete;
 };
 
-// ---- texto sem malloc ---------------------------------------------------------
+// ---- malloc-free text ---------------------------------------------------------
 
-// Acumula texto num buffer fixo; nunca aloca (o relatório é montado com o
-// heap possivelmente travado). Trunca em silêncio quando enche.
+// Accumulates text in a fixed buffer; never allocates (the report is built with
+// the heap possibly locked). Silently truncates when full.
 class Text {
   public:
     Text(char* buffer, size_t capacity) noexcept : mBuffer(buffer), mCapacity(capacity) {
@@ -194,12 +194,12 @@ class Text {
     size_t mSize = 0U;
 };
 
-// ---- política de detecção (pura, testada no host) ---------------------------
+// ---- detection policy (pure, tested on the host) ----------------------------
 
 struct StallPolicy {
     uint64_t StallMilliseconds = 3000U;
-    // Um intervalo do watchdog bem maior que o seu período = o processo ficou
-    // suspenso (sleep do console): recomeça a contagem sem acusar.
+    // A watchdog interval much longer than its period = the process was
+    // suspended (console sleep): restarts the count without flagging.
     uint64_t SuspendGapMilliseconds = 2500U;
 };
 
@@ -207,21 +207,21 @@ class StallTracker {
   public:
     struct Observation {
         uint64_t NowMilliseconds = 0;
-        // Fora de foco (HOME, overlay) ou desligado: nada conta.
+        // Out of focus (HOME, overlay) or disabled: nothing counts.
         bool Active = true;
-        // Por thread: vigiada (registrada e relevante) e progresso atual.
+        // Per thread: watched (registered and relevant) and current progress.
         bool Watched[static_cast<size_t>(Thread::Count)] = {};
         uint64_t Progress[static_cast<size_t>(Thread::Count)] = {};
     };
     enum class Verdict : uint8_t { None, Hang, Recovered };
     struct Result {
         Verdict Kind = Verdict::None;
-        // Hang: maior tempo parado entre as threads vigiadas; Recovered:
-        // quanto durou o travamento relatado.
+        // Hang: longest stall among the watched threads; Recovered:
+        // how long the reported hang lasted.
         uint64_t Milliseconds = 0;
-        // Hang: bit por thread parada há >= StallMilliseconds.
+        // Hang: bit per thread stalled for >= StallMilliseconds.
         uint32_t StalledMask = 0;
-        // Tempo parado de cada thread no momento da observação.
+        // Stall time of each thread at observation time.
         uint64_t StalledFor[static_cast<size_t>(Thread::Count)] = {};
     };
 
@@ -241,25 +241,25 @@ class StallTracker {
     uint64_t mProgressAtReport[static_cast<size_t>(Thread::Count)] = {};
 };
 
-// ---- ciclo de vida (Switch; no host não faz nada) ---------------------------
+// ---- lifecycle (Switch; no-op on the host) ----------------------------------
 
-// Informação extra no relatório (contadores de sync da sessão). Chamada pela
-// thread do watchdog: não pode bloquear (só try_lock) nem alocar.
+// Extra report info (session sync counters). Called by the
+// watchdog thread: must not block (try_lock only) or allocate.
 using ExtraReporter = void (*)(void* user, Text& text);
 
-// Liga o watchdog (uma thread) se config/no_hang_watchdog não existir.
+// Starts the watchdog (one thread) if config/no_hang_watchdog does not exist.
 void Start(ExtraReporter extra, void* user) noexcept;
-// Para e junta a thread (antes de a sessão destruir o que `extra` lê).
+// Stops and joins the thread (before the session destroys what `extra` reads).
 void Stop() noexcept;
 [[nodiscard]] bool Running() noexcept;
-// Relatórios gravados nesta execução (travamentos + eventos).
+// Reports written in this run (hangs + events).
 [[nodiscard]] uint32_t ReportsWritten() noexcept;
-// Grava já um relatório com `title`, `details` e o estado de todas as
-// threads (heap corrompido achado pela varredura, por exemplo). Pode ser
-// chamado de qualquer thread; a que chama não é pausada.
+// Writes a report right now with `title`, `details` and the state of all
+// threads (corrupted heap found by the walk, for example). May be
+// called from any thread; the caller is not paused.
 void ReportEvent(const char* title, const char* details) noexcept;
 
-// Registradores da thread que falhou (handler de exceção da libnx).
+// Registers of the faulting thread (libnx exception handler).
 struct FaultFrame {
     uint64_t Pc = 0;
     uint64_t Lr = 0;
@@ -270,11 +270,11 @@ struct FaultFrame {
     uint64_t X2 = 0;
     uint64_t X19 = 0;
 };
-// Relatório de exceção: `details`, PC/LR e a cadeia de frames da thread que
-// falhou (chamada nela mesma, na pilha de exceção) e o estado das outras.
-// Não aloca; funciona com o watchdog desligado (config/no_hang_watchdog).
+// Exception report: `details`, PC/LR and the frame chain of the faulting
+// thread (called on it, on the exception stack) and the state of the others.
+// Does not allocate; works with the watchdog disabled (config/no_hang_watchdog).
 void ReportFault(const char* title, const char* details, const FaultFrame& frame) noexcept;
-// Endereço de código como nos relatórios: 0x... e o offset no NRO (+0x...).
+// Code address as in the reports: 0x... and the offset in the NRO (+0x...).
 void AppendCodeAddress(Text& text, uint64_t address) noexcept;
 
 } // namespace Oot3dNativeGame::HangWatch

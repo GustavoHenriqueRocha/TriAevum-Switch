@@ -4,6 +4,8 @@
 
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/backends/gfx_deko3d_log_line.h"
+#include "fast/oot3d/player_shadow.h"
 
 #include <switch.h>
 
@@ -67,7 +69,7 @@ void LogWriterLoop() {
     }
 }
 
-// Quanto o present thread levou no último nwindowQueueBuffer (spikes.txt).
+// How long the present thread took in the last nwindowQueueBuffer (spikes.txt).
 std::atomic<uint64_t> gLastQueueBufferNs{0};
 
 // dkperf: written by the render thread, taken by the perf window (game
@@ -137,19 +139,63 @@ constexpr size_t kGpuFrameRing = 8U;
 std::array<Fast::Deko3dGpuFrame, kGpuFrameRing> gGpuFrames{};
 size_t gGpuFrameHead = 0U;
 size_t gGpuFrameCount = 0U;
+// Deko3dNoteRenderHold / Deko3dTakeRenderHoldMicros (render thread only).
+uint64_t gRenderHoldMicros = 0U;
 std::atomic<uint64_t> gPerfSubmits{0};
 std::atomic<uint64_t> gPerfCommandBytes{0};
 std::atomic<bool> gPerfSyncCheck{false};
+// NotePresentedTopScene: width << 32 | height << 2 | line samples (0: none yet).
+std::atomic<uint64_t> gPerfTopScene{0};
+std::atomic<uint64_t> gPerfImageBarriers{0};
+// config/deko3d_zcull: the mode and the per-frame ZCULL counters
+// (DkCounter_ZcullStats: four raw 32-bit hardware counters, ZcullStats0-3,
+// reset at frame top), summed over the window.
+std::atomic<bool> gPerfZcull{false};
+std::array<std::atomic<uint64_t>, 4> gPerfZcullStats{};
+std::atomic<uint64_t> gPerfZcullFrames{0};
+// ZCULL invalidations around draws whose program writes gl_FragDepth.
+std::atomic<uint64_t> gPerfZcullInvalidates{0};
+// dkperf fs_px / passed_px: DkCounter_FragmentShaderInvocations and
+// DkCounter_SamplesPassed from frame top to scene end (before the acquire),
+// summed over the frames that reported them; opaque_ms: frame top to the
+// first translucent world draw (MarkOpaqueEnd), over the frames that had one.
+std::atomic<uint64_t> gPerfFsInvocations{0};
+std::atomic<uint64_t> gPerfSamplesPassed{0};
+std::atomic<uint64_t> gPerfCountedFrames{0};
+std::atomic<uint64_t> gPerfOpaqueNs{0};
+std::atomic<uint64_t> gPerfOpaqueFrames{0};
+// shadow_<method>_ms: the frame's first Simple shadow draw point (MarkShadowStart
+// to MarkShadowEnd), by the method that drew it, over the frames that had one.
+std::array<std::atomic<uint64_t>, Oot3d::kPlayerShadowMethodCount> gPerfShadowNs{};
+std::array<std::atomic<uint64_t>, Oot3d::kPlayerShadowMethodCount> gPerfShadowMaxNs{};
+std::array<std::atomic<uint64_t>, Oot3d::kPlayerShadowMethodCount> gPerfShadowFrames{};
+// config/deko3d_clear_draw: on, and the depth resets by what they became.
+std::atomic<bool> gPerfClearDraw{false};
+std::atomic<uint64_t> gPerfResets{0};
+std::atomic<uint64_t> gPerfDepthClears{0};
+std::atomic<uint64_t> gPerfFullClears{0};
 
 // Report timestamps count GPU ticks (614.4 MHz on the Tegra X1).
 constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
     return ticks * 625U / 384U;
 }
 constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
-// Per slot: frame top, scene end (before the acquire), after the acquire, frame end.
+// Per slot: frame top, scene end (before the acquire), after the acquire, frame end,
+// then the ZCULL counters (config/deko3d_zcull, four words), the fragment
+// shader invocations and samples passed at frame top and at scene end, the
+// timestamp at the first translucent world draw and the two around the first
+// Simple shadow draw point.
 // The acquire makes the GPU wait for the display to release the image; that wait
 // is not GPU work, so busy = scene + tail.
-constexpr uint32_t kTimestampSlotBytes = 4U * kTimestampBytes;
+constexpr uint32_t kZcullStatsOffset = 4U * kTimestampBytes;
+constexpr uint32_t kFsTopOffset = 5U * kTimestampBytes;
+constexpr uint32_t kFsSceneOffset = 6U * kTimestampBytes;
+constexpr uint32_t kPassedTopOffset = 7U * kTimestampBytes;
+constexpr uint32_t kPassedSceneOffset = 8U * kTimestampBytes;
+constexpr uint32_t kOpaqueOffset = 9U * kTimestampBytes;
+constexpr uint32_t kShadowStartOffset = 10U * kTimestampBytes;
+constexpr uint32_t kShadowEndOffset = 11U * kTimestampBytes;
+constexpr uint32_t kTimestampSlotBytes = 12U * kTimestampBytes;
 static_assert(kFramesInFlight * kTimestampSlotBytes <= DK_MEMBLOCK_ALIGNMENT, "timestamps fit one block");
 
 uint64_t NowNanoseconds() {
@@ -163,14 +209,14 @@ void DebugCallback(void*, const char* context, DkResult result, const char* mess
 } // namespace
 
 void Log(const char* format, ...) {
-    char line[512];
     va_list args;
     va_start(args, format);
-    std::vsnprintf(line, sizeof(line), format, args);
+    // The queue holds the line's string either way; never cut (FormatLogLine).
+    std::string line = FormatLogLine(format, args);
     va_end(args);
     {
         const std::lock_guard lock(gLogMutex);
-        gLogQueue.emplace_back(line);
+        gLogQueue.push_back(std::move(line));
         if (!gLogThread.joinable() && !gLogStop) {
             gLogThread = std::thread(LogWriterLoop);
         }
@@ -190,6 +236,26 @@ void FlushLog() {
     // Lines queued after the writer left (or with no writer at all).
     const std::lock_guard lock(gLogMutex);
     WriteLogLines(gLogQueue);
+}
+
+void NotePresentedTopScene(uint32_t width, uint32_t height, uint32_t lineSamples) {
+    gPerfTopScene.store(static_cast<uint64_t>(width) << 32U | static_cast<uint64_t>(height & 0x3FFFFFFFU) << 2U |
+                            (lineSamples & 3U),
+                        std::memory_order_relaxed);
+}
+
+void SetPerfClearDraw(bool enabled) {
+    gPerfClearDraw.store(enabled, std::memory_order_relaxed);
+}
+
+void NoteResetDraw(uint8_t action) {
+    gPerfResets.fetch_add(1, std::memory_order_relaxed);
+    if (action >= 1U) {
+        gPerfDepthClears.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (action >= 2U) {
+        gPerfFullClears.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 Device::~Device() {
@@ -282,10 +348,20 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     }
     dkSwapchainSetSwapInterval(mSwapchain, 1);
 
-    // One queue; zcull off (it lost tiles of decals in Aurora's renderer).
+    // One queue; ZCULL off by default (it lost tiles of decals in Aurora's
+    // renderer; deko3d also never sets ZCULL_TEST_MASK for programs that
+    // write gl_FragDepth, as Mesa does). config/deko3d_zcull turns it on
+    // (SWITCH_PORT.md, "ZCULL on deko3d").
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_zcull", "rb")) {
+        std::fclose(file);
+        mZcull = true;
+    }
     DkQueueMaker queueMaker;
     dkQueueMakerDefaults(&queueMaker, mDevice);
-    queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio | DkQueueFlags_DisableZcull;
+    queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio;
+    if (!mZcull) {
+        queueMaker.flags |= DkQueueFlags_DisableZcull;
+    }
     queueMaker.commandMemorySize = 1U << 20;
     queueMaker.flushThreshold = 128U << 10;
     // Shaders that spill need more than the default 2 KiB per warp
@@ -295,6 +371,19 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     if (mQueue == nullptr) {
         return fail("dkQueueCreate");
     }
+    Log("deko3d: zcull %s", mZcull ? "on (config/deko3d_zcull)" : "off");
+    gPerfZcull.store(mZcull, std::memory_order_relaxed);
+    // Colour compression of the images only the GPU reads (render-target
+    // colour, display images, mailbox images): their readers are the 3D,
+    // 2D and copy engines, which go through the compression-aware L2 like
+    // the depth images (compressed since the start, read back by the same
+    // copies for save states). Window images keep their own rule above: the
+    // display controller reads them. config/deko3d_compression "0": off.
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_compression", "rb")) {
+        mColorCompression = std::fgetc(file) != '0';
+        std::fclose(file);
+    }
+    Log("deko3d: colour compression %s", mColorCompression ? "on" : "off (config/deko3d_compression)");
 
     mCommandMemory = MakeBlock(kCommandSliceBytes * kFramesInFlight,
                                DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "command memory");
@@ -468,9 +557,19 @@ void Device::BeginFrame() {
     slot.CommandUsed = kCommandChunkBytes + kCommandGuardBytes;
     mStats.CommandBytes += kCommandChunkBytes;
     if (mTimestamps != nullptr) {
-        dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
-                              dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes);
+        const DkGpuAddr reports = dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes;
+        dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop, reports);
+        // Overdraw: fragment shader runs and samples that passed the depth
+        // and stencil tests, frame top to scene end (dkperf fs_px, passed_px).
+        dkCmdBufReportCounter(mCmd, DkCounter_FragmentShaderInvocations, reports + kFsTopOffset);
+        dkCmdBufReportCounter(mCmd, DkCounter_SamplesPassed, reports + kPassedTopOffset);
+        if (mZcull) {
+            dkCmdBufResetCounter(mCmd, DkCounter_ZcullStats);
+        }
     }
+    mOpaqueMarked = false;
+    mShadowMarked = false;
+    mShadowOpen = false;
     mWindowSlot = -1;
     mRecorded = false;
     mFrameOpen = true;
@@ -492,6 +591,10 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
     if (mWindowSlot < 0) {
         // The scene recorded so far goes to the GPU before the wait.
         if (mTimestamps != nullptr) {
+            const DkGpuAddr reports = dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes;
+            dkCmdBufReportCounter(mCmd, DkCounter_FragmentShaderInvocations, reports + kFsSceneOffset);
+            dkCmdBufReportCounter(mCmd, DkCounter_SamplesPassed, reports + kPassedSceneOffset);
+            mSlots[mSlot].Counted = true;
             dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
                                   dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kTimestampBytes);
         }
@@ -508,8 +611,8 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
             gLastSwap.AcquireMs = static_cast<float>(static_cast<double>(NowNanoseconds() - begin) / 1.0e6);
         } else {
         WaitPresent();
-        // spikes.txt: o render parado esperando o present thread devolver o
-        // nwindowQueueBuffer do quadro anterior (p6q: ~24 ms, quase toda janela).
+        // spikes.txt: the render stalled waiting for the present thread to return the
+        // previous frame's nwindowQueueBuffer (p6q: ~24 ms, almost the whole window).
         const uint64_t presentDone = NowNanoseconds();
         gLastSwap.WaitPresentMs = static_cast<float>(static_cast<double>(presentDone - begin) / 1.0e6);
         gLastSwap.QueueBufferMs = static_cast<float>(
@@ -553,6 +656,11 @@ void Device::EndFrame(AcquireHook hook) {
                               dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 3U * kTimestampBytes);
         slot.Timed = true;
         slot.Tag = std::exchange(gPendingTag, FrameTag{});
+        if (mZcull) {
+            dkCmdBufReportCounter(mCmd, DkCounter_ZcullStats,
+                                  dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kZcullStatsOffset);
+            slot.ZcullTimed = true;
+        }
     }
     dkCmdBufSignalFence(mCmd, &slot.Fence, true);
     const uint64_t submitBegin = NowNanoseconds();
@@ -669,6 +777,11 @@ void Device::QueuePresent(int windowSlot) {
 bool Device::CreateMailbox(const DkImageLayoutMaker& windowLayout) {
     DkImageLayoutMaker maker = windowLayout;
     maker.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    if (mColorCompression) {
+        // Only the scanout/UI draws write it and the present queue's copy
+        // into the (uncompressed) window image reads it: never the display.
+        maker.flags |= DkImageFlags_HwCompression;
+    }
     DkImageLayout layout;
     dkImageLayoutInitialize(&layout, &maker);
     const uint32_t alignment = dkImageLayoutGetAlignment(&layout);
@@ -835,6 +948,24 @@ void Device::WaitIdle() {
     }
 }
 
+void Device::WaitPresentIdle() {
+    if (!mPresentThreaded) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(mPresentMutex);
+    if (!mMailbox) {
+        mPresentDone.wait(lock, [this] { return !mPresentPending; });
+        return;
+    }
+    // The mailbox loop signals nothing per copy (no cost in the frame path):
+    // polled here, at most one display refresh plus the copy.
+    while (mMailboxPending >= 0 || mMailboxCopying >= 0) {
+        lock.unlock();
+        svcSleepThread(1'000'000LL);
+        lock.lock();
+    }
+}
+
 StreamSpan Device::Stream(uint32_t size, uint32_t alignment) {
     BeginFrame();
     FrameSlot& slot = mSlots[mSlot];
@@ -882,14 +1013,109 @@ void Device::CountSwapAcquire() {
     gSwapAcquires.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Device::CountImageBarrier() {
+    gPerfImageBarriers.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Device::InvalidateZcull() {
+    // InvalidateZcullNoWfi (deko3d 0.5 gpu_base.cpp): in order with the
+    // draws, no wait for idle.
+    dkCmdBufBarrier(mCmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+    gPerfZcullInvalidates.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Device::MarkOpaqueEnd() {
+    if (!mFrameOpen || mOpaqueMarked || mTimestamps == nullptr || mWindowSlot >= 0) {
+        return;
+    }
+    mOpaqueMarked = true;
+    // DkCounter_Timestamp: written once the work before it is done.
+    dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kOpaqueOffset);
+    mSlots[mSlot].OpaqueTimed = true;
+}
+
+void Device::MarkShadowStart() {
+    if (!mFrameOpen || mShadowMarked || mTimestamps == nullptr || mWindowSlot >= 0) {
+        return;
+    }
+    mShadowMarked = true;
+    mShadowOpen = true;
+    dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kShadowStartOffset);
+}
+
+void Device::MarkShadowEnd(uint32_t method) {
+    if (!mShadowOpen) {
+        return;
+    }
+    mShadowOpen = false;
+    dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kShadowEndOffset);
+    mSlots[mSlot].ShadowTimed = true;
+    mSlots[mSlot].ShadowMethod = method;
+}
+
 // After the slot's fence: its frame's timestamps are written.
 void Device::CollectTimestamps(uint32_t slotIndex) {
     FrameSlot& slot = mSlots[slotIndex];
-    if (!slot.Timed || mTimestamps == nullptr) {
+    if (mTimestamps == nullptr) {
+        return;
+    }
+    if (slot.ZcullTimed) {
+        slot.ZcullTimed = false;
+        uint32_t stats[4] = {};
+        std::memcpy(stats,
+                    static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes +
+                        kZcullStatsOffset,
+                    sizeof(stats));
+        for (size_t i = 0; i < 4U; ++i) {
+            gPerfZcullStats[i].fetch_add(stats[i], std::memory_order_relaxed);
+        }
+        gPerfZcullFrames.fetch_add(1, std::memory_order_relaxed);
+    }
+    const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes;
+    const auto value = [&](uint32_t offset, uint32_t word) {
+        uint64_t result = 0;
+        std::memcpy(&result, reports + offset + word * 8U, sizeof(result));
+        return result;
+    };
+    if (slot.Counted) {
+        slot.Counted = false;
+        const uint64_t fsTop = value(kFsTopOffset, 0U);
+        const uint64_t fsScene = value(kFsSceneOffset, 0U);
+        const uint64_t passedTop = value(kPassedTopOffset, 0U);
+        const uint64_t passedScene = value(kPassedSceneOffset, 0U);
+        if (fsScene >= fsTop && passedScene >= passedTop) {
+            gPerfFsInvocations.fetch_add(fsScene - fsTop, std::memory_order_relaxed);
+            gPerfSamplesPassed.fetch_add(passedScene - passedTop, std::memory_order_relaxed);
+            gPerfCountedFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (slot.OpaqueTimed) {
+        slot.OpaqueTimed = false;
+        const uint64_t top = value(0U, 1U);
+        const uint64_t opaque = value(kOpaqueOffset, 1U);
+        if (opaque > top) {
+            gPerfOpaqueNs.fetch_add(GpuTicksToNs(opaque - top), std::memory_order_relaxed);
+            gPerfOpaqueFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (slot.ShadowTimed) {
+        slot.ShadowTimed = false;
+        const uint64_t start = value(kShadowStartOffset, 1U);
+        const uint64_t end = value(kShadowEndOffset, 1U);
+        if (end >= start && slot.ShadowMethod < gPerfShadowNs.size()) {
+            const uint64_t ns = GpuTicksToNs(end - start);
+            gPerfShadowNs[slot.ShadowMethod].fetch_add(ns, std::memory_order_relaxed);
+            StoreMax(gPerfShadowMaxNs[slot.ShadowMethod], ns);
+            gPerfShadowFrames[slot.ShadowMethod].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (!slot.Timed) {
         return;
     }
     slot.Timed = false;
-    const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes;
     uint64_t t[4] = {};
     for (uint32_t i = 0; i < 4U; ++i) {
         std::memcpy(&t[i], reports + i * kTimestampBytes + 8U, sizeof(t[i]));
@@ -991,6 +1217,7 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
     const uint64_t busyMaxNs = gPerfBusyMaxNs.exchange(0, std::memory_order_relaxed);
     const double count = frames != 0U ? static_cast<double>(frames) : 1.0;
     const double splitCount = split != 0U ? static_cast<double>(split) : 1.0;
+    const uint64_t topScene = gPerfTopScene.load(std::memory_order_relaxed);
     std::ostringstream out;
     out << "dkperf host_frames=" << hostFrames << " frames=" << frames
         << " gpu_ms=" << static_cast<double>(gpuNs) / count / 1.0e6
@@ -1002,18 +1229,85 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " tail_ms=" << static_cast<double>(tailNs) / splitCount / 1.0e6
         << " submits_per_frame=" << static_cast<double>(submits) / count
         << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
+        << " image_barriers_per_frame="
+        << static_cast<double>(gPerfImageBarriers.exchange(0, std::memory_order_relaxed)) / count
         << CpuWaitReport("fence", gFenceWait) << CpuWaitReport("acquire", gAcquireWait)
         << CpuWaitReport("present", gPresentWait) << CpuWaitReport("submit", gSubmitWait)
         << CpuWaitReport("queue_buffer", gQueueBufferWait)
         << " swap_acquires=" << gSwapAcquires.exchange(0, std::memory_order_relaxed)
         << " mailbox_copies=" << gMailboxCopies.exchange(0, std::memory_order_relaxed)
         << " mailbox_dropped=" << gMailboxDropped.exchange(0, std::memory_order_relaxed)
+        << " top_w=" << (topScene >> 32U) << " top_h=" << ((topScene & 0xFFFFFFFFU) >> 2U)
+        << " top_line_samples=" << (topScene & 3U)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
-        << " build=" << kDeko3dBuildTag;
+        << " zcull=" << (gPerfZcull.load(std::memory_order_relaxed) ? 1 : 0);
+    {
+        // Overdraw, frame top to scene end: fragment shader runs and samples
+        // passing depth/stencil per pixel of the presented top scene
+        // (top_w x top_h; every scene target counts, the top one dominates);
+        // opaque_ms: frame top to the first translucent world draw (before
+        // grass), averaged over the frames that had one.
+        const uint64_t counted = gPerfCountedFrames.exchange(0, std::memory_order_relaxed);
+        const uint64_t fs = gPerfFsInvocations.exchange(0, std::memory_order_relaxed);
+        const uint64_t passed = gPerfSamplesPassed.exchange(0, std::memory_order_relaxed);
+        const uint64_t opaqueFrames = gPerfOpaqueFrames.exchange(0, std::memory_order_relaxed);
+        const uint64_t opaqueNs = gPerfOpaqueNs.exchange(0, std::memory_order_relaxed);
+        const double pixels = static_cast<double>(topScene >> 32U) * static_cast<double>((topScene & 0xFFFFFFFFU) >> 2U);
+        const double perPixel = counted != 0U && pixels > 0.0 ? 1.0 / (static_cast<double>(counted) * pixels) : 0.0;
+        out << " fs_px=" << static_cast<double>(fs) * perPixel << " passed_px=" << static_cast<double>(passed) * perPixel
+            << " opaque_ms="
+            << (opaqueFrames != 0U ? static_cast<double>(opaqueNs) / static_cast<double>(opaqueFrames) / 1.0e6 : 0.0);
+        // Simple shadow: its first draw point's GPU time per frame, by the
+        // method that drew it (only the methods seen in the window).
+        for (size_t method = 0; method < gPerfShadowNs.size(); ++method) {
+            const uint64_t shadowFrames = gPerfShadowFrames[method].exchange(0, std::memory_order_relaxed);
+            const uint64_t shadowNs = gPerfShadowNs[method].exchange(0, std::memory_order_relaxed);
+            const uint64_t shadowMaxNs = gPerfShadowMaxNs[method].exchange(0, std::memory_order_relaxed);
+            if (shadowFrames == 0U) {
+                continue;
+            }
+            const std::string_view word =
+                Oot3d::PlayerShadowMethodWord(static_cast<Oot3d::PlayerShadowMethod>(method));
+            out << " shadow_" << word << "_ms="
+                << static_cast<double>(shadowNs) / static_cast<double>(shadowFrames) / 1.0e6 << " shadow_" << word
+                << "_max_ms=" << static_cast<double>(shadowMaxNs) / 1.0e6 << " shadow_" << word
+                << "_frames=" << shadowFrames;
+        }
+        // config/deko3d_clear_draw: on/off, then per frame the depth resets
+        // seen and those turned into a depth clear (full_clears: the colour
+        // cleared too and the draw skipped), whether on or not.
+        out << " clear_draw=" << (gPerfClearDraw.load(std::memory_order_relaxed) ? 1 : 0)
+            << " resets=" << static_cast<double>(gPerfResets.exchange(0, std::memory_order_relaxed)) / count
+            << " depth_clears=" << static_cast<double>(gPerfDepthClears.exchange(0, std::memory_order_relaxed)) / count
+            << " full_clears=" << static_cast<double>(gPerfFullClears.exchange(0, std::memory_order_relaxed)) / count;
+    }
+    if (gPerfZcull.load(std::memory_order_relaxed)) {
+        // Raw ZcullStats0-3 per frame (hardware counters, meaning not
+        // documented by deko3d: compare runs, all zero = ZCULL idle).
+        const uint64_t zcullFrames = gPerfZcullFrames.exchange(0, std::memory_order_relaxed);
+        const double zcullCount = zcullFrames != 0U ? static_cast<double>(zcullFrames) : 1.0;
+        out << " zcull_stats=";
+        for (size_t i = 0; i < gPerfZcullStats.size(); ++i) {
+            out << (i == 0U ? "" : "/")
+                << static_cast<uint64_t>(static_cast<double>(gPerfZcullStats[i].exchange(0, std::memory_order_relaxed)) /
+                                         zcullCount);
+        }
+        // Invalidations around gl_FragDepth draws (decals), per frame.
+        out << " zcull_invalidates="
+            << static_cast<double>(gPerfZcullInvalidates.exchange(0, std::memory_order_relaxed)) / count;
+    }
+    out << " build=" << kDeko3dBuildTag;
     return out.str();
 }
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds) {
     Deko3d::gPendingTag = {true, kind, cpuMilliseconds};
+}
+
+void Deko3dNoteRenderHold(uint64_t micros) {
+    Deko3d::gRenderHoldMicros += micros;
+}
+uint64_t Deko3dTakeRenderHoldMicros() {
+    return std::exchange(Deko3d::gRenderHoldMicros, 0U);
 }
 
 Deko3dSwapTimes Deko3dLastSwapTimes() {

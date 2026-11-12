@@ -1,29 +1,122 @@
 #pragma once
 
-// Clocks atuais do console para logs/perf.txt (oot3d_switch_clocks.cpp).
+// The console's current clocks for logs/perf.txt and the performance overlay
+// (oot3d_switch_clocks.cpp).
 //
-// Somente leitura: os MHz vêm do IPC público do sys-clk ("sys:clk",
-// GetCurrentContext), o modo portátil/dock e o modo de desempenho vêm do
-// applet (valores que a libnx já guarda, sem IPC). O app nunca abre clkrst
-// nem pcv e nunca altera clock (SwitchWakerHD issue #33: clkrst no app
-// travou o console ao acordar do sleep; quem muda clock é o sys-clk).
+// The MHz come from sys-clk's public IPC ("sys:clk", GetCurrentContext);
+// without sys-clk they come from the performance configuration HOS has
+// applied (AM ICommonStateGetter GetCurrentPerformanceConfiguration, mapped
+// by the table below: the stock clocks, not a measurement). While CPU High is
+// on (oot3d_switch_performance.h, config/cpu_performance) they are the rates
+// clkrst reports, read by oot3d_switch_performance.cpp (one short session per
+// read). The handheld/dock mode and the performance mode come from the
+// applet (values libnx already keeps, no IPC). This reader never opens clkrst
+// nor pcv itself: with CPU Standard (the default) the app opens neither
+// (SwitchWakerHD issue #33: CPU 1224 MHz set through clkrst from the app
+// froze Erista consoles on wake from sleep; oot3d_switch_performance.cpp
+// says how CPU High avoids what it did).
 //
-// Fora do Switch tudo aqui é vazio.
+// Off the Switch the readings are empty; the table and the reading type are
+// plain data, so host tests use them.
 
+#include <cstdint>
 #include <string>
 
 namespace Oot3dNativeGame {
 
+enum class SwitchClockSource : uint8_t {
+  None,         // nothing read yet, or neither sys-clk nor the configuration answered
+  SysClkReal,   // sys-clk realFreqs (measured, API >= 2)
+  SysClkTarget, // sys-clk freqs (the clocks it asked for)
+  Stock,        // the HOS performance configuration, through the table below
+  Clkrst,       // clkrst GetClockRate (while CPU High is on)
+};
+
+// perf.txt `clk_src=` names.
+constexpr const char *SwitchClockSourceName(SwitchClockSource source) {
+  switch (source) {
+  case SwitchClockSource::SysClkReal: return "sysclk_real";
+  case SwitchClockSource::SysClkTarget: return "sysclk";
+  case SwitchClockSource::Stock: return "stock";
+  case SwitchClockSource::Clkrst: return "clkrst";
+  case SwitchClockSource::None: break;
+  }
+  return "none";
+}
+
+// A MHz that couldn't be read is -1. PerformanceConfiguration is the raw ID
+// for SwitchClockSource::Stock (an ID missing from the table keeps -1 MHz).
+struct SwitchClockReading {
+  int CpuMhz = -1;
+  int GpuMhz = -1;
+  int MemMhz = -1;
+  SwitchClockSource Source = SwitchClockSource::None;
+  uint32_t PerformanceConfiguration = 0;
+
+  bool operator==(const SwitchClockReading &) const = default;
+};
+
+// Performance configuration -> clocks, from switchbrew's PTM services page
+// (https://switchbrew.org/wiki/PTM_services#PerformanceConfiguration), in kHz
+// so 307.2 and 1331.2 stay exact. 0x10001 and 0x20000 exist only docked,
+// 0x10002 and 0x20002 only on SDEV units; 0x92220009-C are 7.0.0+ (also the
+// minimum firmware of GetCurrentPerformanceConfiguration).
+struct StockPerformanceConfiguration {
+  uint32_t Id;
+  uint32_t CpuKhz;
+  uint32_t GpuKhz;
+  uint32_t MemKhz;
+};
+
+inline constexpr StockPerformanceConfiguration kStockPerformanceConfigurations[] = {
+    {0x00010000U, 1020000U, 384000U, 1600000U}, {0x00010001U, 1020000U, 768000U, 1600000U},
+    {0x00010002U, 1224000U, 691200U, 1600000U}, {0x00020000U, 1020000U, 230400U, 1600000U},
+    {0x00020001U, 1020000U, 307200U, 1600000U}, {0x00020002U, 1224000U, 230400U, 1600000U},
+    {0x00020003U, 1020000U, 307200U, 1331200U}, {0x00020004U, 1020000U, 384000U, 1331200U},
+    {0x00020005U, 1020000U, 307200U, 1065600U}, {0x00020006U, 1020000U, 384000U, 1065600U},
+    {0x92220007U, 1020000U, 460800U, 1600000U}, {0x92220008U, 1020000U, 460800U, 1331200U},
+    {0x92220009U, 1785000U, 76800U, 1600000U},  {0x9222000AU, 1785000U, 76800U, 1331200U},
+    {0x9222000BU, 1020000U, 76800U, 1600000U},  {0x9222000CU, 1020000U, 76800U, 1331200U},
+};
+
+// A Stock reading for `id`, MHz rounded to the nearest (307.2 -> 307,
+// 1065.6 -> 1066); an unknown ID keeps -1 MHz and its raw value.
+constexpr SwitchClockReading StockClockReading(uint32_t id) {
+  SwitchClockReading reading;
+  reading.Source = SwitchClockSource::Stock;
+  reading.PerformanceConfiguration = id;
+  for (const auto &entry : kStockPerformanceConfigurations) {
+    if (entry.Id == id) {
+      reading.CpuMhz = static_cast<int>((entry.CpuKhz + 500U) / 1000U);
+      reading.GpuMhz = static_cast<int>((entry.GpuKhz + 500U) / 1000U);
+      reading.MemMhz = static_cast<int>((entry.MemKhz + 500U) / 1000U);
+      break;
+    }
+  }
+  return reading;
+}
+
 #if defined(__SWITCH__)
+// The latest reading. Like SwitchClockPerfSummary it only copies the cache and
+// requests the next read from the reader thread: the game thread never waits
+// on an IPC.
+SwitchClockReading SwitchClockLatest();
+
 // " clocks: cpu_mhz=1785 gpu_mhz=768 mem_mhz=1600 clk_src=sysclk_real
 // op_mode=handheld perf_mode=normal sysclk_profile=handheld sysclk_enabled=1
-// sysclk_api=4 clk_ipc_us=40 clk_busy=0" para a linha da janela. Devolve a
-// leitura anterior e pede a próxima a uma thread própria (o IPC nunca roda na
-// thread do jogo; clk_busy=1 se a anterior ainda não voltou); a sessão com o
-// sys-clk é aberta na primeira vez e mantida. Campo que não deu para ler
-// fica -1 (clk_src=none quando o sys-clk não está rodando).
+// sysclk_api=4 clk_ipc_us=40 req_cpu=0 req_gpu=0 req_mem=0 cpu_reapply=0
+// cpu_override=0 cpu_err=- clk_busy=0" for the window line (without sys-clk:
+// "clk_src=stock perf_cfg=0x00020003" and the configuration's MHz; with CPU
+// High "clk_src=clkrst"; the req_/cpu_ fields: FormatPerformancePerfFields).
+// Returns the previous reading and requests the next one from its own thread
+// (the IPC never runs on the game thread; clk_busy=1 if the previous one
+// hasn't returned yet), which with CPU High also reads the CPU rate back
+// (SamplePerformanceClocks); the session with sys-clk is opened the first
+// time and kept. A field that couldn't be read is -1 (clk_src=none when
+// neither source answered).
 std::string SwitchClockPerfSummary();
 #else
+inline SwitchClockReading SwitchClockLatest() { return {}; }
 inline std::string SwitchClockPerfSummary() { return {}; }
 #endif
 

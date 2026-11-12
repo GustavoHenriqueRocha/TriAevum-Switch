@@ -1,6 +1,8 @@
 // TopScreen mod profile: quest and system menu geometry, model transforms and the pause
 // projection.
 #include "oot3d_top_screen_mod_profile_internal.h"
+#include "oot3d_top_screen_page_layout.h"
+#include "oot3d_master_quest_mirror.h"
 
 namespace Oot3dNativeGame {
 
@@ -54,6 +56,12 @@ TopScreenQuestGeometryStats TransformTopScreenQuestGeometry(
           }
         }
       } else if (centerX < 398.0F && centerY > 150.0F) {
+        // The A button (circle and action text). Credited to the "Single
+        // Screen Experience" mod (GameBanana 695893), 3.2.2 EUR code.ips
+        // 0x005C8EB0..0x005C8ED8: (288,24), right of B. Reimplemented; no mod
+        // code or data was copied.
+        constexpr float targetX = 288.0F;
+        constexpr float targetY = 24.0F;
         if (!context.PlayerSpecialState || centerY < 195.0F) {
           // SingleScreen 3.0 0x005C89D0..0x005C8B8C: the A ring and icons
           // (bounds within 0.6..1.4 of square) are normalized to 32 px, the
@@ -78,8 +86,8 @@ TopScreenQuestGeometryStats TransformTopScreenQuestGeometry(
           } else {
             const float size = square ? 32.0F / width : 0.68F;
             for (auto &vertex : quad) {
-              vertex.X = 288.0F + (vertex.X - centerX) * size;
-              vertex.Y = 24.0F + (vertex.Y - centerY) * size;
+              vertex.X = targetX + (vertex.X - centerX) * size;
+              vertex.Y = targetY + (vertex.Y - centerY) * size;
             }
             ++stats.QuadsTranslated;
             ++stats.QuadsScaled;
@@ -314,39 +322,58 @@ bool ReadTopScreenOcarinaUiActive(NativeA32Memory &memory, bool *active,
     return true;
   }
 
-  std::uint16_t ocarinaResult = 0U;
-  std::uint32_t sceneExtension = 0U;
-  if (!memory.Read16(scene + 0x2B82U, &ocarinaResult) ||
-      !memory.Read32(scene + 0x20ACU, &sceneExtension)) {
+  std::uint8_t stateType = 0U, stateSubtype = 0U;
+  std::uint16_t ocarinaAction = 0U, ocarinaResult = 0U;
+  std::uint32_t player = 0U;
+  if (!memory.Read8(scene + 0x100U, &stateType) ||
+      !memory.Read8(scene + 0x101U, &stateSubtype) ||
+      !memory.Read16(scene + 0x2B80U, &ocarinaAction) ||
+      !memory.Read16(scene + 0x2B82U, &ocarinaResult) ||
+      !memory.Read32(scene + 0x20ACU, &player)) {
     if (error != nullptr)
       *error = "cannot read TopScreen Ocarina UI state";
     return false;
   }
-  if (ocarinaResult != 0x00FFU) {
+  // 3.2.2 0x005CD63C: the native UI owns teaching and playback (actions
+  // 2..27) and 40 and 42..45 (0x005CD5FC).
+  if (stateType != 3U || stateSubtype != 2U ||
+      (ocarinaAction >= 2U && ocarinaAction <= 27U) ||
+      (ocarinaAction >= 40U && ocarinaAction <= 45U && ocarinaAction != 41U)) {
     *active = true;
     return true;
   }
 
-  if (sceneExtension != 0U) {
-    std::uint32_t stateFlags = 0U;
-    if (!memory.Read32(sceneExtension + 0x1714U, &stateFlags)) {
-      if (error != nullptr)
-        *error = "cannot read TopScreen Ocarina state flags";
-      return false;
-    }
-    if ((stateFlags & 0x01000000U) != 0U) {
-      *active = true;
-      return true;
-    }
-  }
-
-  std::uint16_t ocarinaAction = 0U;
-  if (!memory.Read16(scene + 0x2B80U, &ocarinaAction)) {
+  std::uint32_t stateFlags = 0U;
+  if (player != 0U && !memory.Read32(player + 0x1714U, &stateFlags)) {
     if (error != nullptr)
-      *error = "cannot read TopScreen Ocarina action";
+      *error = "cannot read TopScreen Ocarina state flags";
     return false;
   }
-  *active = ocarinaAction > 1U;
+  if ((stateFlags & 0x01000000U) != 0U) {
+    // At an ocarina spot (the Player's flag 0x01000000) the guide stays,
+    // unless the Skull Kid (actor 0x115) is among the NPCs: his game.
+    std::uint32_t actor = 0U;
+    if (!memory.Read32(scene + 0x20C4U, &actor)) {
+      if (error != nullptr)
+        *error = "cannot read TopScreen Ocarina NPC list";
+      return false;
+    }
+    for (int remaining = 64; actor != 0U && remaining > 0; --remaining) {
+      std::uint16_t id = 0U;
+      if (!memory.Read16(actor, &id) || !memory.Read32(actor + 0x130U, &actor)) {
+        if (error != nullptr)
+          *error = "cannot read TopScreen Ocarina NPC";
+        return false;
+      }
+      if (id == 0x0115U) {
+        *active = true;
+        return true;
+      }
+    }
+    *active = false;
+    return true;
+  }
+  *active = ocarinaAction > 1U || ocarinaResult != 0x00FFU;
   return true;
 }
 
@@ -511,12 +538,8 @@ bool ApplyTopScreenQuestSubmitModelTransforms(
   const auto childCount = static_cast<std::int32_t>(childCountBits);
   if (childCount > 0) {
     const float scale = config.HudScale;
-    const float baseX = config.HudLayout == TopScreenHudLayout::Restoration
-                            ? 358.0F
-                            : 248.0F;
-    const float baseY = config.HudLayout == TopScreenHudLayout::Restoration
-                            ? 68.0F
-                            : 24.0F;
+    constexpr float baseX = 248.0F;
+    constexpr float baseY = 24.0F;
     const float targetX = 400.0F + (baseX - 400.0F) * scale -
                           static_cast<float>(config.HudMarginX);
     const float targetY = baseY * scale +
@@ -639,12 +662,8 @@ bool ApplyTopScreenQuestDrawModelTransform(
   }
 
   const float scale = config.HudScale;
-  const float baseX = config.HudLayout == TopScreenHudLayout::Restoration
-                          ? 358.0F
-                          : 248.0F;
-  const float baseY = config.HudLayout == TopScreenHudLayout::Restoration
-                          ? 68.0F
-                          : 24.0F;
+  constexpr float baseX = 248.0F;
+  constexpr float baseY = 24.0F;
   const float targetX = 400.0F + (baseX - 400.0F) * scale -
                         static_cast<float>(config.HudMarginX) + scale * 8.0F;
   const float targetY = baseY * scale +
@@ -889,7 +908,7 @@ bool ApplyTopScreenPauseProjection(NativeA32Memory &memory,
     const float configuredMargin = config != nullptr
                                        ? static_cast<float>(config->HudMarginX)
                                        : 4.0F;
-    const float compactInset = compactLayout != 0U ? 36.0F : 0.0F;
+    const float compactInset = MasterQuestMirrorShown(compactLayout) ? 36.0F : 0.0F;
     state.OffsetX = rightEdge - (nativeOffsetX + maximumExtent) -
                     compactInset - configuredMargin;
     projectedOffsetX = nativeOffsetX + state.OffsetX;
@@ -1032,9 +1051,9 @@ ResolveTopScreenPauseTargetCommand(const TopScreenPauseTargetCommand &command,
   } else if (command.NativeCommand == 0x401U) {
     result.BindTopTarget = true;
     result.FramebufferBindingOffset = 0x38U;
-    result.ViewportY = 40U;
+    result.ViewportY = kTopScreenCentredPageX;
     result.ViewportWidth = command.HalfHeightMode ? 240U : 480U;
-    result.ViewportHeight = 320U;
+    result.ViewportHeight = kTopScreenPageWidthPixels;
   }
   return result;
 }
@@ -1043,9 +1062,9 @@ TopScreenPauseTargetPlan ResolveTopScreenPausePageRedrawTargetCommand(
     const TopScreenPauseTargetCommand &command) noexcept {
   auto result = ResolveTopScreenPauseTargetCommand(command, true);
   if (result.BindTopTarget && command.NativeCommand == 0x400U) {
-    result.ViewportY = 40U;
+    result.ViewportY = kTopScreenCentredPageX;
     result.ViewportWidth = 480U;
-    result.ViewportHeight = 320U;
+    result.ViewportHeight = kTopScreenPageWidthPixels;
   }
   return result;
 }
@@ -1053,10 +1072,11 @@ TopScreenPauseTargetPlan ResolveTopScreenPausePageRedrawTargetCommand(
 void WidenTopScreenPauseTargetForPage(TopScreenPauseTargetPlan &plan,
                                       bool widePage) noexcept {
   if (!widePage || !plan.BindTopTarget || plan.ViewportWidth != 480U ||
-      plan.ViewportY != 40U || plan.ViewportHeight != 320U)
+      plan.ViewportY != kTopScreenCentredPageX ||
+      plan.ViewportHeight != kTopScreenPageWidthPixels)
     return;
   plan.ViewportY = 0U;
-  plan.ViewportHeight = 400U;
+  plan.ViewportHeight = kTopScreenPresentedWidthPixels;
 }
 
 TopScreenPauseTargetPlan ResolveTopScreenPauseCompositionTargetCommand(

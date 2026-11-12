@@ -1,4 +1,4 @@
-"""Decodifica/codifica as texturas CTXB do menu (PICA200: RGBA8, RGB565, RGBA4, ETC1, ETC1A4)."""
+"""Decodes/encodes the menu CTXB textures (PICA200: RGBA8, RGB565, RGBA4, ETC1, ETC1A4)."""
 import struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -7,14 +7,14 @@ from tools.oot3d.decomp_support.scripts.build_topscreen_texture_override_pack im
     read_level3_romfs_file)
 from PIL import Image
 
-from caminhos import ROMFS_ORIGINAL as ROM   # sempre a original
-COM_TEXTO = ("hud_all00 hud_menu_title00 icon_item_menu00 menu_equip_parts00 menu_file_select_parts00 "
+from paths import ROMFS_ORIGINAL as ROM   # always the original
+TEXT_TEXTURES = ("hud_all00 hud_menu_title00 icon_item_menu00 menu_equip_parts00 menu_file_select_parts00 "
              "menu_file_select_parts01 menu_hint_movie_parts00 menu_item_parts00 menu_item_parts01 menu_map_parts00 "
              "menu_map_parts01 menu_okarina_parts00 menu_option_parts00 menu_top_parts00 name_entry00_parts00 "
              "name_entry00_parts01").split()
 
 
-def cabecalho(data):
+def header(data):
     w, h, f, t = struct.unpack_from('<HHHH', data, 0x2C)
     return w, h, PICA_FORMATS.get((f, t))
 
@@ -28,14 +28,14 @@ def _tiled(payload, w, h, bpp, px):
     return out
 
 
-def decodificar(data):
-    w, h, fmt = cabecalho(data); p = data[CTXB_HEADER_SIZE:]
+def decode(data):
+    w, h, fmt = header(data); p = data[CTXB_HEADER_SIZE:]
     if fmt == 4: rgba = decode_rgba4_tiled(p, w, h)
     elif fmt == 13: rgba = decode_etc1a4(p, w, h)
-    elif fmt == 12:   # ETC1 sem alfa: mesmos blocos do ETC1A4 sem os 8 bytes de alfa (opaco)
+    elif fmt == 12:   # ETC1 without alpha: same blocks as ETC1A4 without the 8 alpha bytes (opaque)
         rgba = decode_etc1a4(b''.join(b'\xff' * 8 + p[i:i + 8] for i in range(0, w * h // 2, 8)), w, h)
     elif fmt == 0: rgba = _tiled(p, w, h, 4, lambda b: bytes((b[3], b[2], b[1], b[0])))
-    elif fmt == 5: rgba = _tiled(p, w, h, 2, lambda b: bytes((b[1], b[1], b[1], b[0])))   # LA8: byte 0 = alfa
+    elif fmt == 5: rgba = _tiled(p, w, h, 2, lambda b: bytes((b[1], b[1], b[1], b[0])))   # LA8: byte 0 = alpha
     elif fmt == 3:
         def px(b):
             v = b[0] | b[1] << 8
@@ -47,27 +47,27 @@ def decodificar(data):
             return bytes((((v >> 11) & 31) * 255 // 31, ((v >> 6) & 31) * 255 // 31, ((v >> 1) & 31) * 255 // 31,
                           255 if v & 1 else 0))
         rgba = _tiled(p, w, h, 2, px)
-    else: raise ValueError(f'formato {fmt} não tratado')
+    else: raise ValueError(f'format {fmt} not handled')
     return Image.frombytes('RGBA', (w, h), bytes(rgba))
 
 
-def ler(idioma, nome):
-    return read_level3_romfs_file(ROM, f'menu/{idioma}/{nome}.ctxb')
+def read(language, name):
+    return read_level3_romfs_file(ROM, f'menu/{language}/{name}.ctxb')
 
 
 if __name__ == '__main__':
-    destino = Path(sys.argv[1]); destino.mkdir(parents=True, exist_ok=True)
-    for n in COM_TEXTO:
-        im = decodificar(ler('06_EU_SPANISH', n)); im.save(destino / f'{n}.png')
-        fundo = Image.new('RGBA', im.size, (40, 40, 60, 255)); fundo.alpha_composite(im)
-        fundo.convert('RGB').save(destino / f'{n}.ver.png')
+    dest = Path(sys.argv[1]); dest.mkdir(parents=True, exist_ok=True)
+    for n in TEXT_TEXTURES:
+        im = decode(read('06_EU_SPANISH', n)); im.save(dest / f'{n}.png')
+        background = Image.new('RGBA', im.size, (40, 40, 60, 255)); background.alpha_composite(im)
+        background.convert('RGB').save(dest / f'{n}.ver.png')
         print(n, im.size)
 
 
 def encode_etc1a4(rgba, w, h):
-    """RGBA linear → payload PICA ETC1A4 (blocos de 4x4 em ladrilhos 8x8, palavra ETC1 little-endian)."""
+    """Linear RGBA → PICA ETC1A4 payload (4x4 blocks in 8x8 tiles, little-endian ETC1 word)."""
     import etcpak
-    blocos = etcpak.compress_etc1_rgb(bytes(rgba), w, h)          # blocos em ordem de linha, 8 bytes cada
+    blocks = etcpak.compress_etc1_rgb(bytes(rgba), w, h)          # blocks in row order, 8 bytes each
     bw = w // 4
     out = bytearray()
     for ty in range(0, h, 8):
@@ -80,18 +80,18 @@ def encode_etc1a4(rgba, w, h):
                         a = rgba[((y0 + y) * w + x0 + x) * 4 + 3]
                         alpha |= ((a * 15 + 127) // 255) << (4 * (x * 4 + y))
                 i = (y0 // 4) * bw + x0 // 4
-                palavra = int.from_bytes(blocos[i * 8:i * 8 + 8], ORDEM_ETC)
-                out += struct.pack('<QQ', alpha, palavra)
+                word = int.from_bytes(blocks[i * 8:i * 8 + 8], ETC_BYTE_ORDER)
+                out += struct.pack('<QQ', alpha, word)
     return bytes(out)
 
 
-ORDEM_ETC = 'big'
+ETC_BYTE_ORDER = 'big'
 
 
-def codificar_ctxb(original, im):
-    """Mesma textura, mesmo formato e tamanho do original, com a imagem nova."""
+def encode_ctxb(original, im):
+    """Same texture, same format and size as the original, with the new image."""
     from tools.oot3d.decomp_support.scripts.build_topscreen_texture_override_pack import encode_rgba8_tiled
-    w, h, fmt = cabecalho(original); assert im.size == (w, h)
+    w, h, fmt = header(original); assert im.size == (w, h)
     rgba = im.convert('RGBA').tobytes()
     if fmt == 4: p = encode_rgba4_tiled(rgba, w, h)
     elif fmt == 13: p = encode_etc1a4(rgba, w, h)
@@ -103,6 +103,6 @@ def codificar_ctxb(original, im):
                 i = _tiled_pixel(x, y, w); j = (y * w + x) * 2
                 p[i * 2], p[i * 2 + 1] = la[j + 1], la[j]
         p = bytes(p)
-    else: raise ValueError(f'codificação do formato {fmt} não feita')
+    else: raise ValueError(f'encoding of format {fmt} not implemented')
     assert len(p) == len(original) - CTXB_HEADER_SIZE
     return original[:CTXB_HEADER_SIZE] + p

@@ -327,8 +327,12 @@ class Oot3dDebugMenuWindow final : public Ship::GuiWindow {
                                  ImGuiCond_Appearing);
         ImGui::SetNextWindowBgAlpha(0.92F);
         GuiWindow::Draw();
-        // Closed with the window's X: the game takes the input back.
-        if (!IsVisible()) Oot3d::DebugMenuOpenFlag().store(false, std::memory_order_relaxed);
+        // Closed with the window's X (touch): the same state as L3+R3 leaves,
+        // and the game takes the input back.
+        if (!IsVisible()) {
+            Oot3d::DebugMenuOpenFlag().store(false, std::memory_order_relaxed);
+            io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+        }
     }
 
   protected:
@@ -336,9 +340,44 @@ class Oot3dDebugMenuWindow final : public Ship::GuiWindow {
     void UpdateElement() override {}
     void DrawElement() override {
         // Readable on a TV: about twice the default font at 1080p.
-        ImGui::SetWindowFontScale(std::max(1.0F, ImGui::GetMainViewport()->WorkSize.y / 540.0F));
-        ImGui::TextDisabled("L3+R3 fecha  |  A seleciona  B volta  L/R troca de aba");
+        const float fontScale = std::max(1.0F, ImGui::GetMainViewport()->WorkSize.y / 540.0F);
+        ImGui::SetWindowFontScale(fontScale);
+        if (const char* title = Oot3d::DebugMenuTitleText().load(std::memory_order_relaxed)) {
+            ImGui::TextUnformatted(title);
+            ImGui::SameLine();
+        }
+        ImGui::TextDisabled("L3+R3 closes  |  A selects  B back  L/R switches tab");
+        DrawExitGame(fontScale);
         Oot3d::DrawApplicationSettingsTabs();
+    }
+
+  private:
+    // "Exit game" at the end of the first line, behind a confirmation: it
+    // closes the game the way HOME > Close does (Oot3d::RequestExitGame).
+    static void DrawExitGame(float fontScale) {
+        constexpr const char* kConfirm = "Exit game?";
+        const char* label = "Exit game";
+        const float width = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0F;
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - width));
+        if (ImGui::Button(label)) ImGui::OpenPopup(kConfirm);
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                                ImVec2(0.5F, 0.5F));
+        if (!ImGui::BeginPopupModal(kConfirm, nullptr,
+                                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                                        ImGuiWindowFlags_NoMove)) {
+            return;
+        }
+        ImGui::SetWindowFontScale(fontScale);
+        ImGui::TextUnformatted("Progress since your last save will be lost.");
+        if (ImGui::Button("Exit game")) {
+            Oot3d::RequestExitGame();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        // The safe choice has the controller's focus.
+        ImGui::SetItemDefaultFocus();
+        ImGui::EndPopup();
     }
 };
 } // namespace
@@ -585,7 +624,7 @@ void Fast3dGui::ImGuiBackendInit() {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             if (Deko3dRendererSelected()) {
-                break; // no GL context: ImGui is not drawn (docs/DEKO3D_PROGRESSO.md)
+                break; // no GL context: ImGui is not drawn (docs/DEKO3D_PROGRESS.md)
             }
 #ifdef __APPLE__
             ImGui_ImplOpenGL3_Init("#version 410 core");

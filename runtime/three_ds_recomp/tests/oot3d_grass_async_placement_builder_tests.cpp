@@ -539,11 +539,13 @@ TEST_F(GrassDiskFixture, RoundTripFinalAnchorsClustersColorsAndShadowSupport) {
     ASSERT_FALSE(result.Placement->ShadowPoints.empty());
     GrassPersistentPlacementCache disk(Directory);
     const auto key = GrassPlacementPersistentKey(r);
-    ASSERT_TRUE(disk.Store(key, *result.Placement));
-    bool rejected = true;
-    const auto loaded = disk.Load(key, &rejected);
+    ASSERT_TRUE(disk.Store(key, *result.Placement, GrassPlacementDiskMatchFor(r, false)));
+    GrassPlacementDiskResult outcome;
+    const auto loaded = disk.Load(key, GrassPlacementDiskMatchFor(r, false), &outcome);
     ASSERT_TRUE(loaded);
-    EXPECT_FALSE(rejected);
+    EXPECT_EQ(outcome.Outcome, GrassPlacementDiskOutcome::Loaded);
+    ASSERT_TRUE(loaded->ModelToWorld.has_value());
+    EXPECT_EQ(*loaded->ModelToWorld, r.ModelToWorld);
     ExpectSamePlacement(*result.Placement, *loaded);
     EXPECT_EQ(loaded->Identity, 0);
     EXPECT_NE(loaded->Anchors[0].SurfaceColor, 0);
@@ -554,7 +556,8 @@ TEST_F(GrassDiskFixture, RejectsVersionTruncationChecksumOverflowAndWrongKeyThen
     const auto p = BuildSynchronously(r);
     GrassPersistentPlacementCache disk(Directory);
     const auto key = GrassPlacementPersistentKey(r);
-    ASSERT_TRUE(disk.Store(key, p));
+    const auto match = GrassPlacementDiskMatchFor(r, false);
+    ASSERT_TRUE(disk.Store(key, p, match));
     std::ifstream in(disk.Path(key), std::ios::binary);
     const std::vector<char> original{ std::istreambuf_iterator<char>(in), {} };
     in.close();
@@ -575,16 +578,16 @@ TEST_F(GrassDiskFixture, RejectsVersionTruncationChecksumOverflowAndWrongKeyThen
                 bytes[i] = char(0xff);
         }
         replace(bytes);
-        bool rejected = false;
-        EXPECT_FALSE(disk.Load(key, &rejected));
-        EXPECT_TRUE(rejected);
+        GrassPlacementDiskResult outcome;
+        EXPECT_FALSE(disk.Load(key, match, &outcome));
+        EXPECT_EQ(outcome.Outcome, GrassPlacementDiskOutcome::Damaged);
     }
-    ASSERT_TRUE(disk.Store(key, p));
-    ASSERT_TRUE(disk.Load(key));
+    ASSERT_TRUE(disk.Store(key, p, match));
+    ASSERT_TRUE(disk.Load(key, match));
     auto wrong = key;
     ++wrong.Content;
     std::filesystem::copy_file(disk.Path(key), disk.Path(wrong));
-    EXPECT_FALSE(disk.Load(wrong));
+    EXPECT_FALSE(disk.Load(wrong, match));
 }
 TEST_F(GrassDiskFixture, BoundsStorageAndIgnoresUnrelatedFiles) {
     using namespace Fast::Oot3d;
@@ -592,16 +595,17 @@ TEST_F(GrassDiskFixture, BoundsStorageAndIgnoresUnrelatedFiles) {
     const auto p = BuildSynchronously(r);
     GrassPersistentPlacementCache disk(Directory, 1024 * 1024, 1);
     const auto first = GrassPlacementPersistentKey(r);
-    ASSERT_TRUE(disk.Store(first, p));
+    const auto match = GrassPlacementDiskMatchFor(r, false);
+    ASSERT_TRUE(disk.Store(first, p, match));
     std::ofstream(Directory / "keep.txt") << "not a grass cache";
     auto second = first;
     ++second.Settings;
-    ASSERT_TRUE(disk.Store(second, p));
-    EXPECT_FALSE(disk.Load(first));
-    EXPECT_TRUE(disk.Load(second));
+    ASSERT_TRUE(disk.Store(second, p, match));
+    EXPECT_FALSE(disk.Load(first, match));
+    EXPECT_TRUE(disk.Load(second, match));
     EXPECT_TRUE(std::filesystem::exists(Directory / "keep.txt"));
     GrassPersistentPlacementCache tiny(Directory / "tiny", 1, 1);
-    EXPECT_FALSE(tiny.Store(first, p));
+    EXPECT_FALSE(tiny.Store(first, p, match));
 }
 TEST_F(GrassDiskFixture, NewBuilderLoadsWithoutExtractionMaskDecodeOrColorSource) {
     using namespace Fast::Oot3d;
@@ -625,6 +629,9 @@ TEST_F(GrassDiskFixture, NewBuilderLoadsWithoutExtractionMaskDecodeOrColorSource
         (void)first.ResolveOrQueue(r);
         first.WaitForIdle();
         EXPECT_EQ(first.Stats().DiskWrites, 1);
+        // A build, not a load (deko3d's `grass:` line splits them).
+        EXPECT_GT(first.Stats().BuildMaxMilliseconds, 0.0);
+        EXPECT_EQ(first.Stats().DiskLoadMilliseconds, 0.0);
     }
     textures.Clear(); // There is no texture payload left to decode or sample.
     r.WorldIdentity = 12345;
@@ -643,6 +650,23 @@ TEST_F(GrassDiskFixture, NewBuilderLoadsWithoutExtractionMaskDecodeOrColorSource
         EXPECT_EQ(result.Placement->Identity, r.WorldIdentity);
         EXPECT_EQ(result.Placement->LastUsedFrame, 55);
         ExpectSamePlacement(*original, *result.Placement);
+        EXPECT_GT(second.Stats().DiskLoadMilliseconds, 0.0);
+        EXPECT_EQ(second.Stats().BuildMaxMilliseconds, 0.0);
+    }
+    textures.ObserveDecoded(r.LazyMaskTexture, 1, 1, rgba); // built again below
+    {
+        // The Switch's limits (config/grass_placement_cache): a placement
+        // over the byte limit is not written.
+        GrassAsyncPlacementBuilder tiny;
+        tiny.SetCacheDirectory(Directory / "tiny", 1U, 1U);
+        tiny.SetDiskSettleDelay({});
+        auto result = tiny.ResolveOrQueue(r);
+        result.WaitUntilReady();
+        ASSERT_TRUE(result.Placement);
+        (void)tiny.ResolveOrQueue(r);
+        tiny.WaitForIdle();
+        EXPECT_EQ(tiny.Stats().Builds, 1);
+        EXPECT_EQ(tiny.Stats().DiskWrites, 0);
     }
 }
 TEST_F(GrassDiskFixture, OnlySettledPlacementsAreWritten) {
@@ -671,7 +695,8 @@ TEST_F(GrassDiskFixture, OnlySettledPlacementsAreWritten) {
     (void)builder.ResolveOrQueue(r);
     builder.WaitForIdle();
     EXPECT_EQ(builder.Stats().DiskWrites, 1);
-    EXPECT_TRUE(GrassPersistentPlacementCache(Directory).Load(GrassPlacementPersistentKey(r)));
+    EXPECT_TRUE(GrassPersistentPlacementCache(Directory).Load(GrassPlacementPersistentKey(r),
+                                                              GrassPlacementDiskMatchFor(r, false)));
 }
 TEST_F(GrassDiskFixture, PersistentFingerprintUsesGeometryPayloadAndEveryBakeSetting) {
     using namespace Fast::Oot3d;
@@ -682,9 +707,16 @@ TEST_F(GrassDiskFixture, PersistentFingerprintUsesGeometryPayloadAndEveryBakeSet
     changed.PlacementKey.ContentVersion++;
     changed.FrameId++;
     changed.WorldIdentity++;
+    // The geometry identity (guest addresses) and camera rounding of the
+    // transform are matched in the file, not named (GrassPlacementDiskMatch).
+    changed.PlacementKey.GeometryId++;
+    changed.ModelToWorld[0] += 1.0e-6F;
+    changed.ModelToWorld[3] += 0.01F;
+    changed.ModelToWorld[11] -= 0.01F;
     EXPECT_EQ(key, GrassPlacementPersistentKey(changed));
     const std::vector<std::function<void(GrassAsyncPlacementRequest&)>> changes{
-        [](auto& r) { r.PlacementKey.GeometryId++; },
+        [](auto& r) { r.ModelToWorld[3] += 64.0F; },
+        [](auto& r) { r.ModelToWorld[0] = -r.ModelToWorld[0]; },
         [](auto& r) { r.TextureHash++; },
         [](auto& r) { r.MapperSlot++; },
         [](auto& r) { r.Rule.InputBlack = .3F; },
@@ -693,7 +725,7 @@ TEST_F(GrassDiskFixture, PersistentFingerprintUsesGeometryPayloadAndEveryBakeSet
         [](auto& r) { r.Rule.SampleScale = .5F; },
         [](auto& r) { r.Generation.Seed++; },
         [](auto& r) { r.Generation.MinimumSpacing++; },
-        [](auto& r) { r.ModelToWorld[3]++; },
+        [](auto& r) { r.ModelToWorld[7] -= 40.0F; },
         [](auto& r) { r.TransformBakedIntoVertices = true; },
         [](auto& r) { r.MaterialWrapS = GrassTextureWrap::Clamp; },
         [](auto& r) { r.MaterialWrapT = GrassTextureWrap::Mirror; },
@@ -731,6 +763,109 @@ TEST_F(GrassDiskFixture, PersistentFingerprintUsesGeometryPayloadAndEveryBakeSet
         changes[i](value);
         EXPECT_NE(key, GrassPlacementPersistentKey(value));
     }
+}
+// A ground's transform comes from the camera of its first frame (float
+// rounding): exact matching (the PC) builds it again when that camera
+// differs; reuse (config/grass_placement_reuse) loads it and keeps the
+// stored transform, which the draw uses. Logs20b/c: Hyrule Field built again.
+TEST_F(GrassDiskFixture, StoredGroundMatchesItsTransformAndIdentityExactlyOrWithReuse) {
+    using namespace Fast::Oot3d;
+    const auto r = BaseRequest();
+    const auto p = BuildSynchronously(r);
+    GrassPersistentPlacementCache disk(Directory);
+    ASSERT_TRUE(disk.Store(GrassPlacementPersistentKey(r), p, GrassPlacementDiskMatchFor(r, false)));
+    const auto load = [&](const GrassAsyncPlacementRequest& request, bool reuse, GrassPlacementDiskResult& outcome) {
+        return disk.Load(GrassPlacementPersistentKey(request), GrassPlacementDiskMatchFor(request, reuse), &outcome);
+    };
+    GrassPlacementDiskResult outcome;
+    auto rounded = r; // another first camera: same file name
+    rounded.ModelToWorld[0] += 1.0e-6F;
+    rounded.ModelToWorld[3] += 0.01F;
+    ASSERT_EQ(GrassPlacementPersistentKey(rounded), GrassPlacementPersistentKey(r));
+    EXPECT_FALSE(load(rounded, false, outcome));
+    EXPECT_EQ(outcome.Outcome, GrassPlacementDiskOutcome::OtherTransform);
+    EXPECT_NEAR(outcome.Offset.Translation, 0.01F, 1.0e-4F);
+    auto loaded = load(rounded, true, outcome);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(outcome.Outcome, GrassPlacementDiskOutcome::Loaded);
+    EXPECT_FALSE(outcome.OtherGeometry);
+    ASSERT_TRUE(loaded->ModelToWorld.has_value());
+    EXPECT_EQ(*loaded->ModelToWorld, r.ModelToWorld); // drawn with the transform it was made with
+    ExpectSamePlacement(p, *loaded);
+    auto moved = r; // beyond the reuse tolerance, same file name
+    moved.ModelToWorld[3] += 0.6F;
+    ASSERT_EQ(GrassPlacementPersistentKey(moved), GrassPlacementPersistentKey(r));
+    EXPECT_FALSE(load(moved, true, outcome));
+    EXPECT_EQ(outcome.Outcome, GrassPlacementDiskOutcome::OtherTransform);
+    auto elsewhere = r; // the same ground at other guest addresses
+    elsewhere.PlacementKey.GeometryId++;
+    EXPECT_FALSE(load(elsewhere, false, outcome));
+    EXPECT_EQ(outcome.Outcome, GrassPlacementDiskOutcome::OtherGeometry);
+    EXPECT_TRUE(load(elsewhere, true, outcome));
+    EXPECT_TRUE(outcome.OtherGeometry);
+    EXPECT_TRUE(load(r, false, outcome));
+    EXPECT_EQ(GrassPlacementTransformDifference(r.ModelToWorld, r.ModelToWorld).Rotation, 0.0F);
+    auto projective = r.ModelToWorld;
+    projective[14] = 1.0F;
+    EXPECT_TRUE(std::isinf(GrassPlacementTransformDifference(r.ModelToWorld, projective).Rotation));
+}
+TEST_F(GrassDiskFixture, BuilderReusesAGroundOfAnotherFirstCameraAndCountsWhyNot) {
+    using namespace Fast::Oot3d;
+    auto r = BaseRequest();
+    {
+        GrassAsyncPlacementBuilder first;
+        first.SetCacheDirectory(Directory);
+        first.SetDiskSettleDelay({});
+        auto result = first.ResolveOrQueue(r);
+        result.WaitUntilReady();
+        first.WaitForIdle();
+        (void)first.ResolveOrQueue(r);
+        first.WaitForIdle();
+        ASSERT_EQ(first.Stats().DiskWrites, 1);
+        EXPECT_EQ(first.Stats().DiskMisses, 1);
+    }
+    auto next = r; // the next session: another first camera and instance
+    next.ModelToWorld[5] -= 2.0e-6F;
+    next.ModelToWorld[7] += 0.02F;
+    next.WorldIdentity = 99;
+    {
+        GrassAsyncPlacementBuilder exact;
+        exact.SetCacheDirectory(Directory);
+        auto result = exact.ResolveOrQueue(next);
+        result.WaitUntilReady();
+        exact.WaitForIdle();
+        EXPECT_EQ(exact.Stats().Builds, 1);
+        EXPECT_EQ(exact.Stats().DiskOtherTransform, 1);
+        EXPECT_NEAR(exact.Stats().DiskOtherTransformTranslation, 0.02F, 1.0e-4F);
+        ASSERT_TRUE(result.Placement && result.Placement->ModelToWorld);
+        EXPECT_EQ(*result.Placement->ModelToWorld, next.ModelToWorld); // a build: its own
+    }
+    {
+        GrassAsyncPlacementBuilder reuse;
+        reuse.SetCacheDirectory(Directory);
+        reuse.SetDiskReuse(true);
+        auto result = reuse.ResolveOrQueue(next);
+        result.WaitUntilReady();
+        reuse.WaitForIdle();
+        EXPECT_EQ(reuse.Stats().Builds, 0);
+        EXPECT_EQ(reuse.Stats().DiskHits, 1);
+        EXPECT_EQ(reuse.Stats().DiskReusedTransform, 1);
+        EXPECT_NEAR(reuse.Stats().DiskReusedTranslation, 0.02F, 1.0e-4F);
+        ASSERT_TRUE(result.Placement && result.Placement->ModelToWorld);
+        EXPECT_EQ(*result.Placement->ModelToWorld, r.ModelToWorld);
+        EXPECT_EQ(result.Placement->Identity, next.WorldIdentity);
+    }
+}
+// config/grass_hold waits on this at a scene's start.
+TEST_F(GrassDiskFixture, WaitForPendingEndsWhenTheRequestedPlacementsAreMade) {
+    using namespace Fast::Oot3d;
+    GrassAsyncPlacementBuilder builder;
+    EXPECT_TRUE(builder.WaitForPending(std::chrono::microseconds(0))); // nothing requested
+    auto r = BaseRequest();
+    (void)builder.ResolveOrQueue(r);
+    EXPECT_TRUE(builder.WaitForPending(std::chrono::seconds(30)));
+    EXPECT_EQ(builder.Stats().Pending, 0U);
+    EXPECT_EQ(builder.ResolveOrQueue(r).State, GrassAsyncPlacementState::Ready);
 }
 TEST_F(GrassDiskFixture, ExplicitOverlayMaskLayoutAndChannelSlotsInvalidateDiskKey) {
     using namespace Fast::Oot3d;

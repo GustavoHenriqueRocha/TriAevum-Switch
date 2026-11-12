@@ -1,8 +1,8 @@
 import struct
 from pathlib import Path
-from caminhos import SOH_TEXTO as SOH, QM_ORIGINAL as QM
+from paths import SOH_TEXT as SOH, QM_ORIGINAL as QM
 
-# argumentos (bytes) de cada código do N64 (z64message.h)
+# arguments (bytes) of each N64 code (z64message.h)
 N64_ARGS = {0x05:1,0x06:1,0x07:2,0x0C:1,0x0E:1,0x11:2,0x12:2,0x13:1,0x14:1,0x15:3,0x1E:1}
 
 def soh():
@@ -32,9 +32,28 @@ def n64_tokens(b):
 N2T = {0x01:0x1c,0x02:0x00,0x04:0x01,0x05:0x1d,0x06:0x1e,0x07:0x03,0x08:0x04,0x09:0x05,0x0a:0x06,0x0b:0x07,
        0x0c:0x08,0x0d:0x09,0x0e:0x0a,0x0f:0x0b,0x10:0x0c,0x11:0x0d,0x12:0x0e,0x13:0x0f,0x14:0x10,0x15:0x11,
        0x16:0x12,0x17:0x13,0x18:0x14,0x19:0x15,0x1a:0x19,0x1b:0x1a,0x1c:0x1b,0x1d:0x16,0x1e:0x18,0x1f:0x17}
-# argumentos dos códigos do 3DS (deduzidos do eu.qm)
-T_ARGS = {0x02:1,0x03:2,0x06:1,0x08:1,0x0a:1,0x0e:6,0x0f:1,0x10:1,0x11:3,0x18:1,0x1a:4,0x1b:6,0x1d:1,0x23:1,0x24:1,
-          0x25:3,0x26:1}
+# Argument bytes of each 3DS code: the game's own table (code.bin 0x004D6708, 8 bytes per code: field count, then the
+# token length counting the code byte), read by TextTokenUtf8_ParseNext (0x004C08C0). Codes 0x00-0x2f only: for a
+# larger code the game reads past the table and copies millions of argument words over its stack until it faults.
+# Every message of the original eu.qm parses with this table (an older guess had 6 bytes for 7f0e and none for 7f0d).
+T_ARGS = {0x02:1,0x03:2,0x06:1,0x08:1,0x0a:1,0x0d:5,0x0e:5,0x0f:1,0x10:1,0x11:3,0x18:1,0x1a:4,0x1b:6,0x1d:1,0x23:1,
+          0x24:1,0x25:3,0x26:1}
+T_CODES = 0x30
+
+def grammar_error(b):
+    """None if the game parses `b` as a message (every code known and complete, ending in 7f00), else the problem."""
+    i = 0
+    while i < len(b):
+        if b[i] != 0x7f:
+            i += 1; continue
+        if i + 1 >= len(b): return f'7f at the end (offset {i})'
+        c = b[i+1]
+        if c >= T_CODES: return f'unknown code 7f{c:02x} at offset {i}'
+        if c == 0x00: return None if i + 2 == len(b) else f'bytes after 7f00 (offset {i})'
+        n = T_ARGS.get(c, 0)
+        if i + 2 + n > len(b): return f'7f{c:02x} without its {n} argument bytes (offset {i})'
+        i += 2 + n
+    return 'no 7f00 at the end'
 
 def t_tokens(b):
     i, t = 0, []

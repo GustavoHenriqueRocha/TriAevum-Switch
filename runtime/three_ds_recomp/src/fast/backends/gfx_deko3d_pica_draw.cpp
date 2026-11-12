@@ -1,11 +1,11 @@
-// deko3d PICA path, package 5 (docs/DEKO3D_PROGRESSO.md): render targets,
+// deko3d PICA path, package 5 (docs/DEKO3D_PROGRESS.md): render targets,
 // fills and clears, pipeline state, the draw, display transfers and the
 // scanout. Behaviour follows the GL backend (gfx_opengl_pica.cpp,
 // SubmitPicaDraw / SubmitPicaDisplayTransfer / ClearPicaRenderTarget /
 // SubmitPicaMemoryFill); the pure decisions are in
 // fast/backends/gfx_deko3d_pica_pipeline.h.
 //
-// Not here yet (documented in DEKO3D_PROGRESSO.md): Shadow2D producers
+// Not here yet (documented in DEKO3D_PROGRESS.md): Shadow2D producers
 // (skipped, counted), dynamic resolution, the post-processing chain
 // (FXAA/SMAA/EASU/RCAS), the widescreen menu corner passes and the
 // relocated-menu nearest sampling.
@@ -17,6 +17,7 @@
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_draw_coverage.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/backends/gfx_deko3d_clear_draw.h"
 #include "gfx_deko3d_api.h"
 #include "gfx_deko3d_scanout_dksh.h"
 #include "gfx_opengl_pica_scale.h"
@@ -25,12 +26,16 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace Fast {
 using WindowAcquireHook = void (*)(bool after);
@@ -166,13 +171,27 @@ void GfxRenderingAPIDeko3d::InitPica() {
     if (Oot3d::GlWidescreenEnabled()) {
         widescreen = Oot3d::GlWidescreenFactor(mDevice.Width(), mDevice.Height());
     }
-    mTargets.Init(mDevice, mResources, ReadResolutionScale(), widescreen);
+    TopScreenLineSamples lines = TopScreenLineSamples::One;
+    if (const auto text = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_line_samples")) {
+        lines = ParseTopScreenLineSamples(*text);
+    }
+    mTargets.Init(mDevice, mResources, ReadResolutionScale(), widescreen, lines);
     if (const auto lean = ReadFirstLine("sdmc:/switch/oot3dre/config/gl_lean")) {
         mPicaLean = PicaGlScale::ParseLeanSetting(*lean, true);
     }
     if (const auto invert = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_cull_invert")) {
         mCullInvert = invert->empty() || (*invert)[0] != '0';
     }
+    // config/deko3d_clear_draw: present (and not "0") turns the depth reset
+    // into fast clears where provable (SWITCH_PORT.md, "Depth reset as fast clears").
+    if (const auto clear = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_clear_draw")) {
+        mClearDraw = clear->empty() || (*clear)[0] != '0';
+    } else if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_clear_draw", "rb")) {
+        std::fclose(file); // an empty file has no first line
+        mClearDraw = true;
+    }
+    Deko3d::SetPerfClearDraw(mClearDraw);
+    Deko3d::Log("pica: clear draw %s", mClearDraw ? "on (config/deko3d_clear_draw)" : "off");
     if (const auto flip = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_flip_y")) {
         mFlipY = flip->empty() || (*flip)[0] != '0';
     }
@@ -191,8 +210,9 @@ void GfxRenderingAPIDeko3d::InitPica() {
         mImageBarrierFlags |= has("descriptors") ? static_cast<uint32_t>(DkInvalidateFlags_Descriptors) : 0U;
         mImageBarrierFlags |= has("shader") ? static_cast<uint32_t>(DkInvalidateFlags_Shader) : 0U;
         mImageBarrierFlags |= has("l2") ? static_cast<uint32_t>(DkInvalidateFlags_L2Cache) : 0U;
-        Deko3d::Log("pica: image barrier \"%s\" (mode %d, flags %x)", barrier->c_str(),
-                    static_cast<int>(mImageBarrierMode), mImageBarrierFlags);
+        mFrameBarrier = has("frame");
+        Deko3d::Log("pica: image barrier \"%s\" (mode %d, flags %x, frame %d)", barrier->c_str(),
+                    static_cast<int>(mImageBarrierMode), mImageBarrierFlags, mFrameBarrier ? 1 : 0);
     }
     PicaSamplerKey linear;
     linear.MinLinear = true;
@@ -203,6 +223,7 @@ void GfxRenderingAPIDeko3d::InitPica() {
     Deko3d::Log("pica: scanout shaders %s, cull invert %d, flip y %d, lean %d",
                 mScanoutVertex != nullptr && mScanoutFragment != nullptr ? "ready" : "MISSING",
                 mCullInvert ? 1 : 0, mFlipY ? 1 : 0, mPicaLean ? 1 : 0);
+    InitPlayerShadow(); // config/simple_shadow
 }
 
 void GfxRenderingAPIDeko3d::BindPicaTarget(PicaTarget& target) {
@@ -219,9 +240,10 @@ void GfxRenderingAPIDeko3d::FlushPicaInvalidations() {
     DkBarrier mode = DkBarrier_None;
     if (mResources.TakeInvalidate()) {
         // New images were written by copies (or descriptors changed) since
-        // the last draw: wait for them, then drop stale cached lines. Once
-        // per frame at least (BeginFrame), which also covers the uniform
-        // cache over the reused stream memory.
+        // the last draw: wait for them, then drop stale cached lines. Not
+        // forced per frame (PicaResources::BeginFrame: the queue flush's
+        // postSubmitFlush covers CPU writes, uniforms included) unless
+        // config/deko3d_barrier says "frame".
         mode = mImageBarrierMode;
         flags |= mImageBarrierFlags;
     }
@@ -231,6 +253,9 @@ void GfxRenderingAPIDeko3d::FlushPicaInvalidations() {
     if (flags != 0U || mode != DkBarrier_None) {
         mDevice.Checkpoint("barrier.before", static_cast<uint64_t>(mode), flags);
         dkCmdBufBarrier(mDevice.Cmd(), mode, flags);
+        if (mode != DkBarrier_None) {
+            mDevice.CountImageBarrier(); // dkperf image_barriers_per_frame
+        }
         mDevice.Checkpoint("barrier.after", static_cast<uint64_t>(mode), flags);
     }
 }
@@ -384,6 +409,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
     }
     EnsureFrame();
     Deko3d::GrassObserveDraw(draw, mDevice.Frame()); // config/grass
+    ObservePlayerShadowDraw(draw);                   // config/simple_shadow
 
     const PicaTargetKey key = MakePicaTargetKey(draw);
     bool created = false;
@@ -407,6 +433,25 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         ++mCounters.PicaDrawsSkipped;
         return true;
     }
+    if (draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
+        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::TransparentWorld) {
+        // dkperf opaque_ms: the frame's first translucent world draw (once
+        // per frame), before grass.
+        mDevice.MarkOpaqueEnd();
+    }
+    if (Oot3d::GrassDrawPointOf(draw.CompositionDomain, draw.Composition.Layer)) {
+        DrawPlayerShadow(*target); // config/simple_shadow, at the grass's points
+    }
+    if (mGrassDraws) {
+        // config/grass = draw: before the first translucent world draw or the
+        // first overlay (HUD, minimap, title card) into the target whose
+        // opaque world and grass sources were drawn this frame (once per
+        // frame; grass_draw_point.h). Sky and unknown layers can come between
+        // opaque draws.
+        if (const auto point = Oot3d::GrassDrawPointOf(draw.CompositionDomain, draw.Composition.Layer)) {
+            DrawGrass(key, *target, *point);
+        }
+    }
 
     const uint64_t shadersLoadedBefore = mShaders.Stats().Loaded;
     const PicaProgram program = ResolvePicaProgram(draw);
@@ -418,6 +463,15 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
     if (!mResources.Prepare(draw, mDrawResources, &why)) {
         if (mCounters.PicaDrawsRejected++ < 10U) {
             Deko3d::Log("draw rejected: %s", why.c_str());
+        }
+        return true;
+    }
+    if (program.SurfaceLighting &&
+        !mResources.PrepareSurfaceLighting(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&mSurfaceLighting), sizeof(mSurfaceLighting)),
+            mDrawResources)) {
+        if (mCounters.PicaDrawsRejected++ < 10U) {
+            Deko3d::Log("draw rejected: deko3d surface lighting stream memory");
         }
         return true;
     }
@@ -467,6 +521,11 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     }
     dkCmdBufBindTextures(cmd, DkStage_Fragment, 1, res.Textures.data(), static_cast<uint32_t>(res.Textures.size()));
     dkCmdBufBindTexture(cmd, DkStage_Fragment, 13, res.LightingLut);
+    if (program.SurfaceLighting && res.SurfaceLighting != DK_GPU_ADDR_INVALID) {
+        // config/lighting perpixel: upstream's binding 16, remapped.
+        dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, Deko3d::kSurfaceLightingBinding, res.SurfaceLighting,
+                                  res.SurfaceLightingBytes);
+    }
     mDevice.Checkpoint("draw.uniforms");
 
     // Vertices: every binding in the draw's stream block, absent attributes
@@ -571,14 +630,17 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     dkCmdBufBindRasterizerState(cmd, &rasterizer);
     mDevice.Checkpoint("draw.raster");
 
-    // Viewport and scissor in host pixels of the target.
+    // Viewport and scissor in host pixels of the target: X (the presented
+    // vertical axis) by ScaleX, Y by the resolution scale or the widening.
     const float scale = target.Extent.Scale;
+    const float scaleX = target.Extent.ScaleX;
     PicaRect viewport;
     PicaRect scissor;
     if (!target.Extent.Wide) {
-        viewport = PlanPicaViewport(draw.ViewportX, draw.ViewportY, draw.ViewportWidth, draw.ViewportHeight, scale);
+        viewport = PlanPicaViewport(draw.ViewportX, draw.ViewportY, draw.ViewportWidth, draw.ViewportHeight, scaleX,
+                                    scale);
         scissor = PlanPicaScissor(draw.ScissorMode, draw.ScissorX1, draw.ScissorY1, draw.ScissorX2, draw.ScissorY2,
-                                  scale, target.Extent.Width, target.Extent.Height);
+                                  scaleX, scale, target.Extent.Width, target.Extent.Height);
     } else {
         // Widescreen top target (GL: PicaGlTarget::Wide): the scene stretches
         // over the widened axis, placed UI keeps a centred native canvas.
@@ -594,7 +656,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         axisInput.ResolutionScale = scale;
         axisInput.TargetScaleY = target.Extent.ScaleY;
         const auto axis = Oot3d::ResolveGlWidescreenPresentedAxis(placement, axisInput);
-        const auto edgeX = [&](float native) { return static_cast<int32_t>(std::lround(native * scale)); };
+        const auto edgeX = [&](float native) { return static_cast<int32_t>(std::lround(native * scaleX)); };
         const int32_t viewportX0 = edgeX(draw.ViewportX);
         viewport = {viewportX0, axis.ViewportBegin,
                     std::max<int32_t>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
@@ -620,24 +682,152 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         return false;
     }
     dkCmdBufSetScissors(cmd, 0, &dkScissor, 1);
+    if (mGrassDraws && draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
+        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::OpaqueWorld && draw.DepthTestEnabled &&
+        draw.DepthWriteEnabled) {
+        RememberGrassScene(target, viewport, dkScissor, DekoCompareOp(draw.DepthCompare));
+    }
     mDevice.Checkpoint("draw.viewport");
+    // The viewport inside the scissor (the scissor is inside the target extent).
+    const int64_t x0 = std::max<int64_t>(viewport.X, dkScissor.x);
+    const int64_t y0 = std::max<int64_t>(viewport.Y, dkScissor.y);
+    const int64_t x1 = std::min<int64_t>(int64_t{viewport.X} + viewport.Width, int64_t{dkScissor.x} + dkScissor.width);
+    const int64_t y1 = std::min<int64_t>(int64_t{viewport.Y} + viewport.Height, int64_t{dkScissor.y} + dkScissor.height);
+    const bool writesFragDepth = Deko3d::PicaDrawWritesFragDepth(program.Pick == Deko3d::PicaProgramPick::Uber,
+                                                                 draw.WBuffering, draw.DepthRange, draw.NearPlane);
+    {
+        // Per-frame breakdown (logs/deko3d.txt).
+        const uint64_t pixels = x1 > x0 && y1 > y0 ? static_cast<uint64_t>((x1 - x0) * (y1 - y0)) : 0U;
+        mFrameDraws.Current.Count(program.Base, program.Lit, draw.Blend.Enabled, pixels);
+        if (program.SurfaceLighting) {
+            mFrameDraws.Current.CountSurfaceLighting(mSurfaceLighting.Control[1], mSurfaceLighting.Rim[0] > 0.0F,
+                                                     static_cast<size_t>(program.SurfacePath), pixels);
+        }
+        // How depth is reset and how many tested draws write gl_FragDepth
+        // (config/deko3d_zcull, logs/deko3d.txt "depth" line).
+        mFrameDraws.Current.CountDepth(
+            depthStencil.depthTestEnable != 0U, draw.DepthWriteEnabled,
+            !draw.DepthTestEnabled || draw.DepthCompare == Renderer3ds::PicaCompareFunction::Always,
+            pixels >= static_cast<uint64_t>(target.Extent.Width) * target.Extent.Height, writesFragDepth);
+    }
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));
-    if (draw.Indexed) {
-        const uint32_t indexSize = draw.IndicesAre16Bit ? 2U : 1U;
-        if (res.IndexStream == DK_GPU_ADDR_INVALID || res.IndexBytes % indexSize != 0U) {
-            if (mCounters.PicaDrawsRejected++ < 10U) {
-                Deko3d::Log("draw rejected: PICA indexed draw has no/partial indices");
-            }
-            return false;
+    const uint32_t indexSize = draw.IndicesAre16Bit ? 2U : 1U;
+    if (draw.Indexed && (res.IndexStream == DK_GPU_ADDR_INVALID || res.IndexBytes % indexSize != 0U)) {
+        if (mCounters.PicaDrawsRejected++ < 10U) {
+            Deko3d::Log("draw rejected: PICA indexed draw has no/partial indices");
         }
+        return false;
+    }
+    // config/simple_shadow: one of Link's draws, with what it binds.
+    if (mPlayerShadow.Selected && draw.Composition.NativeActorGeometry &&
+        draw.Composition.NativeActorIdentity == Oot3d::PlayerShadowActorIdentity(mPlayerShadow.Selected->Actor)) {
+        PlayerShadowDraw bound;
+        bound.Attributes = attributes;
+        bound.Buffers = buffers;
+        bound.Extents = extents;
+        bound.Primitive = primitive;
+        bound.Indexed = draw.Indexed;
+        bound.Indices16 = draw.IndicesAre16Bit;
+        bound.IndexStream = res.IndexStream;
+        bound.IndexCount = draw.Indexed ? res.IndexBytes / indexSize : 0U;
+        bound.BaseVertex = draw.BaseVertex;
+        bound.VertexCount = draw.VertexCount;
+        bound.Viewport = viewport;
+        bound.Scissor = dkScissor;
+        bound.DepthCompare = DekoCompareOp(draw.DepthCompare);
+        CapturePlayerShadowDraw(draw, program, target, bound);
+    }
+
+    // The frame's depth reset (gfx_deko3d_clear_draw.h): a depth-writing
+    // draw that passes every depth test over the whole target. Planned (and
+    // logged) whether config/deko3d_clear_draw is on or not; applied when on.
+    const bool coversTarget = x0 <= 0 && y0 <= 0 && x1 >= static_cast<int64_t>(target.Extent.Width) &&
+                              y1 >= static_cast<int64_t>(target.Extent.Height);
+    if (Deko3d::PicaDrawIsDepthReset(draw, coversTarget)) {
+        Deko3d::PicaClearDrawContext context;
+        context.Specialized = program.Pick == Deko3d::PicaProgramPick::Specialized;
+        context.LightingVariant = program.Lit;
+        context.WritesFragDepth = writesFragDepth;
+        context.ViewportCoversTarget = true;
+        context.ViewportWidth = static_cast<double>(viewport.Width);
+        context.ViewportHeight = static_cast<double>(viewport.Height);
+        context.CullInvert = mCullInvert;
+        context.StencilWrites = stencilWrites;
+        const Deko3d::PicaClearDrawPlan plan = Deko3d::PlanPicaClearDraw(draw, context);
+        LogPicaResetDraw(draw, plan);
+        const auto action = mClearDraw ? plan.Action : Deko3d::PicaClearDrawAction::Draw;
+        Deko3d::NoteResetDraw(static_cast<uint8_t>(action));
+        if (action != Deko3d::PicaClearDrawAction::Draw) {
+            // The scissor is the target extent here (coversTarget), which
+            // bounds the clears exactly as it bounds the draw; the bound
+            // depth state still writes depth (the clear does not depend on it).
+            if (action == Deko3d::PicaClearDrawAction::FullClear && plan.ColorMask != 0U) {
+                dkCmdBufClearColorFloat(cmd, 0, plan.ColorMask, plan.ClearColor[0], plan.ClearColor[1],
+                                        plan.ClearColor[2], plan.ClearColor[3]);
+            }
+            // deko3d's ZcullClearDepth (0 or 1: its fast ZCULL clear) starts
+            // ZCULL from a known state.
+            dkCmdBufClearDepthStencil(cmd, true, plan.ClearDepth, 0x00, 0);
+            mDevice.Checkpoint("draw.reset_clear");
+            if (action == Deko3d::PicaClearDrawAction::FullClear) {
+                (void)key;
+                return true; // target.Version already moved, as for the draw
+            }
+            depthStencil.depthWriteEnable = 0;
+            dkCmdBufBindDepthStencilState(cmd, &depthStencil);
+        }
+    }
+
+    // config/deko3d_zcull: ZCULL tests a draw at its raster depth, and deko3d
+    // 0.5 never sets ZcullTestMask for programs that write gl_FragDepth (Mesa
+    // nvc0 writes 0x11): a decal pulled forward by its depth offset can be
+    // rejected by whole tiles, and its written depth can leave ZCULL's view of
+    // the tiles wrong. Invalidated before and after such a draw when it tests
+    // or writes depth (InvalidateZcullNoWfi: ZCULL culls nothing it no longer
+    // knows until the next depth clear).
+    const bool zcullGuard =
+        mDevice.Zcull() && writesFragDepth && (depthStencil.depthWriteEnable != 0U ||
+                                               (depthStencil.depthTestEnable != 0U &&
+                                                depthStencil.depthCompareOp != DkCompareOp_Always));
+    if (zcullGuard) {
+        mDevice.InvalidateZcull();
+    }
+    if (draw.Indexed) {
         dkCmdBufBindIdxBuffer(cmd, draw.IndicesAre16Bit ? DkIdxFormat_Uint16 : DkIdxFormat_Uint8, res.IndexStream);
         dkCmdBufDrawIndexed(cmd, primitive, res.IndexBytes / indexSize, 1, 0, draw.BaseVertex, 0);
     } else {
         dkCmdBufDraw(cmd, primitive, draw.VertexCount, 1, 0, 0);
     }
+    if (zcullGuard) {
+        mDevice.InvalidateZcull();
+    }
     (void)key;
     return true;
+}
+
+void GfxRenderingAPIDeko3d::LogPicaResetDraw(const GfxNativePicaDrawView& draw,
+                                             const Deko3d::PicaClearDrawPlan& plan) {
+    // A plan's identity: what it became, why (the reasons are literals), and
+    // the facts behind it (not the colour value: a fading colour would
+    // spend every line).
+    uint64_t signature = static_cast<uint64_t>(plan.Action) | static_cast<uint64_t>(plan.Coverage.Status) << 4U |
+                         static_cast<uint64_t>(plan.Depth.Form) << 12U |
+                         static_cast<uint64_t>(plan.Color.Source) << 16U |
+                         static_cast<uint64_t>(plan.Color.Ambiguous ? 1U : 0U) << 20U |
+                         static_cast<uint64_t>(plan.AlphaTest) << 24U;
+    signature ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(plan.Why)) * 0x9E3779B97F4A7C15ULL;
+    signature ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(plan.ColorWhy)) * 0xC2B2AE3D27D4EB4FULL;
+    const bool changed = signature != mResetSignature;
+    mResetSignature = signature;
+    const bool logChange = changed && mResetLines < kResetLineLimit;
+    if (!logChange && !mResetLineDue) {
+        return;
+    }
+    mResetLines += logChange ? 1U : 0U;
+    mResetLineDue = false;
+    Deko3d::Log("reset draw: frame %llu %s", static_cast<unsigned long long>(mDevice.Frame()),
+                Deko3d::FormatPicaResetDraw(draw, plan).c_str());
 }
 
 bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplayTransferView& transfer,
@@ -662,6 +852,9 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
                     transfer.InputWidth, transfer.InputHeight, transfer.OutputPhysicalAddress, transfer.OutputWidth,
                     transfer.OutputHeight, transfer.Flags, static_cast<unsigned>(transfer.PresentationMode));
     }
+    if (transfer.TextureCopyBytes != 0U) {
+        return SubmitPicaTextureCopy(transfer, error);
+    }
     if (!mDeviceReady) {
         return true;
     }
@@ -673,10 +866,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         }
         return reject("PICA display transfer source is missing");
     }
-    const PicaTransferPlan plan = PlanPicaTransfer(transfer, key->Width, key->Height, source->Extent.Scale,
-                                                   source->Extent.ScaleY, source->Extent.Width,
-                                                   source->Extent.Height, source->Alloc.Scale,
-                                                   source->Alloc.ScaleY);
+    const PicaTransferPlan plan = PlanPicaTransfer(transfer, key->Width, key->Height, source->Extent, source->Alloc);
     if (!plan.Valid) {
         if (transfer.Present) {
             BindWindowTarget();
@@ -692,6 +882,13 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         }
         return reject("deko3d display image memory");
     }
+    DrawPlayerShadow(*source); // config/simple_shadow, before the copy reads the target
+    if (mGrassDraws) {
+        // config/grass = draw: a scene with neither a translucent world draw
+        // nor an overlay after its grass sources gets its grass here, before
+        // the copy reads the target (and its Version).
+        DrawGrass(*key, *source, Oot3d::GrassDrawPoint::Transfer);
+    }
     const PicaDisplayCopy copy{source->Id, source->Version, plan.SourceWidth, plan.SourceHeight, plan.Linear};
     DkCmdBuf cmd = mDevice.Cmd();
     if (mPicaLean && display->LastCopy.Valid() && display->LastCopy == copy) {
@@ -700,7 +897,8 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
     } else {
         // The source's fragments must be in memory before the 2D engine
         // reads them; the copy must land before the scanout samples it and
-        // before later draws write the source again.
+        // before later draws write the source again. A top screen at one
+        // sample per presented line copies 1:1 (Linear false, equal rects).
         dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
         const DkImageRect sourceRect = {0, 0, 0, plan.SourceWidth, plan.SourceHeight, 1};
         const DkImageRect destRect = {0, 0, 0, plan.ContentWidth, plan.ContentHeight, 1};
@@ -740,11 +938,130 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         dynamic.PresentedFrames.fetch_add(1U, std::memory_order_relaxed);
         dynamic.PresentedScaleMilli.fetch_add(static_cast<uint64_t>(std::lround(source->Extent.Scale * 1000.0F)),
                                               std::memory_order_relaxed);
+        Deko3d::NotePresentedTopScene(source->Extent.Width, source->Extent.Height,
+                                      source->Extent.SamplingX < 1.0F ? 1U : 2U);
     }
     if (transfer.Present) {
         DrawPicaScanout(transfer, *display, plan, source->Alloc.Scale);
         mDevice.Checkpoint("scanout", transfer.OutputPhysicalAddress, 0);
     }
+    return true;
+}
+
+// A raw TextureCopy out of a GPU target (gfx_deko3d_pica_copies.h). A real
+// execution owes the guest the bytes and the PPF completion it waits for; a
+// copy that cannot be captured still completes, with the guest's bytes and
+// the textures' zeros left as they were (logged), so the game goes on.
+bool GfxRenderingAPIDeko3d::SubmitPicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer,
+                                                  std::string* error) {
+    auto& copies = mResources.Copies();
+    const Deko3d::PicaCopyStore::Version* version = copies.Find(transfer.CompletionId);
+    if (version != nullptr && (!transfer.MaterializeGuest || version->Materialized)) {
+        ++mCounters.PicaTextureCopiesReused;
+        return true;
+    }
+    // Captured again by the real execution when a replay came first: the
+    // guest's bytes come from the real one's namespace. On a failure, the
+    // replay's bytes (if any) still serve.
+    const auto started = std::chrono::steady_clock::now();
+    Deko3d::PicaCopyStore::Version captured;
+    if (const char* failure = CapturePicaTextureCopy(transfer, captured)) {
+        if (mCounters.PicaTextureCopiesFailed++ < 10U) {
+            Deko3d::Log("texture copy not captured: %s (ns %llu, %08x -> %08x, %u bytes)", failure,
+                        static_cast<unsigned long long>(transfer.RenderTargetNamespace),
+                        transfer.InputPhysicalAddress, transfer.OutputPhysicalAddress, transfer.TextureCopyBytes);
+        }
+    } else {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        mCounters.PicaTextureCopyMilliseconds += ms;
+        mCounters.PicaTextureCopyMaxMilliseconds = std::max(mCounters.PicaTextureCopyMaxMilliseconds, ms);
+        if (mCounters.PicaTextureCopies++ == 0U) {
+            Deko3d::Log("pica: first texture copy (%u bytes in %zu spans, %08x -> %08x, %.1f ms)",
+                        transfer.TextureCopyBytes, captured.Spans.size(), transfer.InputPhysicalAddress,
+                        transfer.OutputPhysicalAddress, ms);
+        }
+        version = &copies.Put(transfer.CompletionId, std::move(captured));
+    }
+    if (!transfer.MaterializeGuest) {
+        return true;
+    }
+    // A dependency flush: the guest is stopped.
+    if (version != nullptr) {
+        std::vector<Renderer3ds::PicaPhysicalMemoryWrite> writes;
+        writes.reserve(version->Spans.size());
+        size_t at = 0U;
+        for (const auto& span : version->Spans) {
+            Renderer3ds::PicaPhysicalMemoryWrite write;
+            write.Address = span.DestinationAddress;
+            write.Bytes.assign(version->Bytes.begin() + static_cast<std::ptrdiff_t>(at),
+                               version->Bytes.begin() + static_cast<std::ptrdiff_t>(at + span.ByteCount));
+            writes.push_back(std::move(write));
+            at += span.ByteCount;
+        }
+        if (mPhysicalMemoryCommit && mPhysicalMemoryCommit(writes)) {
+            copies.MarkMaterialized(transfer.CompletionId);
+        } else if (mCounters.PicaTextureCopiesFailed++ < 10U) {
+            Deko3d::Log("texture copy %08x -> %08x: the guest's memory was not written",
+                        transfer.InputPhysicalAddress, transfer.OutputPhysicalAddress);
+        }
+    }
+    if (!mPhysicalMemoryComplete || !mPhysicalMemoryComplete(transfer.CompletionId)) {
+        if (error != nullptr) {
+            *error = "raw PICA copy completion failed";
+        }
+        return false;
+    }
+    return true;
+}
+
+const char* GfxRenderingAPIDeko3d::CapturePicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer,
+                                                          Deko3d::PicaCopyStore::Version& version) {
+    if (!mDeviceReady) {
+        return "no deko3d device";
+    }
+    Deko3d::PicaRawCopyWalk walk;
+    if (const char* failure = Deko3d::WalkPicaRawCopy(transfer, walk)) {
+        return failure;
+    }
+    // FindColor's choice among the targets holding the whole input.
+    const Deko3d::PicaTargetKey* key = nullptr;
+    Deko3d::PicaTarget* source = nullptr;
+    mTargets.ForEach([&](const Deko3d::PicaTargetKey& candidate, Deko3d::PicaTarget& target) {
+        if (Deko3d::PicaTargetHoldsCopyInput(candidate, transfer.RenderTargetNamespace,
+                                             transfer.InputPhysicalAddress, walk.InputEnd) &&
+            (key == nullptr || Deko3d::PicaTargetKeyLess(candidate, *key))) {
+            key = &candidate;
+            source = &target;
+        }
+    });
+    if (source == nullptr) {
+        return "no render target holds the copy's source";
+    }
+    EnsureFrame();
+    DrawPlayerShadow(*source); // config/simple_shadow
+    if (mGrassDraws) {
+        DrawGrass(*key, *source, Oot3d::GrassDrawPoint::Transfer);
+    }
+    // The read-back waits for everything the frame recorded; the present
+    // thread must not be using the queue then. The mailbox's present thread
+    // has a queue of its own (Device::CreateMailbox), so it is not waited for.
+    if (!mDevice.Mailbox()) {
+        mDevice.WaitPresentIdle();
+    }
+    // config/deko3d_flip_y 0: target row 0 holds NDC y +1.
+    std::string readError;
+    if (!mTargets.ReadCopyRows(*source, key->Height, mFlipY, mCopyRgba, &readError)) {
+        return "the copy's source could not be read back";
+    }
+    mBoundTarget = nullptr;
+    version.Spans = std::move(walk.Spans);
+    return Deko3d::EncodePicaRawCopy(mCopyRgba, source->Extent.Width, key->Height, *key, version.Spans,
+                                     version.Bytes);
+}
+
+bool GfxRenderingAPIDeko3d::SetPinnedPicaTextureCopies(std::span<const Renderer3ds::PicaTextureCopyReference> copies,
+                                                       std::string*) {
+    mResources.Copies().Retain(copies);
     return true;
 }
 
@@ -897,6 +1214,113 @@ bool GfxRenderingAPIDeko3d::ResetPicaState(std::string*) {
     mPendingFills.clear();
     mBoundTarget = nullptr;
     return true;
+}
+
+bool GfxRenderingAPIDeko3d::CapturePicaColorTargets(std::vector<GfxNativePicaRenderTargetColorSnapshot>& snapshots,
+                                                    std::string* error) {
+    snapshots.clear();
+    if (!mDeviceReady) {
+        if (error != nullptr) {
+            *error = "native PICA color capture requires the deko3d device";
+        }
+        return false;
+    }
+    std::string failure;
+    try {
+        // The idle boundary: the render thread is drained, so what the open
+        // frame recorded is complete in guest order. It reaches the GPU with
+        // the first read-back, which waits for all of it.
+        EnsureFrame();
+        mDevice.WaitPresentIdle();
+        const auto layout = mTargets.DepthStencilLayout(&failure);
+        mBoundTarget = nullptr; // the probe was bound
+        if (!layout.has_value()) {
+            throw std::runtime_error(failure);
+        }
+        std::vector<std::pair<const PicaTargetKey*, const PicaTarget*>> targets;
+        targets.reserve(mTargets.Count());
+        mTargets.ForEach([&](const PicaTargetKey& key, PicaTarget& target) { targets.emplace_back(&key, &target); });
+        std::sort(targets.begin(), targets.end(),
+                  [](const auto& left, const auto& right) { return PicaTargetKeyLess(*left.first, *right.first); });
+        snapshots.reserve(targets.size());
+        // One target's read-back at its extent at a time: only the guest-extent
+        // snapshots accumulate.
+        std::vector<uint8_t> rgba8;
+        std::vector<uint32_t> depthStencil;
+        for (const auto& [key, target] : targets) {
+            if (!mTargets.ReadTarget(*target, rgba8, depthStencil, &failure)) {
+                throw std::runtime_error(failure);
+            }
+            snapshots.push_back(MakeGuestExtentSnapshot(*key, target->Extent.Width, target->Extent.Height, rgba8,
+                                                        depthStencil, *layout));
+        }
+        Deko3d::Log("savestate: captured %zu targets", snapshots.size());
+        return true;
+    } catch (const std::exception& exception) {
+        snapshots.clear();
+        if (error != nullptr) {
+            *error = exception.what();
+        }
+        return false;
+    }
+}
+
+bool GfxRenderingAPIDeko3d::RestorePicaColorTargets(
+    std::span<const GfxNativePicaRenderTargetColorSnapshot> snapshots, std::string* error) {
+    if (snapshots.empty()) {
+        return true;
+    }
+    std::string failure = !mDeviceReady              ? "native PICA color restore requires the deko3d device"
+                          : mTargets.Count() != 0U ? "native PICA color restore requires reset renderer state"
+                                                   : ValidateRestoreSnapshots(snapshots);
+    if (!failure.empty()) {
+        if (error != nullptr) {
+            *error = failure;
+        }
+        return false;
+    }
+    try {
+        // Guest-extent snapshots (and legacy ones, saved at a renderer's
+        // scale) are resampled to the extent this renderer creates the target
+        // at: its scale, the top target widened by widescreen.
+        EnsureFrame();
+        const auto layout = mTargets.DepthStencilLayout(&failure);
+        mBoundTarget = nullptr;
+        if (!layout.has_value()) {
+            throw std::runtime_error(failure);
+        }
+        for (const auto& snapshot : snapshots) {
+            // Created cleared and bound (the copy below rebinds it).
+            PicaTarget* target = mTargets.Get(PicaTargetKeyOf(snapshot), nullptr);
+            mBoundTarget = nullptr;
+            if (target == nullptr) {
+                throw std::runtime_error("no memory for a restored render target");
+            }
+            const auto pixels = PlanRestorePixels(snapshot, target->Extent.Width, target->Extent.Height, *layout);
+            if (!mTargets.WriteTarget(*target, pixels.Rgba8, pixels.DepthStencil, &failure)) {
+                throw std::runtime_error(failure);
+            }
+        }
+        // The restored stencil can hold the game's top bit.
+        mPlayerShadow.StencilShared = true;
+        mPlayerShadow.StencilClean.clear();
+        Deko3d::Log("savestate: restored %zu targets (%s)", snapshots.size(),
+                    snapshots.front().RenderScalePermille == Renderer3ds::kPicaGuestExtentRenderScalePermille
+                        ? "guest extent"
+                        : "legacy scale");
+        return true;
+    } catch (const std::exception& exception) {
+        // Half-restored targets would pass for the saved ones: gone, after
+        // the GPU finished what was recorded for them (as ResetPicaState).
+        mDevice.Submit();
+        mDevice.WaitIdle();
+        mTargets.Reset();
+        mBoundTarget = nullptr;
+        if (error != nullptr) {
+            *error = exception.what();
+        }
+        return false;
+    }
 }
 
 } // namespace Fast

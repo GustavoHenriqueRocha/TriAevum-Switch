@@ -37,4 +37,27 @@ inline void ToggleDebugMenu() noexcept {
     }
 }
 
+// The line at the top of the menu (the build's version), set once by the
+// game at start; the menu shows nothing there while it is null.
+inline std::atomic<const char*>& DebugMenuTitleText() noexcept {
+    static std::atomic<const char*> text{nullptr};
+    return text;
+}
+
+// "Exit game" in the menu, and the updater's "Close game": the game thread
+// sees the request at its next frame and closes the window the way HOME >
+// Close does; main then ends the application (oot3d_native_game.cpp).
+inline std::atomic<bool>& ExitGameRequestedFlag() noexcept {
+    static std::atomic<bool> requested{false};
+    return requested;
+}
+
+inline void RequestExitGame() noexcept {
+    ExitGameRequestedFlag().store(true, std::memory_order_release);
+}
+
+inline bool ExitGameRequested() noexcept {
+    return ExitGameRequestedFlag().load(std::memory_order_acquire);
+}
+
 } // namespace Fast::Oot3d

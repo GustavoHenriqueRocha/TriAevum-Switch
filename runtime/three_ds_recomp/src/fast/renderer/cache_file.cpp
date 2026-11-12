@@ -33,7 +33,7 @@ bool WriteCacheFileAtomically(const std::filesystem::path& path,
         if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             throw std::runtime_error("cache atomic replacement failed");
 #else
-        // O FS do Horizon não renomeia por cima de arquivo existente (EEXIST).
+        // Horizon's FS cannot rename over an existing file (EEXIST).
         if (const auto code = Ship::ReplaceFileWithTemporary(temporary, path))
             throw std::filesystem::filesystem_error("cache atomic replacement failed", temporary, path, code);
 #endif

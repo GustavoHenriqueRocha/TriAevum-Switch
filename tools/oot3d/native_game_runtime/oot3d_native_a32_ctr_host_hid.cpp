@@ -1,5 +1,6 @@
 // CTR host services: the hid:USER session and the HID shared-memory samples.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_guest_motion_telemetry.h"
 
 namespace Oot3dNativeGame {
 
@@ -315,6 +316,10 @@ bool NativeA32CtrHostServices::WriteHidGyroscopeSample(
     ++mHidRuntimeProfile.GyroscopeSamplesWritten;
     mHidRuntimeProfile.LastGyroscope = entry;
     mHidRuntimeProfile.NextGyroscopeIndex = mNextHidGyroscopeIndex;
+    auto& telemetry = GuestMotion();
+    telemetry.GyroscopeSamples.fetch_add(1U, std::memory_order_relaxed);
+    if (entry[0] != 0 || entry[1] != 0 || entry[2] != 0)
+        telemetry.NonzeroGyroscopeSamples.fetch_add(1U, std::memory_order_relaxed);
     return true;
 }
 
@@ -370,6 +375,7 @@ NativeA32CtrHidUpdateResult NativeA32CtrHostServices::AdvanceHidToCurrentTick(
     } else {
         mHidAccelerometerScheduleInitialized = false;
     }
+    GuestMotion().GyroscopeEnabled.store(HidGyroscopeEnabled(), std::memory_order_relaxed);
     if (HidGyroscopeEnabled()) {
         if (!mHidGyroscopeScheduleInitialized) {
             mNextHidGyroscopeTick = mSystemTicks;

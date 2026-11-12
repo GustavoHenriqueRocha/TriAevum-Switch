@@ -123,14 +123,17 @@ class NativeRenderCommandStream final {
         uint64_t WorkerIdleNanoseconds = 0U;
         // Condition-variable signals skipped because nobody waited.
         uint64_t SkippedNotifies = 0U;
+        // Submissions that woke the idle worker (a kernel call on Horizon,
+        // and the worker's core leaves its idle state for that command).
+        uint64_t WorkerWakes = 0U;
         // Frame slots handed back by ReleaseFrameSlot before the command
         // ended.
         uint64_t EarlyFrameSlotReleases = 0U;
     };
     [[nodiscard]] WaitStats GetWaitStats() const noexcept;
 
-    // Estado interno para o watchdog de travamento (oot3d_hang_watchdog.h):
-    // só com try_lock (false se o mutex estiver ocupado; o relatório diz isso).
+    // Internal state for the hang watchdog (oot3d_hang_watchdog.h):
+    // try_lock only (false if the mutex is busy; the report says so).
     struct SyncSnapshot {
         size_t Queued = 0U;
         size_t FramesQueued = 0U;

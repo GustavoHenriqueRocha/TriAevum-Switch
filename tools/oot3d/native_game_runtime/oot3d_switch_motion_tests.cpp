@@ -1,12 +1,13 @@
-// Seis eixos do Switch -> movimento do 3DS (oot3d_switch_motion.h): a
-// conversão de eixos contra rotações conhecidas e contra o caminho do SDL que
-// já existe, e a média da LIFO de seis eixos em uma observação por leitura.
+// Switch six-axis -> 3DS motion (oot3d_switch_motion.h): the axis conversion
+// against known rotations and the existing SDL path, the averaging of the
+// six-axis LIFO into one observation per poll, and the game log's motion line.
 #include "oot3d_switch_motion.h"
 
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace {
@@ -36,29 +37,29 @@ float Dot(const Vector& a, const Vector& b) { return a[0] * b[0] + a[1] * b[1] +
 
 Vector Scale(const Vector& a, float s) { return {a[0] * s, a[1] * s, a[2] * s}; }
 
-// Referencial do Switch: +X à direita, +Y para a borda de cima, +Z para fora
-// da tela. A gravidade como o sensor informa, em alguns jeitos de segurar.
+// The Switch frame: +X right, +Y toward the top edge, +Z out of the screen.
+// Gravity as the sensor reports it, for a few ways of holding the console.
 constexpr Vector kFaceUp{0.0F, 0.0F, -1.0F};
-constexpr Vector kUpright{0.0F, -1.0F, 0.0F};  // tela virada para o jogador
-const Vector kTilted{0.0F, -std::sqrt(0.5F), -std::sqrt(0.5F)};  // no meio do caminho
+constexpr Vector kUpright{0.0F, -1.0F, 0.0F};  // screen facing the player
+const Vector kTilted{0.0F, -std::sqrt(0.5F), -std::sqrt(0.5F)};  // halfway
 
 void TestRestPoses() {
   const auto flat = ConvertSwitchSixAxis(kFaceUp, {});
-  Require(flat.AccelerometerValid && flat.GyroscopeValid, "a conversão não marcou os dois sensores como válidos");
-  // A pose neutra do fork (MappingConfig::AccelerometerNeutral) é um 3DS
-  // deitado com a tela para cima.
-  Require(Near(flat.Accelerometer, {0.0F, -1.0F, 0.0F}), "tela para cima não leu a pose neutra do 3DS");
+  Require(flat.AccelerometerValid && flat.GyroscopeValid, "conversion did not mark both sensors valid");
+  // The fork's neutral pose (MappingConfig::AccelerometerNeutral) is a 3DS
+  // lying face up.
+  Require(Near(flat.Accelerometer, {0.0F, -1.0F, 0.0F}), "face up did not read the 3DS neutral pose");
   const auto upright = ConvertSwitchSixAxis(kUpright, {});
-  Require(Near(upright.Accelerometer, {0.0F, 0.0F, -1.0F}), "em pé não leu a gravidade em -Z");
+  Require(Near(upright.Accelerometer, {0.0F, 0.0F, -1.0F}), "upright did not read gravity along -Z");
   const auto right = ConvertSwitchSixAxis({1.0F, 0.0F, 0.0F}, {});
-  Require(Near(right.Accelerometer, {-1.0F, 0.0F, 0.0F}), "+X do Switch não virou -X do 3DS");
+  Require(Near(right.Accelerometer, {-1.0F, 0.0F, 0.0F}), "Switch +X did not map to 3DS -X");
   Require(Near(ConvertSwitchSixAxis({}, {1.0F, 0.0F, 0.0F}).GyroscopeDegreesPerSecond, {-360.0F, 0.0F, 0.0F}),
-          "uma rotação por segundo não deu 360 graus/s");
+          "one revolution per second is not 360 deg/s");
 }
 
 void TestMatchesSdlPath() {
   // libnx -> SDL (yuzu, Ryujinx): accel_sdl = g * (-a.x, -a.z, a.y),
-  // gyro_sdl = 2pi * (w.x, w.z, -w.y); depois o ConvertSdlMotion do fork.
+  // gyro_sdl = 2pi * (w.x, w.z, -w.y); then the fork's ConvertSdlMotion.
   constexpr float kGravity = 9.80665F;
   constexpr float kTwoPi = 6.28318530717958647692F;
   const std::array<std::pair<Vector, Vector>, 4> cases{{
@@ -72,16 +73,16 @@ void TestMatchesSdlPath() {
     const auto viaSdl = ThreeDsRecomp::Input::ConvertSdlMotion(
         {-a[0] * kGravity, -a[2] * kGravity, a[1] * kGravity}, true,
         {w[0] * kTwoPi, w[2] * kTwoPi, -w[1] * kTwoPi}, true);
-    Require(Near(direct.Accelerometer, viaSdl.Accelerometer), "acelerômetro difere do caminho do SDL");
+    Require(Near(direct.Accelerometer, viaSdl.Accelerometer), "accelerometer differs from the SDL path");
     Require(Near(direct.GyroscopeDegreesPerSecond, viaSdl.GyroscopeDegreesPerSecond, 1e-2F),
-            "giroscópio difere do caminho do SDL");
+            "gyroscope differs from the SDL path");
   }
 }
 
 void TestRotationIsCoherent() {
-  // Um vetor fixo no mundo, visto de um corpo girando a w, muda como -w x v.
-  // Acelerômetro e giroscópio têm de passar pela mesma rotação própria, senão
-  // a fusão do guest vê a gravidade andar contra o giroscópio.
+  // A world-fixed vector seen from a body turning at w changes as -w x v.
+  // The accelerometer and gyroscope must be mapped by the same proper
+  // rotation, or the guest's fusion sees gravity move against the gyro.
   const std::array<Vector, 3> rates{{{0.2F, 0.0F, 0.0F}, {0.0F, -0.3F, 0.1F}, {0.05F, 0.4F, -0.2F}}};
   for (const auto& gravity : {kFaceUp, kUpright, kTilted}) {
     for (const auto& w : rates) {
@@ -89,7 +90,7 @@ void TestRotationIsCoherent() {
       const auto changeInSwitch = Cross(w, gravity);
       const auto expected = ConvertSwitchSixAxis(changeInSwitch, {}).Accelerometer;
       const auto actual = Cross(Scale(converted.GyroscopeDegreesPerSecond, 1.0F / 360.0F), converted.Accelerometer);
-      Require(Near(expected, actual), "giroscópio e acelerômetro não são a mesma rotação");
+      Require(Near(expected, actual), "gyroscope and accelerometer are not the same rotation");
     }
   }
 }
@@ -108,36 +109,35 @@ ThreeDsRecomp::Input::HidState Resolve(ThreeDsRecomp::Input::MotionSource source
 
 void TestAimFollowsTheConsole() {
   using ThreeDsRecomp::Input::MotionSource;
-  // Levantar a traseira do console (-Z) é um giro positivo em torno de +X.
-  // Tem de chegar ao guest com o sinal do mouse subindo.
+  // Pitching the back of the console (-Z) up is a positive turn about +X.
+  // It must reach the guest with the sign of the mouse moving up.
   const auto tiltUp = ConvertSwitchSixAxis(kUpright, {0.1F, 0.0F, 0.0F});
   const float gyroUp = Resolve(MotionSource::ControllerGyroscope, tiltUp).GyroscopeDegreesPerSecond[0];
   const float mouseUp = Resolve(MotionSource::Mouse, {}, 0, -10).GyroscopeDegreesPerSecond[0];
-  Require(gyroUp < 0.0F && mouseUp < 0.0F, "inclinar o console para cima não mira como o mouse subindo");
-  Require(Near(gyroUp, -36.0F), "0,1 rot/s não chegou ao guest como 36 graus/s");
-  // invert_y (aim.invert_y na configuração) inverte.
+  Require(gyroUp < 0.0F && mouseUp < 0.0F, "tilting the console up does not aim like the mouse moving up");
+  Require(Near(gyroUp, -36.0F), "0.1 rev/s did not reach the guest as 36 deg/s");
+  // invert_y (aim.invert_y in the config) flips it.
   Require(Resolve(MotionSource::ControllerGyroscope, tiltUp, 0, 0, true).GyroscopeDegreesPerSecond[0] > 0.0F,
-          "inverter Y não inverteu o pitch do console");
+          "invert Y did not flip console pitch");
 
-  // Virar para a esquerda deitado é um giro positivo em torno da normal da
-  // tela (+Z); o mouse indo para a esquerda gira igual na pose virtual deitada.
+  // Turning left while lying flat is a positive turn about the screen normal
+  // (+Z); the mouse moving left yaws the same way at the virtual flat pose.
   const auto flatLeft = ConvertSwitchSixAxis(kFaceUp, {0.0F, 0.0F, 0.1F});
   const float gyroLeft = Resolve(MotionSource::ControllerGyroscope, flatLeft).GyroscopeDegreesPerSecond[1];
   const float mouseLeft = Resolve(MotionSource::Mouse, {}, -10, 0).GyroscopeDegreesPerSecond[1];
-  Require(gyroLeft > 0.0F && mouseLeft > 0.0F, "virar para a esquerda não mira como o mouse indo para a esquerda");
+  Require(gyroLeft > 0.0F && mouseLeft > 0.0F, "turning left does not aim like the mouse moving left");
 
-  // Virar para a esquerda em torno do "para cima" do mundo, segurando o
-  // console de qualquer jeito, vira o 3DS para a esquerda em torno do próprio
-  // "para cima" (menos a gravidade).
+  // Turning left about world up, however the console is held, turns the 3DS
+  // body left about its own world up (minus gravity).
   for (const auto& gravity : {kFaceUp, kUpright, kTilted}) {
     const auto left = ConvertSwitchSixAxis(gravity, Scale(gravity, -0.1F));
     Require(Dot(left.GyroscopeDegreesPerSecond, Scale(left.Accelerometer, -1.0F)) > 0.0F,
-            "virar para a esquerda em torno do para cima do mundo não chegou ao 3DS como giro para a esquerda");
+            "turning left about world up did not reach the 3DS as a left turn");
   }
-  // Em pé, esse giro é em torno do eixo longo do 3DS (Z), como o próprio
-  // movimento virtual do fork compõe o yaw inclinado (ResolveMotion).
+  // Upright, that turn is about the 3DS's long axis (Z), as the fork's own
+  // virtual motion composes yaw when pitched (ResolveMotion).
   const auto uprightLeft = ConvertSwitchSixAxis(kUpright, {0.0F, 0.1F, 0.0F});
-  Require(Near(uprightLeft.GyroscopeDegreesPerSecond, {0.0F, 0.0F, 36.0F}), "o yaw em pé não é em torno do +Z do 3DS");
+  Require(Near(uprightLeft.GyroscopeDegreesPerSecond, {0.0F, 0.0F, 36.0F}), "upright yaw is not about 3DS +Z");
 }
 
 SwitchSixAxisSample Sample(std::uint64_t number, Vector angularVelocity, std::uint64_t deltaNanoseconds = 5'000'000,
@@ -149,53 +149,53 @@ void TestAccumulator() {
   SwitchMotionAccumulator accumulator;
   std::uint64_t now = 1'000'000;
   accumulator.Reset(now);
-  // Depois de ligar, a LIFO pode ter o estado do sensor parado: só a posição.
+  // After a start the LIFO may hold the stopped sensor's state: position only.
   std::vector<SwitchSixAxisSample> lifo{Sample(10, {1.0F, 0.0F, 0.0F})};
-  Require(accumulator.Observe(lifo, now) == 0, "a primeira leitura depois de ligar entrou na média");
-  Require(!accumulator.Take(false, now).GyroscopeValid, "movimento informado antes de qualquer amostra nova");
+  Require(accumulator.Observe(lifo, now) == 0, "first read after a start was averaged");
+  Require(!accumulator.Take(false, now).GyroscopeValid, "motion reported before any new sample");
 
-  // Mais nova primeiro; 11 com 5 ms e 12 com 15 ms: média ponderada pelo tempo.
+  // Newest first; 11 at 5 ms and 12 at 15 ms: time-weighted mean.
   now += 20'000;
   lifo = {Sample(12, {0.0F, 0.0F, 0.2F}, 15'000'000), Sample(11, {0.0F, 0.0F, 0.4F}), Sample(10, {1.0F, 0.0F, 0.0F})};
-  Require(accumulator.Observe(lifo, now) == 2, "amostras novas não entraram exatamente uma vez");
+  Require(accumulator.Observe(lifo, now) == 2, "new samples were not taken exactly once");
   auto motion = accumulator.Take(false, now);
-  Require(motion.GyroscopeValid && motion.AccelerometerValid, "movimento médio não é válido");
-  Require(Near(motion.GyroscopeDegreesPerSecond[1], 360.0F * 0.25F), "a média não é ponderada pelo delta de tempo");
+  Require(motion.GyroscopeValid && motion.AccelerometerValid, "averaged motion is not valid");
+  Require(Near(motion.GyroscopeDegreesPerSecond[1], 360.0F * 0.25F), "mean is not weighted by delta time");
   Require(motion.GyroscopeTimestampMicroseconds == now && motion.AccelerometerTimestampMicroseconds == now,
-          "os timestamps não seguem as amostras mais novas");
+          "timestamps do not follow the newest samples");
   const auto firstStamp = motion.GyroscopeTimestampMicroseconds;
 
-  // Nada novo: mesmo valor e timestamp (a calibração conta uma vez).
+  // Nothing new: same value and timestamp (calibration counts it once).
   now += 2'000;
-  Require(accumulator.Observe(lifo, now) == 0, "amostras já vistas entraram na média de novo");
+  Require(accumulator.Observe(lifo, now) == 0, "already seen samples were averaged again");
   motion = accumulator.Take(true, now);
   Require(motion.GyroscopeTimestampMicroseconds == firstStamp && Near(motion.GyroscopeDegreesPerSecond[1], 90.0F),
-          "uma leitura sem amostra nova mudou a observação");
-  // Consumida: a janela seguinte só tem amostras novas; entradas
-  // desconectadas e o delta de tempo padrão.
+          "a poll without new samples changed the observation");
+  // Consumed: the next window holds only new samples; disconnected entries
+  // and the default delta time.
   now += 10'000;
   lifo.insert(lifo.begin(), {Sample(14, {0.0F, 0.0F, 0.6F}, 0), Sample(13, {0.0F, 0.0F, 5.0F}, 5'000'000, kFaceUp, false)});
-  Require(accumulator.Observe(lifo, now) == 1, "amostra desconectada entrou na média");
+  Require(accumulator.Observe(lifo, now) == 1, "disconnected sample was averaged");
   motion = accumulator.Take(true, now);
   Require(Near(motion.GyroscopeDegreesPerSecond[1], 216.0F) && motion.GyroscopeTimestampMicroseconds > firstStamp,
-          "a janela consumida vazou para a seguinte");
+          "consumed window leaked into the next one");
 
-  // Um sensor parado deixa o último estado: velho depois de 200 ms.
+  // A stopped sensor leaves its last state behind: stale after 200 ms.
   now += SwitchMotionAccumulator::StaleMicroseconds + 1;
-  Require(accumulator.Observe(lifo, now) == 0 && accumulator.Stale(now), "sensor parado não detectado");
-  Require(!accumulator.Take(false, now).GyroscopeValid, "movimento velho saiu como válido");
+  Require(accumulator.Observe(lifo, now) == 0 && accumulator.Stale(now), "stalled sensor not detected");
+  Require(!accumulator.Take(false, now).GyroscopeValid, "stale motion was reported as valid");
 
-  // Um contador que voltou (sensor reiniciado) só zera a posição.
+  // A counter that went backwards (sensor restarted) only resets the position.
   lifo = {Sample(3, {0.0F, 0.0F, 1.0F})};
-  Require(accumulator.Observe(lifo, now) == 0, "contador reiniciado repetiu amostras antigas");
+  Require(accumulator.Observe(lifo, now) == 0, "restarted counter replayed old samples");
   now += 5'000;
   lifo.insert(lifo.begin(), Sample(4, {0.0F, 0.0F, 0.1F}));
   Require(accumulator.Observe(lifo, now) == 1 && Near(accumulator.Take(false, now).GyroscopeDegreesPerSecond[1], 36.0F),
-          "amostras depois do contador reiniciar se perderam");
+          "samples after a counter restart were lost");
 }
 
 void TestCalibrationSeesFreshSamples() {
-  // A calibração do fork pula observações cujo timestamp não andou.
+  // The fork's calibration skips observations whose timestamp did not move.
   SwitchMotionAccumulator accumulator;
   ThreeDsRecomp::Input::MotionCalibrationAccumulator calibration;
   std::uint64_t now = 5'000'000;
@@ -206,7 +206,7 @@ void TestCalibrationSeesFreshSamples() {
   bool done = false;
   for (int poll = 0; poll < 200 && !done; ++poll) {
     now += 16'000;
-    if (poll % 2 == 0) {  // uma leitura sim, outra não, traz amostras novas
+    if (poll % 2 == 0) {  // every other poll brings new samples
       lifo = {Sample(number + 3, {0.001F, 0.0F, 0.0F}), Sample(number + 2, {0.001F, 0.0F, 0.0F}),
               Sample(number + 1, {0.001F, 0.0F, 0.0F})};
       number += 3;
@@ -214,12 +214,87 @@ void TestCalibrationSeesFreshSamples() {
     accumulator.Observe(lifo, now);
     done = calibration.Observe(accumulator.Take(true, now));
     Require(calibration.SamplesCollected() <= static_cast<std::uint32_t>(poll / 2 + 1),
-            "a calibração contou uma observação repetida");
+            "calibration counted a repeated observation");
   }
-  Require(done, "a calibração nunca terminou com o sensor do Switch");
+  Require(done, "calibration never completed from the Switch sensor");
   const auto mean = calibration.Mean();
   Require(Near(mean.GyroscopeDegreesPerSecond[0], -0.36F) && Near(mean.Accelerometer, {0.0F, -1.0F, 0.0F}),
-          "a média da calibração não é o viés e a pose convertidos");
+          "calibration mean is not the converted bias and pose");
+}
+
+bool Contains(const std::string& text, const char* part) { return text.find(part) != std::string::npos; }
+
+void TestMotionLog() {
+  SwitchMotionLog log;
+  std::uint64_t now = 10'000'000;
+  SwitchMotionLogSample sample;
+  sample.Wanted = true;
+  sample.ControllerInstance = 0;
+  sample.Available = SwitchMotionSource::Handheld;
+  sample.Running = SwitchMotionSource::Handheld;
+  auto line = log.Observe(sample, now);
+  Require(line && Contains(*line, "motion: reason=start pad=0 wanted=1 available=handheld sensor=handheld start_rc=0x0"),
+          "the first poll did not write the state line");
+
+  // A minute of polls at 60 Hz: one line, at the minute, with the counts.
+  sample.SamplesAdded = 3;
+  sample.GyroscopeValid = true;
+  sample.PhysicalAim = true;
+  sample.GuestGyroscopeEnabled = false;
+  int lines = 0;
+  for (int poll = 0; poll < 3600; ++poll) {
+    now += 16'667;
+    sample.GuestGyroscopeSamples += 1;
+    if (poll % 2 == 0) sample.GuestNonzeroGyroscopeSamples += 1;
+    if ((line = log.Observe(sample, now))) {
+      ++lines;
+      Require(Contains(*line, "reason=interval") && Contains(*line, " polls=3600 wanted_polls=3600 samples=10800") &&
+                  Contains(*line, " valid=3600 restarts=0 physical_aim=3600 guest_gyro=off guest_ring=3600") &&
+                  Contains(*line, " guest_nonzero=1800"),
+              "the minute line does not count the minute's polls");
+    }
+  }
+  Require(lines == 1, "a minute of steady polls did not give exactly one line");
+
+  // The game enables its gyro: a change line, but not within a second of
+  // the previous line, so a state flipping every poll stays at one a second.
+  sample.GuestGyroscopeEnabled = true;
+  now += 16'667;
+  Require(!log.Observe(sample, now), "a change within a second of the previous line was written at once");
+  now += 1'000'000;
+  line = log.Observe(sample, now);
+  Require(line && Contains(*line, "reason=change") && Contains(*line, "guest_gyro=on"),
+          "the game's gyro enable did not write a change line");
+  sample.GuestGyroscopeEnabled = false;
+  int changes = 0;
+  for (int poll = 0; poll < 120; ++poll) {
+    now += 16'667;
+    sample.GuestGyroscopeEnabled = !sample.GuestGyroscopeEnabled;
+    changes += log.Observe(sample, now) ? 1 : 0;
+  }
+  Require(changes <= 2, "a state flipping every poll wrote more than one line a second");
+
+  // Not wanted and no guest gyro samples: the state line, then nothing more.
+  sample = {};
+  sample.ControllerInstance = 1;
+  sample.Available = SwitchMotionSource::Handheld;
+  now += 2'000'000;
+  line = log.Observe(sample, now);
+  Require(line && Contains(*line, "reason=change pad=1 wanted=0 available=handheld sensor=none"),
+          "selecting another pad did not write a change line");
+  for (int poll = 0; poll < 3 * 3600; ++poll) {
+    now += 16'667;
+    Require(!log.Observe(sample, now), "a quiet minute wrote a line");
+  }
+
+  // A failed start shows its result.
+  sample.Wanted = true;
+  sample.ControllerInstance = 0;
+  sample.Running = SwitchMotionSource::Handheld;
+  sample.StartResult = 0x1234;
+  now += 2'000'000;
+  line = log.Observe(sample, now);
+  Require(line && Contains(*line, "sensor=handheld start_rc=0x1234"), "a failed start did not show its result");
 }
 
 } // namespace
@@ -231,6 +306,7 @@ int main() {
   TestAimFollowsTheConsole();
   TestAccumulator();
   TestCalibrationSeesFreshSamples();
+  TestMotionLog();
   std::puts("oot3d_switch_motion_tests: ok");
   return 0;
 }

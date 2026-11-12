@@ -11,6 +11,11 @@ namespace Oot3dNativeGame {
 
 inline constexpr std::string_view kTopScreen211MenuAtlasSemantic =
     "oot3d/topscreen/2.1.1/menu_atlas";
+// SingleScreen 3.x custom_ui01 (512x256): the button circles, D-pad cross,
+// touch labels and tab hints draw from it, so TopScreen's HD UI atlas
+// (--topscreen-ui-atlas-hd) replaces them.
+inline constexpr std::string_view kTopScreen30UiAtlasSemantic =
+    "oot3d/topscreen/3.0/ui_atlas";
 
 struct TopScreenItemsHintCursorBounds {
   bool Active = false;
@@ -65,7 +70,7 @@ BuildTopScreenItemsHintGeometry(const TopScreenItemsHintRuntimeState &state,
 // The renderer receives only ordinary resolved UI primitives.
 std::size_t AppendTopScreenItemsHintPresentation(
     const TopScreenItemsHintGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &menuAtlas,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output);
 
 } // namespace Oot3dNativeGame

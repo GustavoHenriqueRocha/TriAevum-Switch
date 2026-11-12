@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -66,7 +67,7 @@ float ObjMure2DistanceScalar(float nativeScalar, float projectedX,
     return scalar;
 }
 
-void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates) {
+void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates, uint32_t limit) {
     std::vector<ActorExtensionCandidate*> ordered;
     ordered.reserve(candidates.size());
     for (auto& candidate : candidates) {
@@ -79,8 +80,16 @@ void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates) {
         if (a->DistanceSquared != b->DistanceSquared) return a->DistanceSquared < b->DistanceSquared;
         return a->Identity < b->Identity;
     });
-    for (size_t i = 0; i < std::min<size_t>(ordered.size(), kActorExtensionLimit); ++i)
+    for (size_t i = 0; i < std::min<size_t>(ordered.size(), limit); ++i)
         ordered[i]->Selected = true;
+}
+
+uint32_t ActorExtensionLimit(ActorDrawDistance choice) noexcept {
+    switch (choice) {
+    case ActorDrawDistance::Farther: return 48U;
+    case ActorDrawDistance::Maximum: return 64U;
+    default: return kActorExtensionLimit;
+    }
 }
 
 bool ActorLightBudgetAllows(uint32_t used, uint32_t remaining) noexcept {
@@ -91,6 +100,48 @@ bool ActorLightBudgetAllows(uint32_t used, uint32_t remaining) noexcept {
 uint8_t NativeCulledActorFade(ActorCullingClass classification, uint8_t fade) noexcept {
     return classification == ActorCullingClass::Far && fade != 0U
         ? static_cast<uint8_t>(fade - 1U) : 0U;
+}
+
+float ActorDrawDistanceMultiplier(ActorDrawDistance choice) noexcept {
+    switch (choice) {
+    case ActorDrawDistance::Far: return 2.0F;
+    case ActorDrawDistance::Farther: return 3.0F;
+    case ActorDrawDistance::Maximum: return kExtendedActorDistanceMultiplier;
+    case ActorDrawDistance::Original: break;
+    }
+    return 1.0F;
+}
+
+ActorDrawDistance ParseActorDrawDistance(const char* word) noexcept {
+    if (word == nullptr) return ActorDrawDistance::Original;
+    for (const auto choice : {ActorDrawDistance::Far, ActorDrawDistance::Farther, ActorDrawDistance::Maximum})
+        if (std::strcmp(word, ActorDrawDistanceWord(choice)) == 0) return choice;
+    return ActorDrawDistance::Original;
+}
+
+const char* ActorDrawDistanceWord(ActorDrawDistance choice) noexcept {
+    switch (choice) {
+    case ActorDrawDistance::Far: return "far";
+    case ActorDrawDistance::Farther: return "farther";
+    case ActorDrawDistance::Maximum: return "maximum";
+    case ActorDrawDistance::Original: break;
+    }
+    return "original";
+}
+
+bool ActorExtensionExcluded(uint16_t id, uint16_t params) noexcept {
+    constexpr uint16_t kEnViewer = 0x002AU; // actor_object_semantics.h
+    constexpr uint16_t kEnSw = 0x0095U;
+    if (id == kEnViewer) return true;
+    // En_Sw type (params bits 13-15): 1 and 2 are Gold Skulltulas.
+    const unsigned type = (params & 0xE000U) >> 13U;
+    return id == kEnSw && (type == 1U || type == 2U);
+}
+
+uint8_t ActorHandoffFade(uint8_t extendedFade, uint8_t nativeFade, uint8_t maximum) noexcept {
+    const unsigned top = maximum != 0U ? maximum : 10U;
+    const unsigned continued = std::min<unsigned>(extendedFade + 1U, top);
+    return static_cast<uint8_t>(std::max<unsigned>(continued, nativeFade));
 }
 
 } // namespace Oot3dNativeGame

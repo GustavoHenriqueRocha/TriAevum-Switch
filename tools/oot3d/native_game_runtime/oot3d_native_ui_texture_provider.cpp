@@ -1,5 +1,6 @@
 #include "oot3d_native_ui_texture_provider.h"
 
+#include "fast/renderer/content_hash.h"
 #include "oot3d/renderer/pica_texture_decode.h"
 
 #include <algorithm>
@@ -298,6 +299,21 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
     const oot3d::ui::UiTextureIdentity& identity,
     oot3d::ui::UiTexturePixels& pixels, std::string* error) const {
     ++mStats.resolve_calls;
+    return ResolvePixels(identity, pixels, error, false);
+}
+
+void Oot3dNativeA32UiTextureProvider::RequestAhead(
+    const oot3d::ui::UiTextureIdentity& identity) const {
+    if (!mCustomTextures.resolve) {
+        return;
+    }
+    oot3d::ui::UiTexturePixels pixels;
+    (void)ResolvePixels(identity, pixels, nullptr, true);
+}
+
+bool Oot3dNativeA32UiTextureProvider::ResolvePixels(
+    const oot3d::ui::UiTextureIdentity& identity,
+    oot3d::ui::UiTexturePixels& pixels, std::string* error, bool ahead) const {
     pixels = {};
     if (error != nullptr) {
         error->clear();
@@ -308,6 +324,17 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
         if (profileTexture != nullptr) {
             pixels.width = profileTexture->Width;
             pixels.height = profileTexture->Height;
+            if (ahead) {
+                // Identified by its encoded bytes: nothing to decode here.
+                ApplyCustomTexture(profileTexture->NativePicaFormat,
+                                   profileTexture->EncodedPayload, pixels, true, false);
+                return true;
+            }
+            if (ApplyCachedCustomTexture(profileTexture->NativePicaFormat,
+                                         profileTexture->EncodedPayload, pixels)) {
+                ++mStats.profile_asset_resolves;
+                return true;
+            }
             if (!Oot3d::Renderer::DecodePicaTextureRgba8(
                     profileTexture->NativePicaFormat,
                     profileTexture->Width, profileTexture->Height,
@@ -317,8 +344,22 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
                 return false;
             }
             ++mStats.profile_asset_resolves;
+            ApplyCustomTexture(profileTexture->NativePicaFormat,
+                               profileTexture->EncodedPayload, pixels, false, false);
             return true;
         }
+    }
+    // TopScreen profile textures (2.1.1 menu/font atlases, the 3.0 UI atlas)
+    // exist only in the pack built from the TopScreen mod, which the player
+    // may decline. Without it their consumers (the Items hint, the D-pad cycle
+    // badges) draw nothing instead of failing the whole UI frame.
+    if (identity.semantic_name.starts_with("oot3d/topscreen/2.1.1/") ||
+        identity.semantic_name.starts_with("oot3d/topscreen/3.0/")) {
+        pixels.width = 1U;
+        pixels.height = 1U;
+        pixels.rgba8.assign(4U, 0U);
+        ++mStats.profile_asset_absent;
+        return true;
     }
     if (ResolveCameraOptionGlyphAtlas(identity, pixels)) {
         return true;
@@ -425,23 +466,48 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
     }
     mStats.bytes_read += encoded.size();
 
+    // The game's own bytes, kept when the override replaces them: texture
+    // packs (and the TopScreen mod's own HD images) name the native texture,
+    // which TopScreen 3.x leaves unchanged; only this port rewrites it.
+    std::vector<std::uint8_t> original;
     if (mTextureOverrides != nullptr && !mTextureOverrides->Empty()) {
         ++mStats.override_checks;
+        original = encoded;
         switch (mTextureOverrides->Apply(encoded)) {
         case TopScreenTextureOverrideResult::Applied:
             ++mStats.overrides_applied;
             break;
         case TopScreenTextureOverrideResult::AlreadyApplied:
             ++mStats.overrides_already_applied;
+            original.clear();
             break;
         case TopScreenTextureOverrideResult::NoMatch:
             ++mStats.override_no_matches;
+            original.clear();
             break;
         }
     }
 
     pixels.width = descriptor->width;
     pixels.height = descriptor->height;
+    if (ahead) {
+        // The custom source identifies the texture by the game's own encoded
+        // bytes (before the override), off this thread: no decode here.
+        if (!generatedText) {
+            ApplyCustomTexture(encoding->native_pica_format, original.empty() ? encoded : original,
+                               pixels, true, false);
+        }
+        return true;
+    }
+    // Resolved before (a pack change, a provisional poll): the identity
+    // cache has its decode and hashes; read and hashed only.
+    if (!generatedText &&
+        ApplyCachedCustomTexture(encoding->native_pica_format,
+                                 original.empty() ? std::span<const std::uint8_t>(encoded)
+                                                  : std::span<const std::uint8_t>(original),
+                                 pixels)) {
+        return true;
+    }
     Oot3dPicaResourceSnapshot transformed;
     std::span<const std::uint8_t> coverageBytes = encoded;
     if (generatedText && mGeneratedTextureTransform) {
@@ -475,7 +541,198 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
             pixels.rgba8[pixel] = pixels.rgba8[pixel + 1] = pixels.rgba8[pixel + 2] = 255;
         }
     }
+    if (!generatedText) {
+        if (original.empty()) {
+            ApplyCustomTexture(encoding->native_pica_format, coverageBytes, pixels, false, false);
+        } else {
+            ApplyCustomTexture(encoding->native_pica_format, original, pixels, false, true);
+        }
+    }
     return true;
+}
+
+std::size_t Oot3dNativePicaBaseLevelBytes(std::uint8_t nativePicaFormat,
+                                          std::uint16_t width,
+                                          std::uint16_t height) noexcept {
+    constexpr std::array<std::uint8_t, 14> bitsPerPixel{
+        32, 24, 16, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 8};
+    if (nativePicaFormat >= bitsPerPixel.size()) {
+        return 0U;
+    }
+    return std::size_t(width) * height * bitsPerPixel[nativePicaFormat] / 8U;
+}
+
+bool IsUiHdAtlasSize(std::uint32_t width, std::uint32_t height,
+                     std::uint32_t nativeWidth, std::uint32_t nativeHeight) noexcept {
+    return nativeWidth != 0U && nativeHeight != 0U && width != 0U &&
+           width % nativeWidth == 0U &&
+           std::uint64_t(width) * nativeHeight == std::uint64_t(height) * nativeWidth;
+}
+
+Oot3dNativeUiCustomTexture ChooseUiCustomTexture(
+    const Oot3d::Renderer::AzaharTextureResolveResult& pack,
+    const Oot3dNativeUiCustomTextureRequest& request,
+    const Oot3dUiHdAtlas* hdAtlas, const Oot3dUiHdAtlas* hdImage) {
+    using Oot3d::Renderer::AzaharTextureResolveState;
+    Oot3dNativeUiCustomTexture custom;
+    if (pack.State == AzaharTextureResolveState::Ready && pack.Replacement &&
+        pack.Replacement->Rgba8) {
+        custom.state = Oot3dNativeUiCustomTexture::State::Ready;
+        custom.width = pack.Replacement->Width;
+        custom.height = pack.Replacement->Height;
+        custom.rgba8 = pack.Replacement->Rgba8;
+        return custom;
+    }
+    const Oot3dUiHdAtlas* fallback = nullptr;
+    if (hdAtlas != nullptr && hdAtlas->rgba8 != nullptr && !hdAtlas->native_payload.empty() &&
+        std::ranges::equal(request.encoded_base_level, hdAtlas->native_payload)) {
+        fallback = hdAtlas;
+    } else if (hdImage != nullptr && hdImage->rgba8 != nullptr) {
+        fallback = hdImage;
+    }
+    if (pack.State == AzaharTextureResolveState::Pending) {
+        custom.state = Oot3dNativeUiCustomTexture::State::Pending;
+    } else if (fallback != nullptr) {
+        custom.state = Oot3dNativeUiCustomTexture::State::Ready;
+    } else {
+        return custom;
+    }
+    if (fallback != nullptr) {
+        custom.width = fallback->width;
+        custom.height = fallback->height;
+        custom.rgba8 = fallback->rgba8;
+    }
+    return custom;
+}
+
+void Oot3dNativeA32UiTextureProvider::ApplyCustomTexture(
+    std::uint8_t nativePicaFormat, std::span<const std::uint8_t> encoded,
+    oot3d::ui::UiTexturePixels& pixels, bool ahead, bool overridden) const {
+    if (!mCustomTextures.resolve) {
+        return;
+    }
+    const std::size_t baseBytes =
+        Oot3dNativePicaBaseLevelBytes(nativePicaFormat, pixels.width, pixels.height);
+    if (baseBytes == 0U || encoded.size() < baseBytes) {
+        return;
+    }
+    // `pixels` hold the override's art; a pack's identity of a decoded
+    // format (Azahar's legacy hash of formats 5 and up) needs the game's own.
+    std::vector<std::uint8_t> originalRgba8;
+    if (overridden && nativePicaFormat >= 5U &&
+        !Oot3d::Renderer::DecodePicaTextureRgba8(nativePicaFormat, pixels.width, pixels.height,
+                                                 encoded.first(baseBytes), originalRgba8, nullptr)) {
+        return;
+    }
+    const auto bytes = encoded.first(baseBytes);
+    const std::uint64_t modernHash = Fast::Renderer::ContentHash64(bytes);
+    const auto custom = mCustomTextures.resolve({
+        pixels.width, pixels.height, nativePicaFormat,
+        bytes, overridden && nativePicaFormat >= 5U ? originalRgba8 : pixels.rgba8, ahead,
+        modernHash, std::nullopt,
+    });
+    if (ahead) {
+        // Only to start the replacement's preparation: no pixels wanted.
+        ++mStats.custom_texture_ahead;
+        return;
+    }
+    // The decode, shared from here on (moved, not copied), and kept with the
+    // legacy hash for the next resolve of the same bytes.
+    auto native = std::make_shared<const std::vector<std::uint8_t>>(std::move(pixels.rgba8));
+    pixels.rgba8.clear();
+    pixels.shared_rgba8 = native;
+    if (custom.legacy_hash.has_value() &&
+        native->size() == std::size_t(pixels.width) * pixels.height * 4U) {
+        const std::uint64_t key = IdentityKey(modernHash, pixels.width, pixels.height, nativePicaFormat);
+        if (const auto [entry, inserted] =
+                mIdentities.try_emplace(key, CachedIdentity{native, *custom.legacy_hash, ++mIdentityClock});
+            inserted) {
+            ++mStats.identity_decodes;
+            mIdentityBytes += native->size();
+            while (mIdentityBytes > kIdentityCacheBytes && mIdentities.size() > 1U) {
+                auto oldest = mIdentities.begin();
+                for (auto candidate = mIdentities.begin(); candidate != mIdentities.end(); ++candidate) {
+                    if (candidate->second.last_use < oldest->second.last_use) oldest = candidate;
+                }
+                mIdentityBytes -= std::min(mIdentityBytes, oldest->second.native->size());
+                mIdentities.erase(oldest);
+                ++mStats.identity_evictions;
+            }
+        }
+    }
+    FinishCustomTexture(custom, pixels);
+}
+
+std::uint64_t Oot3dNativeA32UiTextureProvider::IdentityKey(std::uint64_t modernHash, std::uint16_t width,
+                                                           std::uint16_t height, std::uint8_t format) noexcept {
+    std::uint64_t shape = (std::uint64_t(width) << 24U) | (std::uint64_t(height) << 8U) | format;
+    shape *= 0x9E3779B97F4A7C15ULL;
+    return modernHash ^ (shape ^ (shape >> 29U));
+}
+
+bool Oot3dNativeA32UiTextureProvider::ApplyCachedCustomTexture(
+    std::uint8_t nativePicaFormat, std::span<const std::uint8_t> encoded,
+    oot3d::ui::UiTexturePixels& pixels) const {
+    if (!mCustomTextures.resolve) {
+        return false;
+    }
+    const std::size_t baseBytes =
+        Oot3dNativePicaBaseLevelBytes(nativePicaFormat, pixels.width, pixels.height);
+    if (baseBytes == 0U || encoded.size() < baseBytes) {
+        return false;
+    }
+    const auto bytes = encoded.first(baseBytes);
+    const std::uint64_t modernHash = Fast::Renderer::ContentHash64(bytes);
+    const auto found = mIdentities.find(IdentityKey(modernHash, pixels.width, pixels.height, nativePicaFormat));
+    if (found == mIdentities.end()) {
+        return false;
+    }
+    found->second.last_use = ++mIdentityClock;
+    ++mStats.identity_hits;
+    pixels.rgba8.clear();
+    pixels.shared_rgba8 = found->second.native;
+    FinishCustomTexture(mCustomTextures.resolve({
+                            pixels.width, pixels.height, nativePicaFormat, bytes, *found->second.native, false,
+                            modernHash, found->second.legacy_hash,
+                        }),
+                        pixels);
+    return true;
+}
+
+void Oot3dNativeA32UiTextureProvider::FinishCustomTexture(const Oot3dNativeUiCustomTexture& custom,
+                                                          oot3d::ui::UiTexturePixels& pixels) const {
+    if (custom.state == Oot3dNativeUiCustomTexture::State::None) {
+        return;
+    }
+    const bool pending = custom.state == Oot3dNativeUiCustomTexture::State::Pending;
+    if (pending) {
+        // The native pixels (or the source's stand-in) are drawn while the
+        // replacement decodes; the texture is resolved again. Without a
+        // stand-in the native pixels are the old art: the renderer holds the
+        // first draws instead (N64UiFast3dRenderer, kUiHoldPolls).
+        ++mStats.custom_texture_pending;
+        pixels.provisional = true;
+        pixels.native_stand_in = custom.rgba8 == nullptr;
+    }
+    constexpr std::uint32_t kMaxExtent = 16384U;
+    if (custom.rgba8 == nullptr || custom.width == 0U || custom.height == 0U ||
+        custom.width > kMaxExtent || custom.height > kMaxExtent ||
+        custom.rgba8->size() != std::size_t(custom.width) * custom.height * 4U) {
+        return;
+    }
+    // UI coordinates are normalized, so a larger replacement keeps the same
+    // atlas layout at a higher resolution. Shared, not copied.
+    pixels.width = static_cast<std::uint16_t>(custom.width);
+    pixels.height = static_cast<std::uint16_t>(custom.height);
+    pixels.rgba8.clear();
+    pixels.shared_rgba8 = custom.rgba8;
+    if (!pending) {
+        ++mStats.custom_texture_replacements;
+    }
+}
+
+std::uint64_t Oot3dNativeA32UiTextureProvider::Revision() const noexcept {
+    return mCustomTextures.revision ? mCustomTextures.revision() : 0U;
 }
 
 const Oot3dNativeUiTextureProviderStats&

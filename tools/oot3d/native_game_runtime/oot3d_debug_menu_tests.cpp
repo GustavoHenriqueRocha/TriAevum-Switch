@@ -17,21 +17,21 @@ void Require(bool condition, const char *message) {
 int main() {
   using namespace Fast::Oot3d;
   {
-    // Segurar L3+R3 abre uma vez só (não pisca a cada quadro).
+    // Holding L3+R3 opens it only once (doesn't flicker every frame).
     DebugMenuCombo combo;
-    Require(!combo.Update(false), "solto");
-    Require(combo.Update(true), "apertou");
-    for (int frame = 0; frame < 30; ++frame) Require(!combo.Update(true), "segurando");
-    Require(!combo.Update(false), "soltou");
-    Require(combo.Update(true), "apertou de novo");
+    Require(!combo.Update(false), "released");
+    Require(combo.Update(true), "pressed");
+    for (int frame = 0; frame < 30; ++frame) Require(!combo.Update(true), "holding");
+    Require(!combo.Update(false), "let go");
+    Require(combo.Update(true), "pressed again");
   }
   {
-    // Abre e fecha.
-    Require(!DebugMenuOpen(), "começa fechado");
+    // Opens and closes.
+    Require(!DebugMenuOpen(), "starts closed");
     ToggleDebugMenu();
-    Require(DebugMenuOpen(), "abriu");
+    Require(DebugMenuOpen(), "opened");
     ToggleDebugMenu();
-    Require(!DebugMenuOpen(), "fechou");
+    Require(!DebugMenuOpen(), "closed");
   }
   std::puts("debug menu: PASS");
   return 0;

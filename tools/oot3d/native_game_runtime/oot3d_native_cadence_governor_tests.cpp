@@ -8,6 +8,7 @@
 #include "oot3d_native_cadence_governor.h"
 #include "oot3d_native_cadence_sim.h"
 #include "oot3d_native_interpolation_pacing.h"
+#include "oot3d_native_rate_pacing.h"
 
 #include <cmath>
 #include <cstdio>
@@ -432,10 +433,10 @@ void Print(const char *name, Fps60Mode mode, const Result &result) {
   const auto &c = result.Cadence;
   const double seconds = result.Seconds;
   std::printf(
-      "%-10s %-8s fps=%5.1f pics/s=%5.1f jogo=%5.1f refr/s  "
-      "intervalos(1/2/3/4+)=%llu/%llu/%llu/%llu  "
-      "hold(1/2/3/4+)=%llu/%llu/%llu/%llu  trocas/s=%5.2f  "
-      "desvio=%4.1f ms  judder=%4.1f ms  em30=%3.0f%%  travas=%llu\n",
+      "%-10s %-8s fps=%5.1f pics/s=%5.1f game=%5.1f refr/s  "
+      "intervals(1/2/3/4+)=%llu/%llu/%llu/%llu  "
+      "hold(1/2/3/4+)=%llu/%llu/%llu/%llu  switches/s=%5.2f  "
+      "deviation=%4.1f ms  judder=%4.1f ms  at30=%3.0f%%  stalls=%llu\n",
       name, Fps60ModeName(mode).data(),
       static_cast<double>(result.Presents) / seconds,
       static_cast<double>(result.Pictures) / seconds,
@@ -612,7 +613,7 @@ Segment Tour15(double seconds, double gpuMs, double hiddenMs) {
 
 void SweepMargin() {
   for (bool split : {false, true}) {
-  std::printf("margem (split %d) | por GPU medida/replay: fps pics\n", split ? 1 : 0);
+  std::printf("margin (split %d) | per GPU measured/replay: fps pics\n", split ? 1 : 0);
   for (double margin : {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0}) {
     std::printf("%4.1f ms:", margin);
     double fps = 0.0, pics = 0.0;
@@ -624,10 +625,10 @@ void SweepMargin() {
       pics += r.Pictures / r.Seconds;
       ++n;
     }
-    std::printf("  | media %.2f/%.1f\n", fps / n, pics / n);
+    std::printf("  | average %.2f/%.1f\n", fps / n, pics / n);
   }
   }
-  std::printf("conta espera, margem 0 (pgo5i):");
+  std::printf("counts wait, margin 0 (pgo5i):");
   for (double gpu : {11.0, 12.0, 12.5, 13.15, 13.6, 14.0, 14.5, 14.95, 15.25, 16.4}) {
     const auto r = SimulateSwapchain({Tour15(60, gpu, 2.75)}, true, 0.0);
     std::printf(" %.2f:%.1f/%.1f", gpu, r.Presents / r.Seconds, r.Pictures / r.Seconds);
@@ -639,11 +640,11 @@ void SweepMargin() {
 // 14.95 ms per replay (Kakariko) and 59+ at 13.15-13.6.
 void Calibrate() {
   for (double hidden : {0.0, 1.0, 1.5, 2.0, 2.5, 3.0}) {
-    std::printf("oculto %.1f:", hidden);
+    std::printf("hidden %.1f:", hidden);
     for (double gpu : {13.15, 13.6, 14.95, 15.25, 16.4}) {
       const auto r = SimulateSwapchain({Tour15(60, gpu, hidden)}, false, 0.0);
       const auto w = SimulateSwapchain({Tour15(60, gpu, hidden)}, true, 0.0);
-      std::printf("  g%.2f fps %.1f pics %.1f | conta %.1f/%.1f", gpu,
+      std::printf("  g%.2f fps %.1f pics %.1f | counts %.1f/%.1f", gpu,
                   r.Presents / r.Seconds, r.Pictures / r.Seconds,
                   w.Presents / w.Seconds, w.Pictures / w.Seconds);
     }
@@ -669,16 +670,16 @@ void TestMarginKeepsTheRefresh() {
 }
 
 void ReportRenderWaits() {
-  std::printf("\n== tour14: espera do acquire no custo (swapchain de 3) ==\n");
+  std::printf("\n== tour14: acquire wait in the cost (swapchain of 3) ==\n");
   for (double gpu : {12.5, 13.5, 14.5, 15.5, 16.5}) {
     for (bool count : {true, false}) {
       const auto result = SimulateSwapchain({Tour14Heavy(60, gpu)}, count);
       char name[32];
       std::snprintf(name, sizeof(name), "gpu%.1f/%s", gpu,
-                    count ? "conta" : "ocupado");
+                    count ? "counts" : "busy");
       Print(name, Fps60Mode::Legacy, result);
-      std::printf("           intermediarios desenhados=%llu descartados=%llu "
-                  "espera_acquire=%.2f ms/quadro\n",
+      std::printf("           in_between_drawn=%llu dropped=%llu "
+                  "acquire_wait=%.2f ms/frame\n",
                   static_cast<unsigned long long>(result.InBetweenDrawn),
                   static_cast<unsigned long long>(result.InBetweenDropped),
                   result.AcquireWaitMs /
@@ -689,8 +690,8 @@ void ReportRenderWaits() {
 
 void ReportFramesInFlight() {
   for (uint32_t queue : {0U, 1U}) {
-    std::printf("\n== areas lentas (tour2), swap %s ==\n",
-                queue == 0U ? "bloqueante" : "com fila de 1 quadro");
+    std::printf("\n== slow areas (tour2), swap %s ==\n",
+                queue == 0U ? "blocking" : "with a 1-frame queue");
     for (double step : {12.0, 15.0, 18.0, 21.0, 24.0}) {
       for (uint32_t inFlight : {1U, 2U}) {
         char name[32];
@@ -760,14 +761,14 @@ void TestEarlyFrameSlotAbsorbsLongSteps() {
 }
 
 void ReportFrameSlots() {
-  std::printf("\n== tour20: passos longos isolados, slot do quadro ==\n");
-  static constexpr const char *kNames[] = {"f1", "cedo", "cedo+rel", "f2"};
+  std::printf("\n== tour20: isolated long steps, frame slot ==\n");
+  static constexpr const char *kNames[] = {"f1", "early", "early+clk", "f2"};
   for (double step : {10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0}) {
     for (auto slot : {SlotMode::One, SlotMode::Early, SlotMode::EarlyClock,
                       SlotMode::Two}) {
       const auto result = SimulateSlots({Tour20Area(60, step)}, slot);
-      std::printf("g%.0f %-9s perdidos/min=%6.1f refr_perdidos/min=%6.1f "
-                  "pics/s=%5.1f jogo=%5.1f refr/s interm=%llu/%llu held=%llu\n",
+      std::printf("g%.0f %-9s missed/min=%6.1f refr_missed/min=%6.1f "
+                  "pics/s=%5.1f game=%5.1f refr/s interm=%llu/%llu held=%llu\n",
                   step, kNames[static_cast<int>(slot)],
                   60.0 * static_cast<double>(result.MissedFrames) /
                       result.Seconds,
@@ -782,10 +783,369 @@ void ReportFrameSlots() {
   }
 }
 
+// L3+R3 > Video > FPS applied while the game runs (oot3d_native_rate_pacing.h):
+// the in-between governor, dynamic resolution and the cadence governor of a
+// session that ran at one rate, reconfigured for the other at a frame
+// boundary, must behave exactly as a start at the new rate (same budgets,
+// interpolation level, scale, lock, holds), whatever they learned before;
+// the one exception is the scale a switch to 60 begins at
+// (RatePacingResolutionMemory), given to both as their start.
+struct RateRig {
+  InterpolationPacingGovernor Pacing;
+  DynamicResolutionController Drs;
+  NativeCadenceGovernor Cadence;
+  double Now = 0.0;
+};
+
+RatePacingConfig LiveRateConfig() {
+  RatePacingConfig config;
+  config.Interpolation.KeepGameSpeed = true;
+  config.Interpolation.ReducedScale = 2.0F;
+  config.BaseScale = 3.0F;
+  config.ReducedAvailable = true;
+  config.Resolution.MaxScale = 3.0F;
+  config.Resolution.MinScale = 2.25F;
+  config.Cadence = AdaptiveConfig();
+  return config;
+}
+
+// `steps` guest steps at `rateHz` under a load (GPU ms of a step frame, ms
+// of the game thread's step pair), modelled like the console: at 60 a step
+// and an in-between picture (or the step again when the in-between is
+// dropped), at 30 one step picture per period. Returns every decision and
+// estimate in order, and the counters this drive added.
+std::vector<double> DriveRate(RateRig &rig, uint32_t rateHz, double stepMs,
+                              double gamePairMs, int steps) {
+  std::vector<double> trace;
+  const CadenceStats before = rig.Cadence.Stats();
+  const double period = 1.0 / static_cast<double>(rateHz);
+  const bool interpolating = rateHz == 60U;
+  const auto present = [&](PresentedPicture picture, uint32_t periods) {
+    rig.Now += periods * period;
+    const double gpuPair =
+        rig.Pacing.StepCostMs() > 0.0
+            ? rig.Pacing.StepCostMs() +
+                  rig.Pacing.Estimate(InterpolatedSampleLevel::Full)
+            : 0.0;
+    rig.Cadence.ObservePresent(picture, rig.Now, gpuPair);
+  };
+  uint32_t stepPeriods = 1U;
+  for (int step = 0; step < steps; ++step) {
+    rig.Cadence.ObserveGameFrame(gamePairMs / 2.0, gamePairMs / 2.0 - 2.5, 1U,
+                                 false);
+    rig.Cadence.ObserveGameFrame(gamePairMs / 2.0, gamePairMs / 2.0 - 2.5, 1U,
+                                 true);
+    rig.Pacing.ObserveStep(stepMs);
+    const bool shedding =
+        interpolating &&
+        (rig.Pacing.Level() != rig.Pacing.PreferredLevel() ||
+         rig.Cadence.DropsInBetween());
+    (void)rig.Drs.ObservePair(interpolating ? 2.0 * stepMs : stepMs, shedding);
+    // The scene gets cheaper with the scale (the controller's own model).
+    const double scaledStepMs =
+        stepMs * rig.Drs.CostRatio(rig.Drs.Config().MaxScale, rig.Drs.Scale());
+    present(PresentedPicture::Step, stepPeriods);
+    if (interpolating) {
+      const auto level = rig.Cadence.DropsInBetween()
+                             ? InterpolatedSampleLevel::Dropped
+                             : rig.Pacing.Decide();
+      const double inBetweenMs =
+          level == InterpolatedSampleLevel::Full      ? scaledStepMs
+          : level == InterpolatedSampleLevel::Reduced ? 0.6 * scaledStepMs
+                                                      : 0.5;
+      rig.Pacing.ObserveInterpolated(level, inBetweenMs);
+      present(level == InterpolatedSampleLevel::Dropped
+                  ? PresentedPicture::Repeat
+                  : PresentedPicture::InBetween,
+              1U);
+      // A pair over two periods pushes the next step a period late.
+      stepPeriods = scaledStepMs + inBetweenMs > 2000.0 / rateHz ? 2U : 1U;
+      trace.push_back(static_cast<double>(level));
+    } else {
+      stepPeriods = scaledStepMs > 1000.0 / rateHz ? 2U : 1U;
+    }
+    trace.push_back(rig.Pacing.StepCostMs());
+    trace.push_back(rig.Pacing.Estimate(InterpolatedSampleLevel::Full));
+    trace.push_back(rig.Pacing.Estimate(InterpolatedSampleLevel::Reduced));
+    trace.push_back(rig.Pacing.DropAllowed() ? 1.0 : 0.0);
+    trace.push_back(rig.Drs.Scale());
+    trace.push_back(rig.Drs.AveragePairMs());
+    trace.push_back(rig.Cadence.DropsInBetween() ? 1.0 : 0.0);
+    trace.push_back(rig.Cadence.HoldSeconds());
+    trace.push_back(rig.Cadence.GamePairMeanMs());
+  }
+  const CadenceStats &after = rig.Cadence.Stats();
+  for (size_t bucket = 0U; bucket < after.Intervals.size(); ++bucket) {
+    trace.push_back(static_cast<double>(after.Intervals[bucket] -
+                                        before.Intervals[bucket]));
+    trace.push_back(
+        static_cast<double>(after.Holds[bucket] - before.Holds[bucket]));
+  }
+  trace.push_back(static_cast<double>(after.Repeats - before.Repeats));
+  trace.push_back(
+      static_cast<double>(after.CadenceSwitches - before.CadenceSwitches));
+  trace.push_back(static_cast<double>(after.LateSteps - before.LateSteps));
+  trace.push_back(static_cast<double>(after.LockChanges - before.LockChanges));
+  return trace;
+}
+
+void CheckFreshRateState(const RateRig &rig, uint32_t rateHz,
+                         uint32_t drsLevel = 0U) {
+  const double pair = 2000.0 / rateHz;
+  CHECK(std::abs(rig.Pacing.PairBudgetMs() - pair) < 1.0e-9);
+  CHECK(std::abs(rig.Pacing.DecisionBudgetMs() - pair) < 1.0e-9);
+  CHECK(std::abs(rig.Drs.BudgetMs() - pair) < 1.0e-9);
+  CHECK(rig.Pacing.StepCostMs() == 0.0);
+  CHECK(rig.Pacing.Level() == rig.Pacing.PreferredLevel());
+  CHECK(rig.Drs.Level() == drsLevel && rig.Drs.AveragePairMs() == 0.0);
+  CHECK(rig.Cadence.Cadence() == PresentCadence::Sixty);
+  CHECK(rig.Cadence.GamePairMeanMs() == 0.0);
+  CHECK(rig.Cadence.Config().Mode ==
+        (rateHz == 60U ? Fps60Mode::Adaptive : Fps60Mode::Legacy));
+  CHECK(rig.Pacing.DropAllowed() == (rateHz != 60U));
+}
+
+void TestLiveRateSwitchMatchesFreshStart() {
+  const auto baseConfig = LiveRateConfig();
+  struct Load {
+    double StepMs, GamePairMs;
+  };
+  // Kokiri Forest-like light load, and a heavy one that pushes every
+  // governor away from its start (DRS down, in-betweens shed, 30 locked).
+  const Load light{9.0, 20.0}, heavy60{21.0, 42.0}, heavy30{62.0, 40.0};
+  for (const uint32_t from : {30U, 60U}) {
+    const uint32_t to = from == 60U ? 30U : 60U;
+    RateRig switched;
+    RatePacingResolutionMemory memory;
+    ConfigureRatePacing(from, baseConfig, switched.Pacing, switched.Drs,
+                        switched.Cadence);
+    (void)DriveRate(switched, from, from == 60U ? heavy60.StepMs : heavy30.StepMs,
+                    from == 60U ? heavy60.GamePairMs : heavy30.GamePairMs, 600);
+    // The old rate really left state behind.
+    CHECK(switched.Drs.Level() > 0U);
+    CHECK(switched.Pacing.StepCostMs() > 0.0);
+    CHECK(switched.Cadence.GamePairMeanMs() > 0.0);
+    if (from == 60U)
+      CHECK(switched.Cadence.DropsInBetween());
+    // The frame boundary: L3+R3 > Video > FPS applied. 60 never ran before
+    // a switch from 30: the floor; a switch to 30 starts at the top.
+    memory.Leave(from, switched.Drs);
+    auto config = baseConfig;
+    config.ResolutionStartScale = memory.StartScale(to, true, config.Resolution);
+    const uint32_t drsLevel = to == 60U ? switched.Drs.LowestLevel() : 0U;
+    ConfigureRatePacing(to, config, switched.Pacing, switched.Drs,
+                        switched.Cadence);
+    CheckFreshRateState(switched, to, drsLevel);
+
+    RateRig fresh;
+    fresh.Now = switched.Now;
+    ConfigureRatePacing(to, config, fresh.Pacing, fresh.Drs, fresh.Cadence);
+    CheckFreshRateState(fresh, to, drsLevel);
+    for (const Load load : {light, to == 60U ? heavy60 : heavy30}) {
+      const auto expected = DriveRate(fresh, to, load.StepMs, load.GamePairMs, 400);
+      const auto actual = DriveRate(switched, to, load.StepMs, load.GamePairMs, 400);
+      CHECK(expected == actual);
+    }
+  }
+  // Back and forth: 30 -> 60 -> 30 ends as a start at 30.
+  RateRig rig;
+  ConfigureRatePacing(30U, baseConfig, rig.Pacing, rig.Drs, rig.Cadence);
+  (void)DriveRate(rig, 30U, heavy30.StepMs, heavy30.GamePairMs, 300);
+  ConfigureRatePacing(60U, baseConfig, rig.Pacing, rig.Drs, rig.Cadence);
+  (void)DriveRate(rig, 60U, heavy60.StepMs, heavy60.GamePairMs, 300);
+  ConfigureRatePacing(30U, baseConfig, rig.Pacing, rig.Drs, rig.Cadence);
+  CheckFreshRateState(rig, 30U);
+}
+
+// log16 (07/11): a 30 -> 60 switch in Forest Temple room 8 restarted dynamic
+// resolution at 3.00 and dropped 16 and 23 in-between frames on the way down
+// (windows 32250, 34800). A switch to 60 begins at the scale 60 last ran at
+// (or the floor), so a toggle never begins above what 60 sustained.
+// Room 8 standing: 15 ms a step frame at 2.25 (pair 30 of 33.3), a real
+// fixed share of 0.3 (log16: 16.2 -> 25.2 ms between 2.25 and 3.00).
+void TestLiveRateSwitchKeepsSixtyScale() {
+  auto base = LiveRateConfig();
+  UseDeko3dDynamicResolutionTiming(base.Resolution);
+  const auto realMs = [](double at225, double fixed, float scale) {
+    const double area = scale / 2.25;
+    return at225 * (fixed + (1.0 - fixed) * area * area);
+  };
+  // `steps` step frames at rateHz; returns those whose pair passed the
+  // budget (an in-between frame the governor drops).
+  const auto drive = [&](RateRig &rig, uint32_t rateHz, double at225,
+                         int steps) {
+    int over = 0;
+    for (int step = 0; step < steps; ++step) {
+      const double stepMs = realMs(at225, 0.3, rig.Drs.Scale());
+      const double pair = rateHz == 60U ? 2.0 * stepMs : stepMs;
+      const bool shedding = pair > rig.Drs.BudgetMs();
+      over += shedding ? 1 : 0;
+      (void)rig.Drs.ObservePair(pair, shedding);
+    }
+    return over;
+  };
+  const auto configureAt = [&](RateRig &rig, RatePacingResolutionMemory &memory,
+                               uint32_t from, uint32_t to, bool remember) {
+    memory.Leave(from, rig.Drs);
+    auto config = base;
+    if (remember)
+      config.ResolutionStartScale = memory.StartScale(to, true, config.Resolution);
+    ConfigureRatePacing(to, config, rig.Pacing, rig.Drs, rig.Cadence);
+  };
+  for (const bool remember : {true, false}) {
+    RateRig rig;
+    RatePacingResolutionMemory memory;
+    // A session start at 60 still begins at the top and settles at 2.25.
+    ConfigureRatePacing(60U, base, rig.Pacing, rig.Drs, rig.Cadence);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+    (void)drive(rig, 60U, 15.0, 600);
+    CHECK(std::abs(rig.Drs.Scale() - 2.25F) < 1.0e-4F);
+    // 60 -> 30: the top (one picture per 66.7 ms fits at 3.00).
+    configureAt(rig, memory, 60U, 30U, remember);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+    CHECK(drive(rig, 30U, 15.0, 300) == 0);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+    // 30 -> 60: back at 2.25 at once, no pair over budget.
+    configureAt(rig, memory, 30U, 60U, remember);
+    const float start = rig.Drs.Scale();
+    const int over = drive(rig, 60U, 15.0, 300);
+    if (remember) {
+      CHECK(std::abs(start - 2.25F) < 1.0e-4F);
+      CHECK(over == 0);
+      CHECK(rig.Drs.Stats().Changes == 3U); // only the start's descent
+    } else {
+      // Before the fix: from 3.00, a burst of dropped in-between frames.
+      CHECK(std::abs(start - 3.0F) < 1.0e-4F);
+      CHECK(over >= 10);
+    }
+    CHECK(std::abs(rig.Drs.Scale() - 2.25F) < 1.0e-4F);
+  }
+  // An area left at 2.5 (12 ms a step frame at 2.25): the switch back begins
+  // at 2.5 (not 3.00) and climbs on its own when there is room.
+  {
+    RateRig rig;
+    RatePacingResolutionMemory memory;
+    ConfigureRatePacing(60U, base, rig.Pacing, rig.Drs, rig.Cadence);
+    (void)drive(rig, 60U, 12.0, 600);
+    CHECK(std::abs(rig.Drs.Scale() - 2.5F) < 1.0e-4F);
+    configureAt(rig, memory, 60U, 30U, true);
+    configureAt(rig, memory, 30U, 60U, true);
+    CHECK(std::abs(rig.Drs.Scale() - 2.5F) < 1.0e-4F);
+    CHECK(drive(rig, 60U, 12.0, 300) == 0);
+    CHECK(std::abs(rig.Drs.Scale() - 2.5F) < 1.0e-4F);
+    CHECK(drive(rig, 60U, 8.0, 600) == 0);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  }
+  // A session that starts at 30: the first switch to 60 begins at the floor.
+  {
+    RateRig rig;
+    RatePacingResolutionMemory memory;
+    ConfigureRatePacing(30U, base, rig.Pacing, rig.Drs, rig.Cadence);
+    (void)drive(rig, 30U, 15.0, 300);
+    configureAt(rig, memory, 30U, 60U, true);
+    CHECK(std::abs(rig.Drs.Scale() - 2.25F) < 1.0e-4F);
+    CHECK(drive(rig, 60U, 15.0, 300) == 0);
+  }
+  // Start scales between levels round down; out of range clamps.
+  DynamicResolutionController c;
+  c.Configure(base.Resolution, 2000.0 / 60.0, 2.6F);
+  CHECK(std::abs(c.Scale() - 2.5F) < 1.0e-4F);
+  c.Configure(base.Resolution, 2000.0 / 60.0, 1.0F);
+  CHECK(std::abs(c.Scale() - 2.25F) < 1.0e-4F);
+  c.Configure(base.Resolution, 2000.0 / 60.0, 4.0F);
+  CHECK(std::abs(c.Scale() - 3.0F) < 1.0e-4F);
+  c.Configure(base.Resolution, 2000.0 / 60.0, 2.75F);
+  CHECK(std::abs(c.Scale() - 2.75F) < 1.0e-4F);
+}
+
+// Resolution at 60 FPS = Full (config/drs_60): 60 holds 3.00 in a heavy room
+// (room 8 standing, 15 ms a step frame at 2.25: ~26 at 3.00), the cadence
+// governor sheds the in-between frames that do not fit, and a 30 -> 60
+// switch begins at 3.00 (not the remembered scale or the floor). Back to
+// Dynamic, the same switch resumes where Dynamic last ran.
+void TestLiveRateSwitchFullStartsAtFull() {
+  auto base = LiveRateConfig();
+  UseDeko3dDynamicResolutionTiming(base.Resolution);
+  auto full = base;
+  full.ResolutionSixty = DynamicResolutionSixtyMode::Full;
+  const double heavyStepAt3 = 26.0;
+  // Session start at 60 under Full.
+  RateRig rig;
+  RatePacingResolutionMemory memory;
+  ConfigureRatePacing(60U, full, rig.Pacing, rig.Drs, rig.Cadence);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  CHECK(rig.Drs.LowestLevel() == 0U);
+  (void)DriveRate(rig, 60U, heavyStepAt3, 42.0, 600);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  CHECK(rig.Drs.Stats().Downs == 0U);
+  // The cadence governor still sheds what does not fit.
+  CHECK(rig.Cadence.DropsInBetween());
+  // 60 -> 30 -> 60 under Full: a held full scale is not remembered.
+  memory.Leave(60U, rig.Drs);
+  CHECK(memory.LastScaleAtSixty == 0.0F);
+  ConfigureRatePacing(30U, full, rig.Pacing, rig.Drs, rig.Cadence);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  (void)DriveRate(rig, 30U, heavyStepAt3, 42.0, 300);
+  memory.Leave(30U, rig.Drs);
+  auto config = full;
+  config.ResolutionStartScale = memory.StartScale(60U, true, config.Resolution);
+  ConfigureRatePacing(60U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  (void)DriveRate(rig, 60U, heavyStepAt3, 42.0, 300);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  CHECK(rig.Drs.Stats().Downs == 0U);
+  // A remembered Dynamic scale does not apply under Full either.
+  {
+    RateRig dyn;
+    RatePacingResolutionMemory remembered;
+    ConfigureRatePacing(60U, base, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    (void)DriveRate(dyn, 60U, heavyStepAt3, 42.0, 600);
+    CHECK(dyn.Drs.Scale() < 3.0F);
+    remembered.Leave(60U, dyn.Drs);
+    CHECK(remembered.LastScaleAtSixty > 0.0F && remembered.LastScaleAtSixty < 3.0F);
+    ConfigureRatePacing(30U, base, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    auto toFull = full;
+    toFull.ResolutionStartScale = remembered.StartScale(60U, true, toFull.Resolution);
+    ConfigureRatePacing(60U, toFull, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    CHECK(std::abs(dyn.Drs.Scale() - 3.0F) < 1.0e-4F);
+    // Dynamic again: resumes at the remembered scale.
+    auto toDynamic = base;
+    toDynamic.ResolutionStartScale =
+        remembered.StartScale(60U, true, toDynamic.Resolution);
+    ConfigureRatePacing(60U, toDynamic, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    CHECK(std::abs(dyn.Drs.Scale() - remembered.LastScaleAtSixty) < 1.0e-4F);
+  }
+  // Full changes nothing at 30.
+  RateRig thirty;
+  ConfigureRatePacing(30U, full, thirty.Pacing, thirty.Drs, thirty.Cadence);
+  CHECK(thirty.Drs.LowestLevel() == 3U);
+}
+
+// The first presents after a switch are measured against the new period
+// only: no late step, hold change or lock from an interval of the old rate.
+void TestLiveRateSwitchFirstPresents() {
+  const auto config = LiveRateConfig();
+  RateRig rig;
+  ConfigureRatePacing(30U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  (void)DriveRate(rig, 30U, 9.0, 20.0, 120);
+  ConfigureRatePacing(60U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  const CadenceStats before = rig.Cadence.Stats();
+  // The previous picture was presented 33 ms ago (one 30 Hz period).
+  rig.Now += 1.0 / 30.0;
+  rig.Cadence.ObservePresent(PresentedPicture::Step, rig.Now, 0.0);
+  rig.Now += 1.0 / 60.0;
+  rig.Cadence.ObservePresent(PresentedPicture::InBetween, rig.Now, 0.0);
+  const CadenceStats &after = rig.Cadence.Stats();
+  CHECK(after.LateSteps == before.LateSteps);
+  CHECK(after.CadenceSwitches == before.CadenceSwitches);
+  CHECK(after.Intervals[1] == before.Intervals[1]);
+  CHECK(after.Intervals[0] == before.Intervals[0] + 1U);
+}
+
 void Report() {
-  std::printf("\n== tour15: calibracao do oculto (margem 0) ==\n");
+  std::printf("\n== tour15: calibration of the hidden time (margin 0) ==\n");
   Calibrate();
-  std::printf("\n== tour15: margem do par (oculto 2,75 ms) ==\n");
+  std::printf("\n== tour15: pair margin (hidden 2.75 ms) ==\n");
   SweepMargin();
   ReportRenderWaits();
   ReportFramesInFlight();
@@ -795,15 +1155,15 @@ void Report() {
     std::vector<Segment> Segments;
   };
   const std::vector<Scenario> scenarios{
-      {"leve", {Light(60)}},          {"normal", {Normal(60)}},
-      {"pesado", {Heavy(60)}},        {"m.pesado", {VeryHeavy(60)}},
-      {"integ4", {Integ4(60)}},       {"sobrecarga", {Overloaded(60)}},
-      {"sessao", Session()},
+      {"light", {Light(60)}},          {"normal", {Normal(60)}},
+      {"heavy", {Heavy(60)}},        {"v.heavy", {VeryHeavy(60)}},
+      {"integ4", {Integ4(60)}},       {"overload", {Overloaded(60)}},
+      {"session", Session()},
   };
   for (uint32_t queue : {0U, 1U}) {
     std::printf("\n== swap %s ==\n",
-                queue == 0U ? "bloqueante (volta no vblank que mostra)"
-                            : "com fila de 1 quadro");
+                queue == 0U ? "blocking (returns on the vblank that shows it)"
+                            : "with a 1-frame queue");
     for (const auto &scenario : scenarios) {
       for (auto mode :
            {Fps60Mode::Legacy, Fps60Mode::Strict60, Fps60Mode::Adaptive})
@@ -835,6 +1195,10 @@ int main(int argc, char **argv) {
   TestRenderWaitIsNotCost();
   TestMarginKeepsTheRefresh();
   TestEarlyFrameSlotAbsorbsLongSteps();
+  TestLiveRateSwitchMatchesFreshStart();
+  TestLiveRateSwitchFirstPresents();
+  TestLiveRateSwitchKeepsSixtyScale();
+  TestLiveRateSwitchFullStartsAtFull();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

@@ -1,12 +1,19 @@
-// Teste diferencial de memória (run_memory_lean_diff.sh): NativeA32Memory atual contra a
-// implementação anterior (HEAD, renomeada para OldMem). Sequências aleatórias
-// de operações aplicadas às duas; depois de cada uma compara retorno, valores
-// lidos, endereço de falha, geração arquitetural, gerações por página
-// (RangeWriteGeneration), impressão digital de conteúdo/estado/rastreio,
-// contadores de vigia, divergências de leitura rápida, eventos do observador,
-// exclusivos, spans rápidos, CaptureState e cópias/movimentos/restauração.
+// Memory differential test (run_memory_lean_diff.sh): current NativeA32Memory against the
+// base implementation (renamed to OldMem). Random sequences
+// of operations applied to both; after each one compares return value, values
+// read, fault address, architectural generation, per-page generations
+// (RangeWriteGeneration), content/state/trace fingerprint,
+// watch counters, fast-read mismatches, observer events,
+// exclusives, fast spans, CaptureState and copies/moves/restore. The current
+// side runs in the fastmem window when TRIAEVUM_FASTMEM_WINDOW=1; the base,
+// with its second core active (the global exclusive monitor of both).
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 #include "old_memory.h"
+#if __has_include("old_second_core.h")
+#include "old_second_core.h"
+#define OLD_MONITOR 1
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -28,8 +35,8 @@ uint64_t gOps = 0;
 std::string gLastOp;
 
 [[noreturn]] void Fail(const char* what, uint64_t a = 0, uint64_t b = 0) {
-    std::fprintf(stderr, "DIVERGENCIA op#%" PRIu64 " (%s): %s  nova=0x%" PRIx64
-                 " antiga=0x%" PRIx64 "\n", gOps, gLastOp.c_str(), what, a, b);
+    std::fprintf(stderr, "DIVERGENCE op#%" PRIu64 " (%s): %s  new=0x%" PRIx64
+                 " old=0x%" PRIx64 "\n", gOps, gLastOp.c_str(), what, a, b);
     std::exit(1);
 }
 
@@ -44,8 +51,8 @@ struct Events {
     std::vector<std::pair<uint32_t, size_t>> Observed;
 };
 
-// Mapa: RAM gravável 64 KiB, ROM de 8 KiB, região que não cobre páginas
-// inteiras (sem entrada rápida), RAM pequena gravável, e buracos.
+// Map: 64 KiB writable RAM, 8 KiB ROM, a region not covering whole pages
+// (no fast entry), small writable RAM, and holes.
 template <typename M>
 void Map(M& memory) {
     std::vector<uint8_t> ram(0x10000), rom(0x2000), odd(0x1800), small(0x3000);
@@ -69,7 +76,7 @@ uint32_t RandomAddress() {
     const uint32_t base = bases[Rand(8)];
     switch (Rand(4)) {
     case 0: return base + Rand(0x10000);
-    case 1: return base + (Rand(16) << 12) - Rand(9);  // borda de página
+    case 1: return base + (Rand(16) << 12) - Rand(9);  // page boundary
     case 2: return base + Rand(0x3000);
     default: return base + (Rand(0x4000) & ~3U);
     }
@@ -114,7 +121,7 @@ void CompareState(Pair& p, bool full) {
     Eq("watch.PointerWrites", nc.PointerWrites, oc.PointerWrites);
     Eq("observed.size", p.NE.Observed.size(), p.OE.Observed.size());
     if (p.NE.Observed != p.OE.Observed) Fail("observed events");
-    // Gerações por página e por intervalos aleatórios.
+    // Per-page and random-range generations.
     for (uint32_t page = 0x0F000; page < 0x56000; page += 0x1000) {
         const auto a = n.RangeWriteGeneration(page, 0x1000);
         const auto b = o.RangeWriteGeneration(page, 0x1000);
@@ -134,7 +141,7 @@ void CompareState(Pair& p, bool full) {
            o.HasEscapedWritePointer(address, size));
     }
     if (full) {
-        // Materializa (as duas do mesmo jeito) e compara conteúdo/estado/rastreio.
+        // Materialize (both the same way) and compare content/state/trace.
         Eq("ContentFingerprint", n.ContentFingerprint(), o.ContentFingerprint());
         Eq("StateFingerprint", n.StateFingerprint(), o.StateFingerprint());
         Eq("WriteTraceFingerprint", n.WriteTraceFingerprint(), o.WriteTraceFingerprint());
@@ -192,15 +199,35 @@ void Step(Pair& p) {
         gLastOp = "words";
         const uint32_t address = RandomAddress() & ~3U;
         const uint32_t count = Rand(9);
+        // As the generated LDM/STM: the span, else word by word up to the
+        // first fault. Outside the fastmem window the current spans always
+        // decline (every page traps), so their own result is compared only
+        // when the current image is in the window.
+        const auto readWords = [&](auto& memory, uint32_t* out, bool& span) {
+            span = memory.ReadWordsFast(address, out, count);
+            for (uint32_t i = 0; !span && i < count; ++i) {
+                if (!memory.template ReadFast<uint32_t>(address + 4U * i, &out[i])) return i;
+            }
+            return count;
+        };
+        const auto writeWords = [&](auto& memory, const uint32_t* in, bool& span) {
+            span = memory.WriteWordsFast(address, in, count);
+            for (uint32_t i = 0; !span && i < count; ++i) {
+                if (!memory.template WriteFast<uint32_t>(address + 4U * i, in[i])) return i;
+            }
+            return count;
+        };
+        bool spanN = false, spanO = false;
         if (Rand(2)) {
             uint32_t a[8] = {}, b[8] = {};
-            Eq("ReadWordsFast", p.N->ReadWordsFast(address, a, count), p.O->ReadWordsFast(address, b, count));
-            for (uint32_t i = 0; i < 8; ++i) Eq("ReadWordsFast.value", a[i], b[i]);
+            Eq("ReadWords", readWords(*p.N, a, spanN), readWords(*p.O, b, spanO));
+            for (uint32_t i = 0; i < 8; ++i) Eq("ReadWords.value", a[i], b[i]);
         } else {
             uint32_t v[8];
             for (auto& w : v) w = uint32_t(rng());
-            Eq("WriteWordsFast", p.N->WriteWordsFast(address, v, count), p.O->WriteWordsFast(address, v, count));
+            Eq("WriteWords", writeWords(*p.N, v, spanN), writeWords(*p.O, v, spanO));
         }
+        if (p.N->InGuestWindow()) Eq("WordsFast", spanN, spanO);
     } else if (kind < 58) {
         const uint32_t address = RandomAddress();
         const size_t size = Rand(5) == 0 ? 0 : 1 + Rand(300);
@@ -339,13 +366,13 @@ void Step(Pair& p) {
         Eq("MaterializeDeferredWrites", p.N->MaterializeDeferredWrites(), p.O->MaterializeDeferredWrites());
     } else if (kind < 83) {
         gLastOp = "restore";
-        // CaptureState/RestoreState (materializa antes, como o savestate).
+        // CaptureState/RestoreState (materialize first, like the savestate).
         p.N->MaterializeDeferredWrites();
         p.O->MaterializeDeferredWrites();
         const auto ns = p.N->CaptureState();
         const auto os = p.O->CaptureState();
         if (ns != os) Fail("CaptureState(restore)");
-        // Às vezes restaura um estado com outra geração.
+        // Sometimes restore a state with a different generation.
         auto changed = ns;
         if (Rand(2)) changed["write_generation"] = ns["write_generation"].get<uint64_t>() + 1 + Rand(5);
         std::string e1, e2;
@@ -354,7 +381,7 @@ void Step(Pair& p) {
         gLastOp = "copy";
         p.N->MaterializeDeferredWrites();
         p.O->MaterializeDeferredWrites();
-        // Imagem copiada e atribuída de volta (épocas de certificado novas).
+        // Image copied and assigned back (new certificate epochs).
         if (Rand(2)) {
             New nc(*p.N);
             Old oc(*p.O);
@@ -371,7 +398,7 @@ void Step(Pair& p) {
         p.HasToken = false;
     } else {
         gLastOp = "range";
-        // Só consultas (CompareState faz o resto).
+        // Queries only (CompareState does the rest).
     }
 }
 
@@ -382,10 +409,19 @@ int main(int argc, char** argv) {
     const uint64_t seed = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 0x51A7;
     const uint64_t episodes = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : 50;
     rng.seed(seed);
+#if defined(OLD_MONITOR)
+    OldMem::SecondCore::SetActive(true);
+#endif
+    uint64_t windowEpisodes = 0;
     for (uint64_t episode = 0; episode < episodes; ++episode) {
+        Oot3dNativeGame::SecondCore::ResetExclusiveMonitor();
+#if defined(OLD_MONITOR)
+        OldMem::SecondCore::ResetExclusiveMonitor();
+#endif
         Pair p;
         Map(*p.N);
         Map(*p.O);
+        windowEpisodes += p.N->InGuestWindow();
         if (Rand(2)) {
             const bool enabled = Rand(2) == 0;
             p.N->EnableWriteTraceFingerprint(enabled);
@@ -399,7 +435,8 @@ int main(int argc, char** argv) {
         gLastOp = "final";
         CompareState(p, true);
     }
-    std::printf("memdiff: %" PRIu64 " operações, %" PRIu64 " episódios, zero divergências\n",
-                gOps, episodes);
+    std::printf("memdiff: %" PRIu64 " operations, %" PRIu64 " episodes (%" PRIu64
+                " in the fastmem window), zero divergences\n",
+                gOps, episodes, windowEpisodes);
     return 0;
 }

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Picos de quadro (logs/spikes.txt) fora de carregamento, por área e causa.
+"""Frame spikes (logs/spikes.txt) outside loading, by area and cause.
 
-Uso: spike_report.py <pasta com spikes.txt [e acks.jsonl]> [oot3d_dev_warp_catalog.inc]
+Usage: spike_report.py <folder with spikes.txt [and acks.jsonl]> [oot3d_dev_warp_catalog.inc]
 
-- Só a última sessão (spikes.txt acumula sessões: o tour20 tinha 591 linhas,
-  428 eram do tour19).
-- ctx com "load" fica de fora (carregamento é aceitável).
-- Isolado = nenhum pico no quadro de host vizinho; um passo longo isolado
-  seguido de um quadro curto cabe em 2 refreshes (o que config/early_frame_slot
-  absorve). Em sequência = cena pesada demais (precisa de otimização real).
-- "reduzir" = quanto o quadro do jogo teria de encolher para caber no
-  orçamento (expected x 16,67 ms): o som/DSP em outro núcleo (~1,7 ms)
-  resolveria 3 de 95 picos de guest fora de load do tour20+tour22
-  (descartado).
+- Only the last session (spikes.txt accumulates sessions: tour20 had 591 lines,
+  428 were from tour19).
+- ctx with "load" is left out (loading is acceptable).
+- Isolated = no spike on the neighboring host frame; an isolated long step
+  followed by a short frame fits in 2 refreshes (what config/early_frame_slot
+  absorbs). In sequence = scene too heavy (needs real optimization).
+- "reduce" = how much the game frame would have to shrink to fit the
+  budget (expected x 16.67 ms): sound/DSP on another core (~1.7 ms)
+  would fix 3 of 95 guest spikes outside load in tour20+tour22
+  (discarded).
 """
 import json
 import re
@@ -39,7 +39,7 @@ def outside_load(rows):
 
 
 def split_isolated(rows):
-    """(isolados, em sequência) entre os picos fora de load pós-boot."""
+    """(isolated, in sequence) among the post-boot spikes outside load."""
     hosts = {int(r["host"]) for r in rows}
     iso, seq = [], []
     for r in rows:
@@ -55,7 +55,7 @@ def overrun_ms(r):
 
 
 def fixed_by(rows, saving_ms):
-    """Picos de guest que caberiam no orçamento com saving_ms a menos."""
+    """Guest spikes that would fit the budget with saving_ms less."""
     return sum(1 for r in rows if r["stage"] == "guest" and overrun_ms(r) <= saving_ms)
 
 
@@ -80,17 +80,17 @@ def main(argv):
     d = argv[1]
     rows = last_session(open(f"{d}/spikes.txt"))
     out = outside_load(rows)
-    print(f"sessão: {len(rows)} picos, {len(rows) - len(out)} em load, {len(out)} fora")
+    print(f"session: {len(rows)} spikes, {len(rows) - len(out)} in load, {len(out)} outside")
     boot = [r for r in out if int(r["host"]) <= BOOT_FRAMES]
     iso, seq = split_isolated(out)
-    print(f"boot (<= {BOOT_FRAMES} quadros): {len(boot)}  isolados: {len(iso)}  em sequência: {len(seq)}")
-    print("por etapa:", dict(Counter(r["stage"] for r in out)))
+    print(f"boot (<= {BOOT_FRAMES} frames): {len(boot)}  isolated: {len(iso)}  in sequence: {len(seq)}")
+    print("by stage:", dict(Counter(r["stage"] for r in out)))
     guest = [r for r in out if r["stage"] == "guest"]
     if guest:
-        print("guest_ms mediana %.1f, game_ms mediana %.1f" % (
+        print("guest_ms median %.1f, game_ms median %.1f" % (
             statistics.median(float(r["guest_ms"]) for r in guest),
             statistics.median(float(r["game_ms"]) for r in guest)))
-        print("picos de guest resolvidos se o quadro encolhesse:",
+        print("guest spikes fixed if the frame shrank by:",
               ", ".join(f"{s} ms → {fixed_by(guest, s)}/{len(guest)}" for s in (1.7, 3, 5, 8, 10, 15)))
     names = []
     if len(argv) > 2:
@@ -109,10 +109,10 @@ def main(argv):
         per = defaultdict(list)
         for r in out:
             per[area_of(r, spans)].append(r)
-        print(f"{'área':<30}{'n':>4}{'guest':>6}{'pacer':>6}{'rend':>5}{'gpu':>5}")
+        print(f"{'area':<30}{'n':>4}{'guest':>6}{'pacer':>6}{'rend':>5}{'gpu':>5}")
         for area, group in sorted(per.items(), key=lambda kv: -len(kv[1])):
             c = Counter(r["stage"] for r in group)
-            name = names[area] if area is not None and area < len(names) else "fora do tour"
+            name = names[area] if area is not None and area < len(names) else "outside the tour"
             print(f"{str(area) + ' ' + name:<30}{len(group):>4}{c['guest']:>6}{c['pacer']:>6}{c['render']:>5}{c['gpu']:>5}")
     return 0
 

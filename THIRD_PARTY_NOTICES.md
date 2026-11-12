@@ -351,6 +351,18 @@ These references do not grant permission to redistribute the original mod
 archive. Project-authored reverse engineering and typed source changes remain
 traceable through this repository's Git history.
 
+The Nintendo Switch port also reimplements behaviour of the mod's 3.x releases,
+published on the same page as "OoT3D: Single Screen Experience" (CC BY-NC-ND
+4.0): the HUD drawn from its `custom_ui01` art, the Ocarina arrows and the
+Restoration HUD's lanes and Item I/II rules, decoded from the 3.0 to 3.2.2
+`code.ips`, its Roll Dash and Quick put away (through coccofresco's typed port
+in upstream TriAevum), and 3.2.2's damage multiplier, unmirrored Master Quest
+and simple shadows. No code or data of the mod is copied; source comments name the
+payload addresses and the constants a matching layout needs. The mod's archive
+is downloaded by the player's console, its art and font are rebuilt there and
+its Link dash animations (`zelda_link_ext.zar`) installed there
+(`oot3d_topscreen_import.h`); nothing of it is in the Switch release.
+
 ## Forge and runtime binary dependencies
 
 Windows `TriAevumForge.exe` embeds CPython 3.13; the initial Linux Forge build
@@ -400,10 +412,39 @@ targets.
 ## Nintendo Switch homebrew toolchain and services
 
 The Switch build links [switchbrew/libnx](https://github.com/switchbrew/libnx)
-(ISC License, copyright the libnx Authors) and, for the `config/renderer`
-deko3d backend, [devkitPro/deko3d](https://github.com/devkitPro/deko3d) (zlib
-License), both obtained through devkitPro (devkitA64). Their notices must
-accompany binary distributions of the Switch build.
+4.12.0 (ISC License, copyright the libnx Authors) and, for the `config/renderer`
+deko3d backend, [devkitPro/deko3d](https://github.com/devkitPro/deko3d) 0.5.0
+(zlib License), both obtained through devkitPro (devkitA64). Their notices are
+in `LICENSES/libnx-4.12.0-ISC.txt` and `LICENSES/deko3d-0.5.0-zlib.txt` and
+must accompany binary distributions of the Switch build.
+
+The Switch NRO also links these libraries statically (the link line of
+`oot3d_native_game.elf`); each license text is in `LICENSES/`, which the Switch
+release zip carries whole under `licenses/LICENSES/`:
+
+| Library and version | Source | License | Text |
+| --- | --- | --- | --- |
+| SDL2 2.28.5 | devkitPro switch-sdl2 2.28.5-4 | zlib | `SDL2-2.28.5-Switch-zlib.txt` |
+| Mesa 20.1.0 libEGL and libglapi (nouveau gallium driver, GLSL compiler) | devkitPro switch-mesa 20.1.0-5 | MIT, with per-file notices (BSD-2-Clause xxHash) | `Mesa-20.1.0-Switch.txt` |
+| libdrm_nouveau 1.0.1 | devkitPro switch-libdrm_nouveau 1.0.1-2 | MIT | `libdrm_nouveau-MIT.txt` |
+| glad 0.1.27 GL loader and Khronos `khrplatform.h` | devkitPro switch-glad 0.1.27-1 | MIT generator, public-domain output; Khronos MIT-style | `glad-0.1.27-MIT.txt` |
+| TinyXML-2 6.0.0 | devkitPro switch-tinyxml2 6.0.0-2 | zlib | `tinyxml2-6.0.0-zlib.txt` |
+| zlib 1.3.1 | devkitPro switch-zlib 1.3.1-1 | zlib | `zlib-1.3.1.txt` |
+| libzip 1.11.4 | fetched by `switch.cmake` | BSD-3-Clause | `libzip-1.11.4-BSD-3-Clause.txt` |
+| spdlog 1.14.1 with bundled {fmt} | fetched by `switch.cmake` | MIT | `spdlog-1.14.1-MIT.txt` |
+| nlohmann/json 3.11.3 | fetched by `switch.cmake` | MIT | `nlohmann-json-3.11.3-MIT.txt` |
+| Dear ImGui 1.91.9b-docking | fetched by `common.cmake` | MIT | `Dear-ImGui-1.91.9b-MIT.txt` |
+| stb_image.h (`0bc88af4`) | fetched by `common.cmake` | MIT (or Unlicense) | `stb_image-MIT-or-Unlicense.txt` |
+| prism (prism-processor `1de05445`) | fetched by `common.cmake` | MIT | `prism-MIT.txt` |
+| Monocypher 4.0.2 | fetched by `common.cmake` | BSD-2-Clause (or CC0-1.0) | `Monocypher-4.0.2-BSD-2-Clause-or-CC0.txt` |
+| BS::thread_pool 4.1.0 | fetched by `common.cmake` | MIT | `thread-pool-4.1.0-MIT.txt` |
+| Zstandard 1.5.6 | fetched by the runtime | BSD-3-Clause | `zstd-BSD-3-Clause.txt` |
+| libcurl 7.69.1, Mbed TLS 2.28.10 | devkitPro switch-curl, switch-mbedtls | see below | `curl.txt`, `mbedtls.txt` |
+| newlib 4.6.0 | devkitPro devkita64-newlib | per-part notices | `newlib-devkitA64-COPYING.txt` |
+| libstdc++, libgcc (GCC 16.1.0) | devkitPro devkita64-gcc | GPL-3.0 with GCC Runtime Library Exception 3.1 | `GCC-Runtime-Library-Exception-3.1.txt` |
+
+The deko3d shaders are compiled offline with devkitPro's uam; no uam code is
+linked into the NRO.
 
 `tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp` reads clocks through
 the IPC interface of [retronx-team/sys-clk](https://github.com/retronx-team/sys-clk)
@@ -422,6 +463,89 @@ and the `SysClkContext` layout are reproduced, from
   port by columna1): guard pages placed with `svcSetMemoryPermission`, the idea
   behind the diagnostic allocator `oot3d_switch_guard_alloc.cpp`. No code was
   copied; the allocator is an independent implementation.
+- StevensND's [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) (GPL-3.0;
+  BSD-3-Clause for its SDK parts): the thread-placement and ZCULL measurements
+  cited in `oot3d_switch_thread_layout.h` and `SWITCH_PORT.md`, and the
+  console PGO method. No code was copied from it directly.
+- [usf4-nx](https://github.com/Thorhax/usf4-nx) (Thorhax), whose SDK carries
+  nfsmw-nx's Horizon layer: the fastmem window of
+  `oot3d_switch_guest_window.{h,cpp}` follows the reservation and mapping
+  recipe of its `sdk/src/core/guest_memory_switch.{h,cpp}` (BSD-3-Clause as
+  part of the SDK). Independent implementation; no code was copied.
+- [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx)
+  (NebadasSwifty): the official handheld configuration `0x92220008` that
+  `oot3d_switch_performance.h` requests through apm, from its
+  `sdk/src/ui/switch_apm.cpp` findings. Independent implementation.
+- CPU High of `oot3d_switch_performance.cpp`, findings only, no code copied:
+  [retronx-team/sys-clk](https://github.com/retronx-team/sys-clk) (Beer-Ware
+  License, Revision 42; `sysmodule/src/board.cpp`: a clkrst session opened,
+  used and closed for each clock request, pcv before 8.0.0),
+  [RetroArch](https://github.com/libretro/RetroArch) (GPL-3.0;
+  `frontend/drivers/platform_switch.c`: CPU clock set from an application with
+  `AppletFocusHandlingMode_NoSuspend` and put back to 1020 MHz when focus is
+  lost) and SwitchWakerHD (MPL-2.0; issue #33 and commit `8d9a643e`: a CPU
+  clock set from the game through long-lived clkrst sessions, without a focus
+  notification before suspension, left Erista consoles unable to wake from
+  sleep).
+- [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx) (ChanseyIsTheBest),
+  findings only, no code: store cards (`oot3d_native_a32_memory.*`, after its
+  `tools/store_cards.py`), the flat indirect-call dispatch table of the
+  whole-AOT generator, the 2 MiB slack of the fastmem reservation, and the
+  shard compiler settings `-fomit-frame-pointer`,
+  `--param=max-inline-insns-auto=64 --param=inline-unit-growth=12`
+  (`CMake/oot3d/native_runtime.cmake`).
+
+## Code adapted from sa2-nx
+
+Three files of the Switch port adapt code from
+[sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx) by ChanseyIsTheBest:
+
+- `tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp` adapts
+  `sdk/src/ui/switch_code_blocks.cpp` at commit
+  `baf523b8e93a1b02d8b73d13aebf86780f8cc0c6` (from kameo-nx v1.0.1, after
+  the Torchlight port's findings); its swap stub bytes are unchanged. As part
+  of sa2-nx's SDK (a ReXGlue SDK fork) that file is BSD-3-Clause; the
+  copyright notice, conditions and disclaimer are in
+  `LICENSES/sa2-nx-SDK-BSD-3-Clause.txt` and must accompany binaries.
+- `tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp` adapts
+  `app/src/sa2_pgo.cpp` at commit `adf3a4eee524dcca5cd7c1b42454ddb8a09124a1`
+  (the gcov_info stream dump, whose method comes from nfsmw-nx's
+  `app/src/nfsmw_pgo.cpp`), and
+  `tools/oot3d/native_a32_runtime/whole_aot_pgo_merge.py` adapts
+  `tools/pgo_summary.py` at the same commit. sa2-nx publishes these under
+  GPL-3.0 without an "or later" option, so these two files are GPL-3.0 only
+  (see `LICENSE_SCOPE.md`). The adapted part of `oot3d_whole_aot_pgo.cpp` is
+  compiled only into the instrumented build that collects a profile; release
+  builds get the empty stubs. The merge script is a PC tool.
+
+## Decompilation references
+
+The Switch port's landing roll (`oot3d_landing_roll.h`) follows the rule of
+`z_player.c` in the [zeldaret/oot](https://github.com/zeldaret/oot)
+decompilation, and the actor names of the cost profile
+(`oot3d_native_actor_names.h`) are its actor table's overlay names. That
+repository has no license: no code is copied, only the behaviour and the
+names, as identifiers.
+
+## Switch port lineage
+
+The Nintendo Switch port is
+[JohnUzoka/TriAevum-Switch](https://github.com/JohnUzoka/TriAevum-Switch),
+an English fork of
+[GustavoHenriqueRocha/TriAevum-Switch](https://github.com/GustavoHenriqueRocha/TriAevum-Switch)
+(branch `deko3d`, fork base `311d8fd7`), which forks
+[coccofresco/TriAevum](https://github.com/coccofresco/TriAevum). All three
+are GPL-3.0-or-later and their history is retained. Later upstream work
+ported to the fork names its upstream commit in the source (for example
+`68d527c6` and `14edc1eb`, the TopScreen HD UI atlas and the UI texture
+pack source).
+
+## Switch updater: libcurl and Mbed TLS
+
+The Switch NRO links devkitPro's switch-curl (libcurl 7.69.1, on libnx's TLS
+backend) for the OTA updater's HTTPS requests and switch-mbedtls 2.28.10
+(`mbedcrypto`) for its SHA-256 checks. Their notices are in `LICENSES/curl.txt`
+and `LICENSES/mbedtls.txt`; the Switch release zip carries both.
 
 ## Other dependencies
 

@@ -18,6 +18,59 @@ TopScreenItemsSelectionPlan SelectionPlan(
     return ResolveTopScreenItemsSelectionBegin(
         {input.ZrPressed, input.ZlPressed, pageState});
 }
+
+bool DpadItemsConfigured(const TopScreenItemDispatchRuntime& runtime) {
+    const auto set = [](uint8_t slot) { return slot != 0xFFU; };
+    return std::any_of(runtime.ChildDpadItemSlots.begin(), runtime.ChildDpadItemSlots.end(), set) ||
+        std::any_of(runtime.AdultDpadItemSlots.begin(), runtime.AdultDpadItemSlots.end(), set);
+}
+
+bool ReadDpadItems(NativeA32Memory& memory, uint32_t play,
+                   const TopScreenItemDispatchRuntime& runtime,
+                   TopScreenDpadItemGuestState* state) {
+    return ReadTopScreenDpadItemGuestState(memory, play, runtime.ChildDpadItemSlots,
+                                           runtime.AdultDpadItemSlots, state);
+}
+
+bool IsDpadItemScanExit(uint32_t pc) {
+    return pc == kTopScreenDpadItemPressScanExit || pc == kTopScreenDpadItemHoldScanExit;
+}
+
+// Scan exits: Player_UpdateUpperBody keeps PlayState in r11 and ends a scan
+// with r4 = 6 when no native button matched.
+uint32_t ResolveDpadItemScanButton(
+    uint32_t pc, NativeA32Memory& memory, const oot3d::recomp::a32::GuestState& state,
+    const TopScreenExtendedInputFrame& input, const TopScreenItemDispatchRuntime& runtime) {
+    const bool hold = pc == kTopScreenDpadItemHoldScanExit;
+    const auto& lanes = hold ? input.DpadItemHeld : input.DpadItemPressed;
+    if (state.r[4] != kTopScreenNativeScanNoButton || !DpadItemsConfigured(runtime) ||
+        std::none_of(lanes.begin(), lanes.end(), [](bool lane) { return lane; }))
+        return 0;
+    TopScreenDpadItemGuestState dpad;
+    if (!ReadDpadItems(memory, state.r[11], runtime, &dpad)) return 0;
+    return ResolveTopScreenDpadItemButton(dpad, lanes, hold);
+}
+
+// Held item (0x0034D104) and mask (0x0034CF78) checks compare r0, the item
+// action Link uses, with Y/X/I/II; a D-pad item with that action keeps it.
+bool DpadItemKeepsAction(NativeA32Memory& memory, const oot3d::recomp::a32::GuestState& state,
+                         const TopScreenItemDispatchRuntime& runtime) {
+    if (!DpadItemsConfigured(runtime)) return false;
+    TopScreenDpadItemGuestState dpad;
+    return ReadDpadItems(memory, state.r[11], runtime, &dpad) &&
+        TopScreenDpadItemsUseAction(memory, dpad, static_cast<uint8_t>(state.r[0]));
+}
+
+bool IsPendingDpadItemResolve(const oot3d::recomp::a32::GuestState& state,
+                              const TopScreenItemDispatchRuntime& runtime) {
+    return runtime.PendingDpadItemButton != 0 && state.r[1] == runtime.PendingDpadItemButton &&
+        (state.r[14] == kTopScreenDpadItemPressResolverReturn ||
+         state.r[14] == kTopScreenDpadItemHoldResolverReturn);
+}
+
+bool IsDpadItemButton(uint32_t button) {
+    return button >= kTopScreenDpadItemButtonFirst && button < kTopScreenDpadItemButtonFirst + 4U;
+}
 } // namespace
 
 std::span<const uint32_t> TopScreenItemDispatchEntries() {
@@ -26,7 +79,10 @@ std::span<const uint32_t> TopScreenItemDispatchEntries() {
         for (const auto& query : TopScreenVerifiedItemQueryContracts())
             result.push_back(query.OriginalEntry);
         result.insert(result.end(), {kTopScreenSlotItemEntry,
-            kTopScreenItemsUpdateEntry, kTopScreenItemsUpdateReturn});
+            kTopScreenItemsUpdateEntry, kTopScreenItemsUpdateReturn,
+            kTopScreenDpadItemPressScanExit, kTopScreenDpadItemHoldScanExit,
+            kTopScreenDpadItemHeldPutAway, kTopScreenDpadItemMaskRemoval,
+            kTopScreenBottleUpdateEntry});
         std::sort(result.begin(), result.end());
         return result;
     }();
@@ -47,6 +103,15 @@ bool ShouldObserveTopScreenItemDispatch(
         return state.r[14] == kTopScreenItemsUpdateReturn && runtime.PendingSelection == 0;
     if (pc == kTopScreenItemsUpdateReturn)
         return runtime.PendingSelection != 0;
+    if (IsDpadItemScanExit(pc))
+        return ResolveDpadItemScanButton(pc, memory, state, input, runtime) != 0;
+    if (pc == kTopScreenDpadItemHeldPutAway || pc == kTopScreenDpadItemMaskRemoval)
+        return DpadItemKeepsAction(memory, state, runtime);
+    // Native code would index the four-entry button slots with 6..9.
+    if (pc == kTopScreenBottleUpdateEntry)
+        return IsDpadItemButton(state.r[2]);
+    if (pc == kTopScreenSlotItemEntry && IsPendingDpadItemResolve(state, runtime))
+        return true;
     if (pc == kTopScreenSlotItemEntry)
         return ResolveTopScreenDirectSlotItemGuest(
                    memory, static_cast<uint8_t>(state.r[1]), runtime.DirectItemId).has_value() ||
@@ -114,6 +179,49 @@ bool ExecuteTopScreenItemDispatch(
         // Resume the original compiled return block once. pc+4 is an internal
         // NOP, not a valid entry in the precompiled module.
         state.r[15] = pc;
+        return true;
+    }
+    if (IsDpadItemScanExit(pc)) {
+        const auto button = ResolveDpadItemScanButton(pc, memory, state, input, runtime);
+        if (button == 0) return false;
+        // Resumed in place: the native resolver call then asks for 6..9.
+        state.r[4] = button;
+        runtime.PendingDpadItemButton = button;
+        ++runtime.DpadItemButtons;
+        state.r[15] = pc;
+        return true;
+    }
+    if (pc == kTopScreenDpadItemHeldPutAway || pc == kTopScreenDpadItemMaskRemoval) {
+        if (!DpadItemKeepsAction(memory, state, runtime)) return false;
+        ++runtime.DpadItemsKept;
+        state.r[15] = pc == kTopScreenDpadItemHeldPutAway ? kTopScreenDpadItemHeldKept
+                                                          : kTopScreenDpadItemMaskKept;
+        return true;
+    }
+    if (pc == kTopScreenBottleUpdateEntry) {
+        if (!IsDpadItemButton(state.r[2])) return false;
+        // Inventory_UpdateBottleItem(play r0, item r1, button r2). A bottle
+        // that no longer matches is left as it is, as 3.2.2 does.
+        TopScreenDpadItemGuestState dpad;
+        if (ReadDpadItems(memory, state.r[0], runtime, &dpad)) {
+            const auto update = ResolveTopScreenDpadBottleUpdate(
+                dpad, state.r[2], static_cast<uint8_t>(state.r[1]));
+            if (update && ApplyTopScreenDpadBottleUpdate(memory, state.r[0], *update))
+                ++runtime.DpadBottleUpdates;
+        }
+        state.r[15] = state.r[14];
+        return true;
+    }
+    if (pc == kTopScreenSlotItemEntry && IsPendingDpadItemResolve(state, runtime)) {
+        ++runtime.SlotEntries;
+        const auto button = state.r[1];
+        runtime.PendingDpadItemButton = 0;
+        TopScreenDpadItemGuestState dpad;
+        state.r[0] = ReadDpadItems(memory, state.r[0], runtime, &dpad)
+            ? ResolveTopScreenDpadItem(dpad, button - kTopScreenDpadItemButtonFirst)
+            : kTopScreenNoItem;
+        ++runtime.DpadItemResolves;
+        state.r[15] = state.r[14];
         return true;
     }
     if (pc == kTopScreenSlotItemEntry) {

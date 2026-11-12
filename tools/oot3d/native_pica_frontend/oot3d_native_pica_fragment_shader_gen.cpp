@@ -422,6 +422,13 @@ uint64_t ComputeOot3dPicaFragmentShaderStateKey(
 Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
     const Oot3dPicaDrawPacket& packet) {
     Oot3dPicaFragmentUniformState uniforms;
+    BuildOot3dPicaFragmentUniformStateInto(packet, uniforms, false);
+    return uniforms;
+}
+
+void BuildOot3dPicaFragmentUniformStateInto(
+    const Oot3dPicaDrawPacket& packet, Oot3dPicaFragmentUniformState& uniforms,
+    bool reuseFogTable) {
     for (size_t stage = 0; stage < kTevStageRegisters.size(); ++stage) {
         uniforms.TevConstants[stage] = DecodeColor(
             packet.Registers[kTevStageRegisters[stage] + 3U]);
@@ -450,17 +457,37 @@ Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
         uniforms.TextureLodBias[texture] =
             static_cast<float>(signedRaw) / 256.0F;
     }
-    for (size_t index = 0; index < packet.FogLut.size(); ++index) {
-        const uint32_t raw = packet.FogLut[index];
-        const uint32_t value = (raw >> 13U) & 0x7FFU;
-        const uint32_t differenceBits = raw & 0x1FFFU;
-        const int32_t difference =
-            (differenceBits & 0x1000U) != 0U
-                ? static_cast<int32_t>(differenceBits | 0xFFFFE000U)
-                : static_cast<int32_t>(differenceBits);
-        uniforms.FogLut[index] = {
-            static_cast<float>(value) / 2047.0F,
-            static_cast<float>(difference) / 2047.0F};
+    // The fog table is 256 float divisions per draw and changes only with
+    // the scene's fog (config/plan_in_place): the previous draw's converted
+    // table on this thread is reused when its raw words are the same, which
+    // is exactly what converting them again gives.
+    struct FogTableCache {
+        bool Valid = false;
+        std::array<uint32_t, 128> Raw{};
+        std::array<std::array<float, 2>, 128> Converted{};
+    };
+    thread_local FogTableCache fogCache;
+    if (reuseFogTable && fogCache.Valid &&
+        fogCache.Raw == packet.FogLut.Values()) {
+        uniforms.FogLut = fogCache.Converted;
+    } else {
+        for (size_t index = 0; index < packet.FogLut.size(); ++index) {
+            const uint32_t raw = packet.FogLut[index];
+            const uint32_t value = (raw >> 13U) & 0x7FFU;
+            const uint32_t differenceBits = raw & 0x1FFFU;
+            const int32_t difference =
+                (differenceBits & 0x1000U) != 0U
+                    ? static_cast<int32_t>(differenceBits | 0xFFFFE000U)
+                    : static_cast<int32_t>(differenceBits);
+            uniforms.FogLut[index] = {
+                static_cast<float>(value) / 2047.0F,
+                static_cast<float>(difference) / 2047.0F};
+        }
+        if (reuseFogTable) {
+            fogCache.Raw = packet.FogLut.Values();
+            fogCache.Converted = uniforms.FogLut;
+            fogCache.Valid = true;
+        }
     }
     uniforms.Lighting = BuildOot3dPicaFragmentLightingUniformState(packet);
     uniforms.LightingProgram = Fast::Oot3d::BuildPicaLightingProgram(
@@ -469,7 +496,6 @@ Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
                                packet.Registers[0x080U], packet.Registers[0x083U]};
     uniforms.ProcTexProgram = BuildOot3dPicaProcTexProgram(packet);
     Fast::Renderer3ds::DecodePicaTevProgram(packet.Registers, uniforms.TevProgram);
-    return uniforms;
 }
 
 bool GenerateOot3dPicaFragmentShader(
@@ -690,6 +716,7 @@ bool GenerateOot3dPicaFragmentShader(
         source << (procTexEnabled ? "vec4 pica_native_texture3() { return pica_sample_proctex(); }\n"
                                   : "vec4 pica_native_texture3() { return vec4(0.0); }\n");
         source << Fast::Renderer3ds::PicaTextureSelectionProgram;
+        source << Fast::Renderer3ds::PicaTevUniformEvaluatorGlsl();
     }
     source << lightingDeclarations;
     hooks.Offsets[static_cast<size_t>(
@@ -828,16 +855,14 @@ bool GenerateOot3dPicaFragmentShader(
         source << "    PicaTevInputs tev_inputs;\n"
                   "    tev_inputs.primary = rounded_primary_color;\n"
                   "    tev_inputs.primary_fragment = primary_fragment_color;\n"
-                  "    tev_inputs.secondary_fragment = secondary_fragment_color;\n"
-                  "    tev_inputs.buffer_color = fragment_uniforms.combiner_buffer_color;\n"
-                  "    for(int i=0;i<6;++i) tev_inputs.constants[i]=fragment_uniforms.tev_constants[i];\n";
+                  "    tev_inputs.secondary_fragment = secondary_fragment_color;\n";
         // Fixed unit dispatch lets the GPU compiler eliminate irrelevant sampler paths.
         for (unsigned unit = 0; unit < 4; ++unit) {
             source << "    tev_inputs.textures[" << unit << "] = (fragment_uniforms.tev_program.control.y & "
                    << (1U << unit) << "u) != 0u ? pica_native_texture(" << unit
                    << "u, pica_texcoord0, pica_texcoord1, pica_texcoord2) : vec4(0.0);\n";
         }
-        source << "    combiner_output = pica_evaluate_tev_resolved(fragment_uniforms.tev_program, tev_inputs);\n";
+        source << "    combiner_output = pica_evaluate_tev_uniform(tev_inputs);\n";
         if (!supported) { SetError(error, "parametric TEV texture interface unsupported"); return false; }
     }
     hooks.Offsets[static_cast<size_t>(
@@ -958,12 +983,14 @@ bool GenerateOot3dPicaFragmentShader(
 
 bool GenerateOot3dPicaParametricBaseFragmentShader(
     bool fragmentLighting, bool integerTexture0,
-    Oot3dPicaGeneratedFragmentShader& shader, std::string* error, bool procTex) {
+    Oot3dPicaGeneratedFragmentShader& shader, std::string* error, bool lightingLuts, bool procTex) {
     auto packet = std::make_unique<Oot3dPicaDrawPacket>();
     Oot3dPicaDecodedDrawState state{};
     packet->Registers[0x8FU] = fragmentLighting ? 1U : 0U;
     packet->Registers[0x80U] = procTex ? 1U | 1U << 10U : 1U;
     packet->Registers[0x83U] = integerTexture0 ? 2U << 28U : 0U;
+    // Config1: every lookup table and per-light attenuation disabled.
+    if (!lightingLuts) packet->Registers[0x1C4U] = 0xFF7FFFFFU;
     state.Textures[0].Enabled = true;
     state.Textures[0].Type = integerTexture0 ? 2U : 0U;
     return GenerateOot3dPicaFragmentShader(*packet, state, shader, error,

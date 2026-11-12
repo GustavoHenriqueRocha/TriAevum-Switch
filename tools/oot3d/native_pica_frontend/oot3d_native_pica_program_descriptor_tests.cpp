@@ -204,6 +204,90 @@ void TestIncrementalRegisterFileHash() {
     std::cout << "register-file ID: 3000 incremental draws match full hashes\n";
 }
 
+uint64_t Fnv(const std::string& text) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char c : text) {
+        hash ^= c;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+// lighting3: the parametric programs read the TEV and lighting programs from
+// the uniform block where they use them. Local copies (the lighting
+// program's light table indexed by the loop, the TEV constants and words)
+// made uam spill: 105 GPRs and 4096 bytes of scratch per warp, 97 unlit.
+void TestParametricRegisterPressure() {
+    using namespace Oot3dNativeGame;
+    for (unsigned index = 0; index < 6U; ++index) {
+        const bool lighting = index != 0U && index != 2U;
+        const bool luts = index < 4U;
+        Oot3dPicaGeneratedFragmentShader shader;
+        std::string error;
+        Require(GenerateOot3dPicaParametricBaseFragmentShader(lighting, (index & 2U) != 0U || index == 5U, shader,
+                                                              &error, luts),
+                "parametric base generation failed");
+        const std::string& s = shader.Source;
+        Require(s.find("PicaLightingProgram lp") == std::string::npos &&
+                    s.find("tev_inputs.constants[") == std::string::npos &&
+                    s.find("tev_inputs.buffer_color") == std::string::npos &&
+                    s.find("pica_evaluate_tev_uniform(tev_inputs)") != std::string::npos &&
+                    s.find("switch (selector)") == std::string::npos,
+                "parametric program copies its programs or selects TEV sources with a switch");
+        if (lighting) {
+            Require(s.find("pica_uniform_program_surface(") != std::string::npos &&
+                        s.find("pica_program_lut(lp") == std::string::npos &&
+                        s.find("fragment_uniforms.lighting_program.lights[slot].x") != std::string::npos,
+                    "parametric lighting does not read its program in place");
+            Require((s.find("uniform usampler2D pica_lighting_lut") != std::string::npos) == luts,
+                    "lit base without its LUT family");
+        }
+    }
+    // The no-LUT lit base is the program the console recorded in the Forest
+    // Temple (frag_08743ed174a0fce1 before lighting3): lit, no LUT texture.
+    Oot3dPicaGeneratedFragmentShader withLuts, withoutLuts;
+    Require(GenerateOot3dPicaParametricBaseFragmentShader(true, false, withLuts) &&
+                GenerateOot3dPicaParametricBaseFragmentShader(true, false, withoutLuts, nullptr, false) &&
+                withLuts.Source != withoutLuts.Source &&
+                withoutLuts.Source.find("float pica_lighting_lut_unsigned(int t, float p) { return 1.0; }") !=
+                    std::string::npos,
+            "no-LUT lit parametric base");
+}
+
+// Specialized texts are keys of the reference pack (recorded GL programs):
+// fingerprints taken before lighting3 must not move.
+void TestSpecializedTextsUnchanged() {
+    using namespace Oot3dNativeGame;
+    auto packet = MakePacket();
+    const auto state = MakeState();
+    auto lightingPacket = packet;
+    lightingPacket.Registers[0x08FU] = 1U;
+    lightingPacket.Registers[0x1C4U] = 0xFF7FFFFFU;
+    lightingPacket.Registers[0x149U] = 1U;
+    lightingPacket.Registers[0x142U] = 0x0FF00000U;
+    auto lutState = std::make_shared<Oot3dPicaLightingLutState>();
+    lutState->PackedEntries.fill(0x00000FFFU);
+    lutState->ContentHash = ComputeOot3dPicaLightingLutContentHash(*lutState);
+    lutState->ContentHashAvailable = true;
+    auto complete = lightingPacket;
+    complete.Registers[0x1C3U] = (8U << 4U) | (3U << 2U);
+    complete.Registers[0x1C4U] = 0U;
+    complete.LightingLuts = lutState;
+    const struct {
+        const Oot3dPicaDrawPacket* Packet;
+        uint64_t Fingerprint;
+    } cases[] = {{&packet, 0x5DC11A415A36B68CULL},
+                 {&lightingPacket, 0x2A21C0AF6439B15AULL},
+                 {&complete, 0x30DCD62A87A1787EULL}};
+    for (const auto& c : cases) {
+        Oot3dPicaGeneratedFragmentShader shader;
+        std::string error;
+        Require(GenerateOot3dPicaFragmentShader(*c.Packet, state, shader, &error) &&
+                    Fnv(shader.Source) == c.Fingerprint,
+                "a specialized fragment text changed (its pack key would miss)");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -625,6 +709,8 @@ int main() {
                     explicitShader.StateKey != rasterShader.StateKey,
                 "explicit-depth fragment program lost its depth write or key");
     }
+    TestParametricRegisterPressure();
+    TestSpecializedTextsUnchanged();
     std::cout << "oot3d_native_pica_program_descriptor_tests: ok\n";
     return 0;
 }

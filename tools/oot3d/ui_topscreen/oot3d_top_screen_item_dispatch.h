@@ -1,5 +1,6 @@
 #pragma once
 
+#include "oot3d_top_screen_dpad_items.h"
 #include "oot3d_top_screen_item_guest.h"
 #include <vector>
 
@@ -22,6 +23,17 @@ struct TopScreenItemQueryTrace {
 struct TopScreenItemDispatchRuntime {
     // Published by the gameplay-action owner, independent of HID sampling.
     uint8_t DirectItemId = 0;
+    // Slots of the Item directions of each age (0xFF elsewhere), published
+    // from the TopScreen config each refresh.
+    std::array<uint8_t, 4> ChildDpadItemSlots{0xFFU, 0xFFU, 0xFFU, 0xFFU};
+    std::array<uint8_t, 4> AdultDpadItemSlots{0xFFU, 0xFFU, 0xFFU, 0xFFU};
+    // D-pad item button a scan exit chose, for the slot resolver call that
+    // directly follows it; the native scans never produce 6..9.
+    uint32_t PendingDpadItemButton = 0;
+    uint64_t DpadItemButtons = 0;
+    uint64_t DpadItemResolves = 0;
+    uint64_t DpadItemsKept = 0;
+    uint64_t DpadBottleUpdates = 0;
     uint32_t PendingSelection = 0;
     uint64_t QueryEntries = 0;
     std::array<uint64_t, 4> QueryCalls{};

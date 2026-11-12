@@ -743,4 +743,111 @@ void RunNativeFrameRateTests() {
             throw std::runtime_error("late resync carried the debt");
         }
     }
+
+    // L3+R3 > Video > FPS while the game runs (LiveFrameRate): the Switch
+    // launches native30_interpolated, so both choices keep the 30 Hz
+    // simulation and map to the FrameRate mode a start at that rate gets.
+    {
+        using Fast::Oot3d::FrameRateMode;
+        using Oot3dNativeGame::GameplayTimingMode;
+        Oot3dNativeGame::LiveFrameRateChoice choice;
+        uint64_t seen = 0U;
+        if (Oot3dNativeGame::TakeLiveFrameRateMode(
+                choice, seen, GameplayTimingMode::Native30Interpolated)) {
+            throw std::runtime_error("live frame rate applied without a choice");
+        }
+        for (const bool fps60 : {true, false, true}) {
+            choice.Publish(fps60);
+            const auto mode = Oot3dNativeGame::TakeLiveFrameRateMode(
+                choice, seen, GameplayTimingMode::Native30Interpolated);
+            if (mode != Oot3dNativeGame::ResolveLaunchFrameRateMode(
+                            GameplayTimingMode::Native30Interpolated,
+                            fps60 ? 60U : 30U) ||
+                Oot3dNativeGame::TakeLiveFrameRateMode(
+                    choice, seen, GameplayTimingMode::Native30Interpolated)) {
+                throw std::runtime_error("live frame rate choice mismatch");
+            }
+            const auto contract = Oot3dNativeGame::ResolveNativeFrameRateContract(
+                GameplayTimingMode::Native30Interpolated, fps60 ? 60U : 30U);
+            const auto policy = Fast::Oot3d::ResolvePresentationPacingPolicy(*mode);
+            if (contract.SimulationRateHz != 30U || contract.A32UpdateRate != 2 ||
+                Oot3dNativeGame::ShouldUseNativeVisualInterpolation(
+                    contract, policy.Composition.InterpolationEnabled()) !=
+                    fps60 ||
+                policy.TargetRateHz != (fps60 ? 60U : 30U)) {
+                throw std::runtime_error("live frame rate changed the simulation");
+            }
+        }
+        // A 60 Hz simulation cannot change live; a launch that never
+        // interpolates stays at 30.
+        choice.Publish(false);
+        if (Oot3dNativeGame::TakeLiveFrameRateMode(
+                choice, seen, GameplayTimingMode::Enhanced60)) {
+            throw std::runtime_error("live frame rate changed enhanced60");
+        }
+        choice.Publish(true);
+        if (Oot3dNativeGame::TakeLiveFrameRateMode(
+                choice, seen, GameplayTimingMode::Native30NoInterpolation) !=
+            FrameRateMode::Original30) {
+            throw std::runtime_error("live frame rate interpolated a 30-only launch");
+        }
+    }
+    // The guest refresh clock across the switch (game thread): one clock of
+    // 60 refreshes a second at both rates, never more than two refreshes in
+    // a host frame and none owed from the old rate (no catch-up burst).
+    {
+        Oot3dNativeGame::NativePresentationScheduler scheduler(
+            Oot3dNativeGame::kOot3dOriginalSimulationRateHz);
+        (void)scheduler.Advance(0.0);
+        double seconds = 0.0;
+        uint64_t refreshes = 0U;
+        const auto run = [&](double hostFrameSeconds, int frames) {
+            for (int frame = 0; frame < frames; ++frame) {
+                const auto step = scheduler.Advance(hostFrameSeconds);
+                seconds += hostFrameSeconds;
+                refreshes += step.GuestRefreshesDue;
+                if (step.GuestRefreshesDue > 2U ||
+                    step.DroppedGuestRefreshes != 0U) {
+                    throw std::runtime_error("rate switch caught up refreshes");
+                }
+            }
+        };
+        run(1.0 / 30.0, 90);
+        run(1.0 / 60.0, 180); // 30 -> 60
+        // 60 -> 30: the pacer starts over, so the first host frame is short.
+        run(0.002, 1);
+        run(1.0 / 30.0, 90);
+        run(1.0 / 60.0, 1);
+        run(1.0 / 60.0, 120);
+        if (std::abs(static_cast<double>(refreshes) - seconds * 60.0) > 1.0) {
+            throw std::runtime_error("rate switch changed the game speed");
+        }
+    }
+    // The pacer (render thread) reconfigured for the other rate starts over:
+    // the switch frame is presented at once, then one new period apart; no
+    // deadline of the old rate is owed.
+    {
+        Oot3dNativeGame::NativeRealtimeRefreshPacer pacer(true, 30U);
+        pacer.SetMaximumSpin(0ns);
+        for (int frame = 0; frame < 3; ++frame) pacer.WaitForNextRefresh();
+        for (const uint32_t rate : {60U, 30U}) {
+            pacer.Configure(true, rate);
+            if (pacer.TargetRateHz() != rate) {
+                throw std::runtime_error("pacer kept the old rate");
+            }
+            const auto period = std::chrono::nanoseconds(1'000'000'000LL / rate);
+            const auto before = std::chrono::steady_clock::now();
+            pacer.WaitForNextRefresh();
+            const auto switched = std::chrono::steady_clock::now();
+            if (switched - before > period / 2) {
+                throw std::runtime_error("rate switch waited on the old deadline");
+            }
+            // Four presentations take four new periods (deadline-based, so
+            // an oversleep of one wait shortens only the next).
+            for (int frame = 0; frame < 4; ++frame) pacer.WaitForNextRefresh();
+            if (std::chrono::steady_clock::now() - switched < period * 35 / 10) {
+                throw std::runtime_error("rate switch presented a burst");
+            }
+        }
+    }
 }

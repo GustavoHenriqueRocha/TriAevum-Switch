@@ -1,10 +1,10 @@
 #pragma once
 
-// Switch thread placement (oot3d_switch_threads.cpp; política em
-// oot3d_switch_thread_layout.h). Toda pthread nasce como thread de serviço
-// (prioridade 0x3B, núcleos 1|2, no layout padrão); as que importam pedem o
-// seu papel no início: render thread, worker de planos PICA e áudio do host
-// (o áudio do SDL é reconhecido pelo pedido de TIME_CRITICAL).
+// Switch thread placement (oot3d_switch_threads.cpp; policy in
+// oot3d_switch_thread_layout.h). Every pthread is born as a service thread
+// (priority 0x3B, cores 1|2, in the default layout); the ones that matter request
+// their role at startup: render thread, PICA plan worker and host audio
+// (SDL audio is recognized by its TIME_CRITICAL request).
 //
 // Off the Switch everything here is a no-op.
 
@@ -29,8 +29,8 @@ SwitchThreadLayoutConfig ActiveSwitchThreadLayout();
 // of each registered thread since the previous call and, for threads that
 // note their core, the cores they were seen on.
 std::string SwitchThreadPerfSummary();
-// Watchdog de travamento: handles e papéis das threads registradas, sem
-// bloquear (try_lock; 0 se o registro estiver ocupado) e sem alocar.
+// Hang watchdog: handles and roles of the registered threads, without
+// blocking (try_lock; 0 if the registry is busy) and without allocating.
 size_t SnapshotSwitchThreads(uint32_t* handles, SwitchThreadRole* roles, size_t capacity) noexcept;
 #else
 inline void PlaceSwitchThread(SwitchThreadRole) {}

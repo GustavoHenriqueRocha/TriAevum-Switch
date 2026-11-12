@@ -10,11 +10,13 @@
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "gfx_deko3d_device.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
 #include <unordered_map>
+#include <type_traits>
 #include <unordered_set>
 
 namespace Fast::Deko3d {
@@ -54,6 +56,25 @@ class ShaderStore {
 
     [[nodiscard]] const ShaderStoreStats& Stats() const noexcept { return mStats; }
 
+    // What a shader this store returned needs (from its DKSH).
+    struct Resources {
+        uint32_t Gprs = 0;
+        uint32_t ScratchBytes = 0; // per warp; nonzero: the program spills
+    };
+  private:
+    struct Loaded {
+        DkShader Shader;
+        Resources Needs;
+    };
+    static_assert(std::is_standard_layout_v<Loaded> && offsetof(Loaded, Shader) == 0U);
+
+  public:
+    // Only for shaders this store returned: each is the first member of a
+    // Loaded, so the lookup is free (one per draw).
+    [[nodiscard]] static const Resources& ResourcesOf(const DkShader& shader) noexcept {
+        return reinterpret_cast<const Loaded&>(shader).Needs;
+    }
+
   private:
     const DkShader* Load(uint64_t key, std::span<const uint8_t> dksh);
     void RecordMissing(ShaderStage stage, uint64_t key, std::string_view text);
@@ -62,7 +83,7 @@ class ShaderStore {
     uint32_t mCodeUsed = 0;
     bool mCodeWritten = false;
     ShaderPackIndex mPack;
-    std::unordered_map<uint64_t, std::unique_ptr<DkShader>> mLoaded;
+    std::unordered_map<uint64_t, std::unique_ptr<Loaded>> mLoaded;
     std::unordered_set<uint64_t> mMissing;
     ShaderStoreStats mStats{};
 };

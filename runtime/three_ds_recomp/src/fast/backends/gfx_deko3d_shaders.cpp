@@ -6,14 +6,32 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace Fast::Deko3d {
 namespace {
-constexpr const char* kPackPath = "sdmc:/switch/oot3dre/shadercache/deko3d.pack";
+constexpr const char* kPackDirectory = "sdmc:/switch/oot3dre/shadercache/";
+constexpr const char* kPackConfig = "sdmc:/switch/oot3dre/config/deko3d_pack";
 constexpr const char* kMissingDirectory = "sdmc:/switch/oot3dre/logs/deko3d_shaders";
+
+// The whole file in one read (nothing if it cannot be read). From the fork
+// author's ShaderStore::Init: TriAevum-Switch commit a7424d3b by Gustavo
+// Henrique Rocha ("leitura do pack de uma vez"), licence as the repository
+// (LICENSE): a per-byte istreambuf_iterator copy over the SD card delays boot.
+std::optional<std::vector<uint8_t>> ReadWholeFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return std::nullopt;
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(file.tellg()));
+    file.seekg(0);
+    if (!bytes.empty() && !file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
+        return std::nullopt;
+    }
+    return bytes;
+}
 } // namespace
 
 bool ShaderStore::Init(Device& device) {
@@ -23,26 +41,47 @@ bool ShaderStore::Init(Device& device) {
     if (mCode == nullptr) {
         return false;
     }
-    std::ifstream file(kPackPath, std::ios::binary | std::ios::ate);
-    if (!file) {
-        Log("shaders: %s not found (every program will be missing)", kPackPath);
-        return true;
+    // config/deko3d_pack: another pack of shadercache/ for an A/B (e.g.
+    // deko3d_reference.pack, the same stages without the pass-through TEV
+    // rewrite). A bad name or a missing file falls back to deko3d.pack.
+    std::string name(kDefaultShaderPackName);
+    std::optional<std::vector<uint8_t>> bytes;
+    {
+        std::ifstream config(kPackConfig);
+        std::string line;
+        if (config && std::getline(config, line)) {
+            if (const auto chosen = ShaderPackNameFromConfig(line)) {
+                bytes = ReadWholeFile(kPackDirectory + *chosen);
+                if (bytes) {
+                    name = *chosen;
+                } else {
+                    Log("shaders: config/deko3d_pack names %s, not found; reading %s", chosen->c_str(), name.c_str());
+                }
+            } else {
+                Log("shaders: config/deko3d_pack \"%s\" is not a pack name in shadercache/; reading %s", line.c_str(),
+                    name.c_str());
+            }
+        }
     }
-    // One read: the pack predicted from the CMB materials is several MiB, and a
-    // per-byte istreambuf_iterator copy over the SD card delays the boot.
-    std::vector<uint8_t> bytes(static_cast<size_t>(file.tellg()));
-    file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
-        Log("shaders: %s could not be read", kPackPath);
+    const std::string path = kPackDirectory + name;
+    if (!bytes) {
+        bytes = ReadWholeFile(path);
+    }
+    if (!bytes) {
+        Log("shaders: %s not found (every program will be missing)", path.c_str());
         return true;
     }
     std::string error;
-    if (!mPack.Parse(std::move(bytes), &error)) {
-        Log("shaders: %s rejected: %s", kPackPath, error.c_str());
+    if (!mPack.Parse(std::move(*bytes), &error)) {
+        Log("shaders: %s rejected: %s", path.c_str(), error.c_str());
         return true;
     }
     mStats.PackEntries = mPack.Count();
+    const size_t skipped = mPack.CountWithFlag(kShaderPackFlagTevPassthroughSkip);
     Log("shaders: %zu precompiled stages in the pack", mPack.Count());
+    Log("shaders: pack %s flags=%u tev_passthrough=%s (%zu stages compiled with pass-through TEV stages skipped)",
+        name.c_str(), static_cast<unsigned>(mPack.Flags()),
+        (mPack.Flags() & kShaderPackFlagTevPassthroughSkip) != 0U ? "skip" : "keep", skipped);
     return true;
 }
 
@@ -61,7 +100,7 @@ const DkShader* ShaderStore::Find(ShaderStage stage, std::string_view text) {
 
 const DkShader* ShaderStore::FindKey(ShaderStage stage, uint64_t key, std::string_view textForRecord) {
     if (const auto found = mLoaded.find(key); found != mLoaded.end()) {
-        return found->second.get();
+        return &found->second->Shader;
     }
     ShaderStage packedStage = stage;
     const auto dksh = mPack.Find(key, &packedStage);
@@ -74,7 +113,7 @@ const DkShader* ShaderStore::FindKey(ShaderStage stage, uint64_t key, std::strin
 
 const DkShader* ShaderStore::Embedded(uint64_t key, std::span<const uint8_t> dksh) {
     if (const auto found = mLoaded.find(key); found != mLoaded.end()) {
-        return found->second.get();
+        return &found->second->Shader;
     }
     return Load(key, dksh);
 }
@@ -100,11 +139,12 @@ const DkShader* ShaderStore::Load(uint64_t key, std::span<const uint8_t> dksh) {
         return nullptr;
     }
     std::memcpy(static_cast<uint8_t*>(dkMemBlockGetCpuAddr(mCode)) + at, dksh.data(), dksh.size());
-    auto shader = std::make_unique<DkShader>();
+    auto shader = std::make_unique<Loaded>();
+    shader->Needs = {DkshGprCount(dksh).value_or(0U), *scratch};
     DkShaderMaker maker;
     dkShaderMakerDefaults(&maker, mCode, at);
-    dkShaderInitialize(shader.get(), &maker);
-    if (!dkShaderIsValid(shader.get())) {
+    dkShaderInitialize(&shader->Shader, &maker);
+    if (!dkShaderIsValid(&shader->Shader)) {
         if (mStats.LoadFailures++ < 10U) {
             Log("shaders: %016llx (%zu bytes) is not a valid shader", static_cast<unsigned long long>(key),
                 dksh.size());
@@ -115,7 +155,7 @@ const DkShader* ShaderStore::Load(uint64_t key, std::span<const uint8_t> dksh) {
     mStats.CodeBytes = mCodeUsed;
     ++mStats.Loaded;
     mCodeWritten = true;
-    return mLoaded.emplace(key, std::move(shader)).first->second.get();
+    return &mLoaded.emplace(key, std::move(shader)).first->second->Shader;
 }
 
 void ShaderStore::RecordMissing(ShaderStage stage, uint64_t key, std::string_view text) {

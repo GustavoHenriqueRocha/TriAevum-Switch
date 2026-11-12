@@ -19,6 +19,7 @@ get_filename_component(runtime "${CMAKE_CURRENT_LIST_DIR}/../../../runtime/three
 add_executable(texture_source_cache_tests texture_source_cache_tests.cpp
     "${runtime}/src/fast/oot3d/grass_texture_source_cache.cpp"
     "${runtime}/src/fast/oot3d/grass_texture_twins.cpp"
+    "${runtime}/src/fast/oot3d/grass_texture_twin_table.cpp"
     "${runtime}/src/fast/oot3d/texture_preview_artifact.cpp"
     "${runtime}/src/fast/oot3d/grass_surface_extractor.cpp"
     "${runtime}/src/fast/oot3d/grass_overlay_mask.cpp"

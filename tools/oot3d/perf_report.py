@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Resumo do logs/perf.txt do console (Switch), por sessão.
+"""Summary of the console's (Switch) logs/perf.txt, per session.
 
-Cada linha "host_frames=..." é uma janela de 150 quadros de host; uma linha
-"glperf ..." logo depois (com config/gpu_timing no SD) traz, para a mesma
-janela, tempos de GPU/CPU por etapa da render thread e contadores de chamadas
-GL. Uma sessão nova começa quando host_frames volta a diminuir.
+Each "host_frames=..." line is a window of 150 host frames; a
+"glperf ..." line right after it (with config/gpu_timing on the SD) holds, for the same
+window, GPU/CPU times per render thread stage and GL call
+counters. A new session starts when host_frames goes down again.
 
-Desde o registro de clocks, cada janela traz também "clocks: cpu_mhz=
-gpu_mhz= mem_mhz= op_mode=handheld|docked ..." (lidos do sys-clk; -1 quando
-não deu para ler). O resumo mostra o clock de cada sessão, avisa quando ele
-muda no meio dela e separa as estatísticas por clock: só compare medições
-feitas no mesmo clock.
+Since clock logging, each window also holds "clocks: cpu_mhz=
+gpu_mhz= mem_mhz= op_mode=handheld|docked ..." (read from sys-clk; -1 when
+it could not be read). The summary shows each session's clock, warns when it
+changes midway and splits the statistics by clock: only compare measurements
+taken at the same clock.
 
-Uso:
-  python3 tools/oot3d/perf_report.py logs/perf.txt            # todas as sessões
-  python3 tools/oot3d/perf_report.py perf.txt --session -1    # só a última
+Usage:
+  python3 tools/oot3d/perf_report.py logs/perf.txt            # all sessions
+  python3 tools/oot3d/perf_report.py perf.txt --session -1    # only the last one
   python3 tools/oot3d/perf_report.py perf.txt --skip 4 --windows
 """
 
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 
 TOKEN = re.compile(r'([A-Za-z_][\w./]*)=("[^"]*"|\S+)|(\S+:)(?=\s|$)')
 
-# Fases da linha principal (ms por quadro de host), na ordem do perf.txt.
+# Phases of the main line (ms per host frame), in perf.txt order.
 PHASES = [
     "guest", "frame_start", "host_frame_start", "input", "renderer_frame_start",
     "dsp_mix", "audio_out", "pica_submit", "pica_plan", "pica_backend",
@@ -40,21 +40,21 @@ GPU_STAGES = [
 ]
 CPU_STAGES = GPU_STAGES + ["other", "pacing", "idle"]
 STAGE_HELP = {
-    "begin": "início do quadro",
-    "clear": "limpezas/fills",
-    "pica_top": "cena PICA, tela de cima",
-    "pica_bottom": "PICA, tela de baixo",
-    "pica_off": "PICA fora da tela (sombras, RTT)",
-    "pica_canon": "execução canônica (não exibida)",
+    "begin": "frame start",
+    "clear": "clears/fills",
+    "pica_top": "PICA scene, top screen",
+    "pica_bottom": "PICA, bottom screen",
+    "pica_off": "PICA offscreen (shadows, RTT)",
+    "pica_canon": "canonical execution (not displayed)",
     "transfer": "display transfers",
     "post_aa": "FXAA/SMAA",
     "post_easu": "FSR EASU",
-    "scanout": "passe final na janela (RCAS/cópia)",
+    "scanout": "final pass to the window (RCAS/copy)",
     "ui": "UI TopScreen/HUD",
     "present": "EndFrame + swap",
-    "other": "outros comandos",
-    "pacing": "espera do pacer",
-    "idle": "render thread ociosa",
+    "other": "other commands",
+    "pacing": "pacer wait",
+    "idle": "render thread idle",
 }
 COUNTERS = [
     "draws", "clears", "fbo_binds", "fbo_changes", "tex_binds", "prog_binds",
@@ -64,15 +64,15 @@ COUNTERS = [
 ]
 KINDS = ["step", "interp", "hold"]
 KIND_HELP = {
-    "step": "quadro de passo (quadro novo do jogo)",
-    "interp": "quadro interpolado (amostra repetida)",
-    "hold": "quadro sem amostra nova (reapresentação)",
+    "step": "step frame (new game frame)",
+    "interp": "interpolated frame (repeated sample)",
+    "hold": "frame without a new sample (re-presentation)",
 }
 
 
 def parse_line(line: str) -> dict[str, object]:
-    # As seções ("ms/frame:", "audio:", "mesa:") não repetem nomes de chave:
-    # todas as chaves ficam num só dicionário.
+    # The sections ("ms/frame:", "audio:", "mesa:") don't repeat key names:
+    # all keys go into a single dictionary.
     values: dict[str, object] = {}
     for match in TOKEN.finditer(line):
         key, raw = match.group(1), match.group(2)
@@ -139,11 +139,11 @@ def percentile(data: list[float], fraction: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
-MODE_NAMES = {"handheld": "portátil", "docked": "dock"}
+MODE_NAMES = {"handheld": "handheld", "docked": "dock"}
 
 
-# Degraus de clock do Switch (os perfis do sys-clk). O clock medido (realFreqs)
-# oscila alguns MHz em volta do degrau: 1780..1789 é o mesmo 1785.
+# Switch clock steps (the sys-clk profiles). The measured clock (realFreqs)
+# oscillates a few MHz around the step: 1780..1789 is the same 1785.
 CLOCK_STEPS = {
     "cpu_mhz": (612, 714, 816, 918, 1020, 1122, 1224, 1326, 1428, 1581, 1683,
                 1785, 1887, 1963, 2091, 2193, 2295, 2397),
@@ -154,7 +154,7 @@ CLOCK_STEPS = {
 
 
 def snap_clock(key: str, mhz: int) -> int:
-    """Encaixa o MHz medido no degrau mais próximo (se estiver a até 3%)."""
+    """Snaps the measured MHz to the nearest step (if within 3%)."""
     steps = CLOCK_STEPS.get(key)
     if mhz <= 0 or not steps:
         return mhz
@@ -163,7 +163,7 @@ def snap_clock(key: str, mhz: int) -> int:
 
 
 def clock_key(values: dict[str, object]) -> tuple | None:
-    """(cpu, gpu, mem, modo) da janela; None nos perf.txt sem clocks."""
+    """(cpu, gpu, mem, mode) of the window; None for perf.txt without clocks."""
     if "cpu_mhz" not in values and "op_mode" not in values:
         return None
 
@@ -178,7 +178,7 @@ def clock_key(values: dict[str, object]) -> tuple | None:
 
 def clock_text(key: tuple | None) -> str:
     if key is None:
-        return "sem registro"
+        return "not logged"
     cpu, gpu, mem, mode = key
     parts = [f"{name} {value if value > 0 else '?'}" for name, value in
              (("CPU", cpu), ("GPU", gpu), ("mem", mem))]
@@ -202,7 +202,7 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     all_windows = session.windows
     windows = all_windows[skip:] if len(all_windows) > skip else all_windows
     last_frames = num(all_windows[-1].main, "host_frames")
-    # Quadros de cada janela = diferença de host_frames (150 normalmente).
+    # Frames of each window = host_frames difference (150 normally).
     frames_in = []
     for position, window in enumerate(all_windows):
         before = num(all_windows[position - 1].main, "host_frames") if position else 0.0
@@ -210,27 +210,27 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     frames_in = frames_in[len(all_windows) - len(windows):]
     seconds = sum(count / max(num(w.main, "fps"), 1e-9) for count, w in zip(frames_in, windows))
     print("=" * 78)
-    print(f"Sessão {session.index} (linha {session.first_line}): {len(all_windows)} janelas, "
-          f"até host_frames={int(last_frames)}; analisadas {len(windows)} "
-          f"(pulando {len(all_windows) - len(windows)} do início), ~{seconds / 60:.1f} min")
+    print(f"Session {session.index} (line {session.first_line}): {len(all_windows)} windows, "
+          f"up to host_frames={int(last_frames)}; analyzed {len(windows)} "
+          f"(skipping {len(all_windows) - len(windows)} from the start), ~{seconds / 60:.1f} min")
     fps = [num(w.main, "fps") for w in windows]
     guest = [num(w.main, "guest_fps") for w in windows]
     total = [num(w.main, "total_ms") for w in windows]
     overall = sum(frames_in) / seconds if seconds > 0 else math.nan
-    print(f"  fps: global {fmt(overall, 1)}  média das janelas {fmt(sum(fps) / len(fps), 1)}  p10 {fmt(percentile(fps, 0.1), 1)}  "
-          f"mín {fmt(min(fps), 1)}  máx {fmt(max(fps), 1)}   guest_fps média "
-          f"{fmt(sum(guest) / len(guest), 1)}   total_ms média {fmt(sum(total) / len(total))}")
+    print(f"  fps: overall {fmt(overall, 1)}  window average {fmt(sum(fps) / len(fps), 1)}  p10 {fmt(percentile(fps, 0.1), 1)}  "
+          f"min {fmt(min(fps), 1)}  max {fmt(max(fps), 1)}   guest_fps average "
+          f"{fmt(sum(guest) / len(guest), 1)}   total_ms average {fmt(sum(total) / len(total))}")
     slow = sum(1 for value in fps if value < 0.9 * max(fps))
     if slow:
-        print(f"  janelas >10% abaixo do máximo: {slow}/{len(fps)}")
+        print(f"  windows >10% below the maximum: {slow}/{len(fps)}")
     summarize_clocks(all_windows, windows, frames_in)
 
-    # Fases do quadro de host (ms por quadro, média das janelas).
+    # Host frame phases (ms per frame, window average).
     phases = [(name, sum(num(w.main, name) for w in windows) / len(windows))
               for name in PHASES if any(name in w.main for w in windows)]
     if phases:
         peak = max(value for _, value in phases)
-        print("  fases (ms/quadro de host, thread do jogo + render):")
+        print("  phases (ms/host frame, game thread + render):")
         for name, value in sorted(phases, key=lambda item: -item[1]):
             if value < 0.05:
                 continue
@@ -242,7 +242,7 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
         if key in last:
             flags.append(f"{key}={fmt(num(last, key), 2 if key.endswith('_ms') else 0)}")
     if flags:
-        print("  plano PICA (última janela): " + " ".join(flags))
+        print("  PICA plan (last window): " + " ".join(flags))
 
     memory_keys = ["proc_used_mb", "heap_arena_mb", "heap_used_mb", "gl_tex_mb", "gl_buffer_mb",
                    "gl_textures_live", "gl_programs", "gl_oom", "gl_draws_skipped"]
@@ -250,16 +250,16 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     for key in memory_keys:
         series = [num(w.main, key, math.nan) for w in all_windows if key in w.main]
         if series:
-            memory.append(f"{key} {fmt(series[0], 1)}→{fmt(series[-1], 1)} (máx {fmt(max(series), 1)})")
+            memory.append(f"{key} {fmt(series[0], 1)}→{fmt(series[-1], 1)} (max {fmt(max(series), 1)})")
     if memory:
-        print("  memória (início→fim): " + "; ".join(memory))
+        print("  memory (start→end): " + "; ".join(memory))
 
     summarize_cadence(windows, seconds)
     summarize_offload(windows)
 
     gl_windows = [w for w in windows if w.glperf is not None]
     if not gl_windows:
-        print("  glperf: ausente (crie config/gpu_timing no SD para medir GPU/CPU por etapa)")
+        print("  glperf: absent (create config/gpu_timing on the SD to measure GPU/CPU per stage)")
     else:
         refresh = 60.0 if percentile(fps, 0.9) > 45.0 else 30.0
         summarize_glperf(gl_windows, top, refresh)
@@ -269,10 +269,10 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     if show_windows:
         has_clocks = any(clock_key(w.main) is not None for w in windows)
         has_cadence = any("present_1" in w.main for w in windows)
-        print("  janelas: host_frames fps total_ms" +
-              (" passo/interp/desc hold1/2/3+ trocas trava" if has_cadence else "") +
+        print("  windows: host_frames fps total_ms" +
+              (" step/interp/drop hold1/2/3+ switches lock" if has_cadence else "") +
               (" step_gpu_ms interp_gpu_ms step_draws" if gl_windows else "") +
-              (" cpu/gpu/mem modo" if has_clocks else ""))
+              (" cpu/gpu/mem mode" if has_clocks else ""))
         for window in windows:
             line = (f"    {int(num(window.main, 'host_frames')):>7} {fmt(num(window.main, 'fps'), 1):>6} "
                     f"{fmt(num(window.main, 'total_ms')):>7}")
@@ -297,7 +297,7 @@ def summarize_clocks(all_windows: list[Window], windows: list[Window],
                      frames_in: list[float]) -> None:
     keys = [clock_key(w.main) for w in all_windows]
     if all(key is None for key in keys):
-        print("  clocks: não registrados (perf.txt anterior ao registro de clocks)")
+        print("  clocks: not logged (perf.txt predates clock logging)")
         return
     last = next(w.main for w in reversed(all_windows) if clock_key(w.main) is not None)
     source = last.get("clk_src", "?")
@@ -309,42 +309,42 @@ def summarize_clocks(all_windows: list[Window], windows: list[Window],
                if keys[position] != keys[position - 1]]
     distinct = list(dict.fromkeys(key for key in keys))
     if not changes:
-        print(f"  clocks: {clock_text(keys[0])} (fonte {source}, perfil sys-clk {profile}"
+        print(f"  clocks: {clock_text(keys[0])} (source {source}, sys-clk profile {profile}"
               + (f", IPC {fmt(ipc, 0)} µs" if ipc >= 0 else "") + ")")
         if keys[0] is not None and -1 in keys[0][:3]:
-            print("    MHz desconhecidos (sys-clk ausente?): compare só com sessões "
-                  "medidas no mesmo clock")
+            print("    unknown MHz (sys-clk missing?): only compare with sessions "
+                  "measured at the same clock")
         return
-    print(f"  ATENÇÃO: o clock mudou {len(changes)}x no meio da sessão "
-          f"({len(distinct)} clocks distintos); estatísticas separadas abaixo")
+    print(f"  WARNING: the clock changed {len(changes)}x midway through the session "
+          f"({len(distinct)} distinct clocks); separate statistics below")
     for position, before, after in changes[:10]:
         frames = int(num(all_windows[position].main, "host_frames"))
-        print(f"    janela {position + 1} (host_frames={frames}): "
+        print(f"    window {position + 1} (host_frames={frames}): "
               f"{clock_text(before)} → {clock_text(after)}")
     if len(changes) > 10:
-        print(f"    ... mais {len(changes) - 10} mudanças")
-    # Janelas analisadas (sem as puladas do início), agrupadas por clock.
+        print(f"    ... {len(changes) - 10} more changes")
+    # Analyzed windows (without the ones skipped at the start), grouped by clock.
     groups: dict[tuple | None, list[tuple[float, Window]]] = {}
     for count, window in zip(frames_in, windows):
         groups.setdefault(clock_key(window.main), []).append((count, window))
-    print("  por clock (janelas analisadas):")
+    print("  per clock (analyzed windows):")
     for key, members in groups.items():
         fps = [num(w.main, "fps") for _, w in members]
         frames = sum(count for count, _ in members)
         seconds = sum(count / max(num(w.main, "fps"), 1e-9) for count, w in members)
         total = [num(w.main, "total_ms") for _, w in members]
         overall = frames / seconds if seconds > 0 else math.nan
-        print(f"    {clock_text(key)}: {len(members)} janelas (~{seconds / 60:.1f} min), "
-              f"fps global {fmt(overall, 1)} média {fmt(sum(fps) / len(fps), 1)} "
-              f"p10 {fmt(percentile(fps, 0.1), 1)} mín {fmt(min(fps), 1)}, "
-              f"total_ms média {fmt(sum(total) / len(total))}")
+        print(f"    {clock_text(key)}: {len(members)} windows (~{seconds / 60:.1f} min), "
+              f"fps overall {fmt(overall, 1)} average {fmt(sum(fps) / len(fps), 1)} "
+              f"p10 {fmt(percentile(fps, 0.1), 1)} min {fmt(min(fps), 1)}, "
+              f"total_ms average {fmt(sum(total) / len(total))}")
 
 
 CADENCE_BUCKETS = ["1", "2", "3", "4p"]
 
 
 def summarize_offload(windows: list[Window]) -> None:
-    # Bloco "offload:" (config/offload_*): trabalho tirado da thread do jogo.
+    # "offload:" block (config/offload_*): work taken off the game thread.
     marked = [w.main for w in windows if "offload_capture" in w.main]
     if not marked:
         return
@@ -353,35 +353,98 @@ def summarize_offload(windows: list[Window]) -> None:
         return sum(series) / len(series) if series else math.nan
     modes = " ".join(f"{name}={int(num(marked[-1], 'offload_' + name))}"
                      for name in ("capture", "plan", "perf", "actors"))
-    print(f"  offload ({len(marked)} janelas; última: {modes}):")
-    print(f"    captura PICA dentro do guest {fmt(mean('pica_capture_ms'))} ms/quadro"
-          f" ({fmt(mean('pica_capture_draws'), 0)} draws, cópia {fmt(mean('capture_copy_kb'), 0)} KiB,"
-          f" hash {fmt(mean('capture_hash_kb'), 0)} KiB, faixas de índice reaproveitadas"
+    print(f"  offload ({len(marked)} windows; last: {modes}):")
+    print(f"    PICA capture inside the guest {fmt(mean('pica_capture_ms'))} ms/frame"
+          f" ({fmt(mean('pica_capture_draws'), 0)} draws, copy {fmt(mean('capture_copy_kb'), 0)} KiB,"
+          f" hash {fmt(mean('capture_hash_kb'), 0)} KiB, reused index ranges"
           f" {fmt(mean('index_range_reuses'), 0)})")
-    print(f"    pica_submit sem o guest {fmt(mean('pica_submit_host_ms'))} ms/quadro;"
-          f" linha do perf.txt na thread do jogo {fmt(mean('perf_line_ms'), 3)} ms/janela"
-          + (f"; escritor {fmt(mean('perf_writer_ms'), 2)} ms/janela,"
-             f" descartadas {int(num(marked[-1], 'perf_dropped'))}" if "perf_writer_ms" in marked[-1] else ""))
+    if any("geometry_evictions" in m for m in marked):
+        print(f"    geometry snapshots made {fmt(mean('geometry_misses'), 1)}/frame,"
+              f" cache evictions {fmt(mean('geometry_evictions'), 1)}/frame")
+    print(f"    pica_submit without the guest {fmt(mean('pica_submit_host_ms'))} ms/frame;"
+          f" perf.txt line on the game thread {fmt(mean('perf_line_ms'), 3)} ms/window"
+          + (f"; writer {fmt(mean('perf_writer_ms'), 2)} ms/window,"
+             f" dropped {int(num(marked[-1], 'perf_dropped'))}" if "perf_writer_ms" in marked[-1] else ""))
     if any("status_async" in m for m in marked):
-        # Heartbeat do boot-status.txt (config/async_status_writes; SWITCH_PORT.md
-        # "Heartbeat do boot-status.txt fora da thread do jogo").
-        print(f"    heartbeat do boot-status (status_async={int(num(marked[-1], 'status_async'))}):"
-              f" thread do jogo {fmt(mean('status_game_ms'), 3)} ms/janela,"
-              f" escritor {fmt(mean('status_writer_ms'), 2)} ms/janela,"
-              f" substituídos {int(num(marked[-1], 'status_superseded'))}"
-              + (f"; escritor do hitches.txt {fmt(mean('hitch_writer_ms'), 2)} ms/janela"
+        # boot-status.txt heartbeat (config/async_status_writes; SWITCH_PORT.md
+        # "boot-status.txt heartbeat off the game thread").
+        print(f"    boot-status heartbeat (status_async={int(num(marked[-1], 'status_async'))}):"
+              f" game thread {fmt(mean('status_game_ms'), 3)} ms/window,"
+              f" writer {fmt(mean('status_writer_ms'), 2)} ms/window,"
+              f" superseded {int(num(marked[-1], 'status_superseded'))}"
+              + (f"; hitches.txt writer {fmt(mean('hitch_writer_ms'), 2)} ms/window"
                  if "hitch_writer_ms" in marked[-1] else ""))
-    # pica_plan está dentro de pica_submit; frame_start contém input e
+    # pica_plan is inside pica_submit; frame_start contains input and
     # host_frame_start.
     host = sum(mean(key) for key in ("pica_submit_host_ms", "visual_present",
                                      "dsp_mix", "frame_start")
                if not math.isnan(mean(key)))
-    print(f"    thread do jogo fora do guest (pica_submit sem guest + visual_present"
-          f" + dsp_mix + frame_start): {fmt(host)} ms/quadro")
+    print(f"    game thread outside the guest (pica_submit without guest + visual_present"
+          f" + dsp_mix + frame_start): {fmt(host)} ms/frame")
+    if any("kernel_reacquire" in m for m in marked):
+        # "untimed:" block: game-thread work outside every phase above.
+        parts = ("frame_head", "refresh_prep", "ui_submit", "kernel_reacquire", "input_poll")
+        print("    outside the phases: " + ", ".join(f"{key} {fmt(mean(key), 3)}" for key in parts)
+              + " ms/frame")
+    if any("ui_build" in m for m in marked):
+        # Their split (SWITCH_PORT.md "ui_submit and frame_head split").
+        head = ("head_policy", "head_area", "head_cadence", "head_ui")
+        ui = ("ui_ahead", "ui_build", "ui_prepare", "ui_queue", "ui_lock_wait")
+        print("    frame_head: " + ", ".join(f"{key[5:]} {fmt(mean(key), 3)}" for key in head)
+              + "; ui_submit: " + ", ".join(f"{key[3:]} {fmt(mean(key), 3)}" for key in ui)
+              + f" ms/frame (ui_lock={int(num(marked[-1], 'ui_lock'))},"
+              f" {fmt(mean('ui_lock_takes'), 0)} takes, {fmt(mean('ui_lock_waits'), 1)} waited;"
+              f" frame start {fmt(mean('start_lock_takes'), 0)} takes,"
+              f" {fmt(mean('start_lock_waits'), 1)} waited, {fmt(mean('start_lock_wait'), 3)} ms;"
+              f" render wakes {fmt(mean('render_wakes'), 1)})")
+    if any("cap_regs_us" in m for m in marked):
+        # "capture:" block: sub-stages of pica_capture_ms per draw
+        # (config/capture_delta; SWITCH_PORT.md "Capture delta").
+        stages = ("regs", "uniforms", "packet", "decode", "vertex", "texture", "enqueue")
+        print(f"    capture per draw (capture_delta={int(num(marked[-1], 'capture_delta'))}): "
+              + ", ".join(f"{key} {fmt(mean('cap_' + key + '_us'), 2)}" for key in stages)
+              + f" us (hashing {fmt(mean('cap_hash_us'), 2)} us inside); state"
+              f" {fmt(mean('cap_state_kb'), 0)} KiB/frame, replayed elsewhere"
+              f" {fmt(mean('cap_materialize_us'), 2)} us/draw; placeholder plan {fmt(mean('cap_plan_us'), 2)} us/draw")
+        print(f"    command lists {fmt(mean('list_ms'))} ms/frame ({fmt(mean('lists'), 0)} lists,"
+              f" {fmt(mean('list_kwords'), 1)} K words); lighting LUT {fmt(mean('lut_ms'), 3)} ms/frame"
+              f" ({fmt(mean('lut_hashes'), 1)} hashes, {fmt(mean('lut_reuses'), 1)} reused,"
+              f" {fmt(mean('lut_copies'), 1)} copies); table copies {fmt(mean('table_copies'), 1)},"
+              f" same-value writes skipped {fmt(mean('same_value_writes'), 0)} per frame")
+        if any("list_walk_ms" in m for m in marked):
+            # config/list_walk_fast (SWITCH_PORT.md "Command-list walk"): the
+            # walk outside the sink's captures.
+            print(f"    list walk (list_walk_fast={int(num(marked[-1], 'list_walk_fast'))}):"
+                  f" {fmt(mean('list_walk_ms'), 3)} ms/frame outside the captures,"
+                  f" {fmt(mean('list_walk_ns_word'), 1)} ns/word,"
+                  f" {fmt(mean('list_batched_kwords'), 1)} K words batched")
+    if any("vs_resources" in m for m in marked):
+        # "vsnap:" block: the index/vertex snapshot steps inside cap_vertex_us
+        # (config/vertex_snapshot_fast; SWITCH_PORT.md "Vertex snapshot hit path").
+        print(f"    vertex snapshots (vertex_snapshot_fast={int(num(marked[-1], 'vertex_snapshot_fast'))}):"
+              f" {fmt(mean('vs_resources'), 0)} resources/frame, {fmt(mean('vs_version_hits'), 0)} proven"
+              f" unchanged, {fmt(mean('vs_version_misses'), 0)} not ({fmt(mean('vs_uncertified'), 0)} without"
+              f" certificate); unproven {fmt(mean('vs_unproven_kb'), 0)} KiB, compared"
+              f" {fmt(mean('vs_compared_kb'), 0)} KiB/frame; pages {fmt(mean('vs_pages'), 0)}, changed"
+              f" {fmt(mean('vs_dirty_pages'), 1)}, fallbacks {fmt(mean('vs_fallbacks'), 1)}")
+        print("    vertex stage per draw: " + ", ".join(
+            f"{key} {fmt(mean('vs_' + key + '_us'), 2)}" for key in ("view", "compare", "copy", "rest")) + " us")
+    if any("tx_resources" in m for m in marked):
+        # "tsnap:" block: the texture snapshot steps inside cap_texture_us
+        # (config/texture_snapshot_fast; SWITCH_PORT.md "Texture snapshot and packet stages").
+        print(f"    texture snapshots (texture_snapshot_fast={int(num(marked[-1], 'texture_snapshot_fast'))}):"
+              f" {fmt(mean('tx_resources'), 0)} textures/frame (+{fmt(mean('tx_copy_referenced'), 1)} with GPU"
+              f" copies), {fmt(mean('tx_version_hits'), 0)} proven unchanged,"
+              f" {fmt(mean('tx_version_misses'), 0)} not ({fmt(mean('tx_uncertified'), 0)} without certificate,"
+              f" {fmt(mean('tx_misses'), 1)} new); unproven {fmt(mean('tx_unproven_kb'), 0)} KiB, compared"
+              f" {fmt(mean('tx_compared_kb'), 0)} KiB/frame; pages {fmt(mean('tx_pages'), 0)}, changed"
+              f" {fmt(mean('tx_dirty_pages'), 1)}, fallbacks {fmt(mean('tx_fallbacks'), 1)}")
+        print("    texture stage per draw: " + ", ".join(
+            f"{key} {fmt(mean('tx_' + key + '_us'), 2)}" for key in ("view", "compare", "copy", "rest")) + " us")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:
-    # Bloco "cadence:" (config/fps60_mode): regularidade da apresentação.
+    # "cadence:" block (config/fps60_mode): presentation regularity.
     cadence = [w for w in windows if "present_1" in w.main]
     if not cadence:
         return
@@ -391,28 +454,28 @@ def summarize_cadence(windows: list[Window], seconds: float) -> None:
     holds = [total(f"hold_{b}") for b in CADENCE_BUCKETS]
     pictures = sum(holds)
     modes = sorted({str(w.main.get("fps60_mode")) for w in cadence})
-    print(f"  cadência ({'/'.join(modes)}, {len(cadence)} janelas):")
-    print("    intervalos entre apresentações (refreshes 1/2/3/4+): " +
+    print(f"  cadence ({'/'.join(modes)}, {len(cadence)} windows):")
+    print("    intervals between presentations (refreshes 1/2/3/4+): " +
           "/".join(str(int(v)) for v in presents))
     if pictures:
-        print("    cada quadro novo ficou na tela (1/2/3/4+ refreshes): " +
+        print("    each new frame stayed on screen (1/2/3/4+ refreshes): " +
               "/".join(f"{100 * v / pictures:.1f}%" for v in holds))
-    print(f"    trocas de cadência {fmt(total('cadence_switches') / max(seconds, 1e-9))}/s, "
-          f"passos atrasados {int(total('late_steps'))}, repetições {int(total('repeats'))}, "
-          f"quadros do jogo nunca mostrados {int(total('superseded_frames'))}")
-    print(f"    travado em 30: {fmt(100 * total('lock30_ms') / 1000 / max(seconds, 1e-9), 1)}% do tempo, "
-          f"{int(total('lock_changes'))} trocas de trava; par do jogo (thread do jogo) "
-          f"média {fmt(sum(num(w.main, 'game_pair_ms') for w in cadence) / len(cadence), 1)} ms, "
-          f"p90 máx {fmt(max(num(w.main, 'game_pair_p90_ms') for w in cadence), 1)} ms")
+    print(f"    cadence switches {fmt(total('cadence_switches') / max(seconds, 1e-9))}/s, "
+          f"late steps {int(total('late_steps'))}, repeats {int(total('repeats'))}, "
+          f"game frames never shown {int(total('superseded_frames'))}")
+    print(f"    locked at 30: {fmt(100 * total('lock30_ms') / 1000 / max(seconds, 1e-9), 1)}% of the time, "
+          f"{int(total('lock_changes'))} lock switches; game pair (game thread) "
+          f"average {fmt(sum(num(w.main, 'game_pair_ms') for w in cadence) / len(cadence), 1)} ms, "
+          f"p90 max {fmt(max(num(w.main, 'game_pair_p90_ms') for w in cadence), 1)} ms")
 
 
 def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
     first = windows[0].glperf or {}
-    print(f"  glperf: {len(windows)} janelas; GPU 1 a cada {int(num(first, 'sample_every'))} quadros, "
+    print(f"  glperf: {len(windows)} windows; GPU 1 every {int(num(first, 'sample_every'))} frames, "
           f"timer={int(num(first, 'gpu_timer'))} ({int(num(first, 'timer_bits'))} bits), "
-          f"ganchos GL={int(num(first, 'gl_hooks'))}; descartadas "
-          f"{int(sum(num(w.glperf, 'gpu_dropped') for w in windows))}, estouro de queries "
-          f"{int(sum(num(w.glperf, 'gpu_overflows') for w in windows))}, quadros desbalanceados "
+          f"GL hooks={int(num(first, 'gl_hooks'))}; dropped "
+          f"{int(sum(num(w.glperf, 'gpu_dropped') for w in windows))}, query overflows "
+          f"{int(sum(num(w.glperf, 'gpu_overflows') for w in windows))}, unbalanced frames "
           f"{int(sum(num(w.glperf, 'unbalanced') for w in windows))}")
     total_frames = sum(num(w.glperf, f"{kind}_frames") for w in windows for kind in KINDS)
     for kind in KINDS:
@@ -434,10 +497,10 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
         gpu_max = max((num(w.glperf, f"{kind}_gpu_max_ms", -1.0) for w in windows), default=-1.0)
         gpu_max = gpu_max if gpu_max >= 0 else math.nan
         cpu_frame = by_frames(f"{kind}_cpu_ms")
-        print(f"  [{kind}] {KIND_HELP[kind]}: {int(frames)} quadros "
-              f"({100.0 * frames / total_frames:.0f}%), {int(samples)} amostras de GPU")
-        print(f"    GPU por quadro: {fmt(gpu_total)} ms (pior amostra {fmt(gpu_max)} ms; "
-              f"orçamento {fmt(1000.0 / refresh, 1)} ms a {int(refresh)} Hz);"
+        print(f"  [{kind}] {KIND_HELP[kind]}: {int(frames)} frames "
+              f"({100.0 * frames / total_frames:.0f}%), {int(samples)} GPU samples")
+        print(f"    GPU per frame: {fmt(gpu_total)} ms (worst sample {fmt(gpu_max)} ms; "
+              f"budget {fmt(1000.0 / refresh, 1)} ms at {int(refresh)} Hz);"
               f" render thread StartFrame→swap: {fmt(cpu_frame)} ms")
         gpu = [(stage, by_samples(f"{kind}_gpu_{stage}")) for stage in GPU_STAGES]
         gpu = [(stage, value) for stage, value in gpu if not math.isnan(value) and value > 0]
@@ -446,7 +509,7 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
         cpu_map = dict(cpu)
         if gpu:
             peak = max(value for _, value in gpu)
-            print(f"    top etapas de GPU (ms/quadro amostrado) | CPU da render thread (ms/quadro):")
+            print(f"    top GPU stages (ms/sampled frame) | render thread CPU (ms/frame):")
             for stage, value in sorted(gpu, key=lambda item: -item[1])[:top]:
                 share = 100.0 * value / gpu_total if gpu_total and not math.isnan(gpu_total) else 0
                 print(f"      {stage:<12}{fmt(value):>7} ({share:4.0f}%) {bar(value, peak, 20):<20}"
@@ -456,7 +519,7 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
                     if stage not in dict(gpu) or stage in ("other", "pacing", "idle")]
             rest = [(stage, value) for stage, value in rest if stage in ("other", "pacing", "idle")]
             if rest:
-                print("    CPU fora das etapas de GPU: " +
+                print("    CPU outside the GPU stages: " +
                       "  ".join(f"{stage} {fmt(value)} ms" for stage, value in rest))
         counters = []
         for name in COUNTERS:
@@ -468,10 +531,10 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
                           default=math.nan)
             text = f"{name}={fmt(value, 1)}"
             if not math.isnan(maximum):
-                text += f"(máx {fmt(maximum, 0)})"
+                text += f"(max {fmt(maximum, 0)})"
             counters.append(text)
         if counters:
-            print("    contadores por quadro:")
+            print("    counters per frame:")
             line = "     "
             for text in counters:
                 if len(line) + len(text) + 1 > 78:
@@ -481,27 +544,27 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
             print(line)
         warnings = []
         if by_frames(f"{kind}_n_get_error") > 0:
-            warnings.append("glGetError no caminho quente")
+            warnings.append("glGetError on the hot path")
         if by_frames(f"{kind}_n_finish") > 0:
-            warnings.append("glFinish por quadro")
+            warnings.append("glFinish per frame")
         if by_frames(f"{kind}_n_readbacks") > 0:
-            warnings.append("glReadPixels por quadro")
+            warnings.append("glReadPixels per frame")
         if by_frames(f"{kind}_n_buf_reallocs") > 1:
-            warnings.append("glBufferData (realocação) por quadro")
+            warnings.append("glBufferData (reallocation) per frame")
         if warnings:
-            print("    atenção: " + "; ".join(warnings))
+            print("    warning: " + "; ".join(warnings))
 
 
-HITCHES = ["hitch_shader", "hitch_texturas", "hitch_logica", "hitch_render"]
+HITCHES = ["hitch_shader", "hitch_textures", "hitch_logic", "hitch_render"]
 
 
 def summarize_verdict(windows: list[Window], gl_windows: list[Window], overall: float) -> None:
-    """O que segura os 60 FPS: cada recurso contra o orçamento do quadro.
+    """What holds back 60 FPS: each resource against the frame budget.
 
-    A 60 Hz cada quadro na tela tem 16,7 ms de GPU e de render thread; a
-    lógica roda a 30 passos por segundo, então o par de passos do jogo
-    (game_pair_ms, dois passos guest) tem 33,3 ms. Os contadores hitch_* são
-    acumulados na sessão: a diferença entre a primeira e a última janela.
+    At 60 Hz each frame on screen has 16.7 ms of GPU and render thread; the
+    logic runs at 30 steps per second, so the game's step pair
+    (game_pair_ms, two guest steps) has 33.3 ms. The hitch_* counters are
+    accumulated over the session: the difference between the first and last window.
     """
     budget = 1000.0 / 60.0
     rows = []
@@ -516,7 +579,7 @@ def summarize_verdict(windows: list[Window], gl_windows: list[Window], overall: 
         return sum(num(w.glperf, key) * num(w.glperf, weight) for w in gl_windows) / total
 
     if gl_windows:
-        # O quadro mais comum a 60 FPS é o interpolado; o de passo pesa junto.
+        # The most common frame at 60 FPS is the interpolated one; the step one counts too.
         for kind in ("interp", "step"):
             if frames_of(kind) == 0:
                 continue
@@ -525,25 +588,25 @@ def summarize_verdict(windows: list[Window], gl_windows: list[Window], overall: 
             if not math.isnan(gpu):
                 rows.append((f"GPU ({kind})", gpu, budget))
             if not math.isnan(cpu):
-                # StartFrame→swap menos a espera (ociosa e pacer): o trabalho.
+                # StartFrame→swap minus the wait (idle and pacer): the work.
                 waits = (weighted(f"{kind}_cpu_idle", f"{kind}_frames") +
                          weighted(f"{kind}_cpu_pacing", f"{kind}_frames"))
-                rows.append((f"render thread ocupada ({kind})", cpu - waits, budget))
+                rows.append((f"render thread busy ({kind})", cpu - waits, budget))
     pairs = [num(w.main, "game_pair_ms", math.nan) for w in windows if "game_pair_ms" in w.main]
     p90 = [num(w.main, "game_pair_p90_ms", math.nan) for w in windows if "game_pair_p90_ms" in w.main]
     if pairs:
-        rows.append(("lógica (par de passos, média)", sum(pairs) / len(pairs), 2.0 * budget))
+        rows.append(("logic (step pair, average)", sum(pairs) / len(pairs), 2.0 * budget))
     if p90:
-        rows.append(("lógica (par de passos, p90)", sum(p90) / len(p90), 2.0 * budget))
+        rows.append(("logic (step pair, p90)", sum(p90) / len(p90), 2.0 * budget))
 
-    print(f"  veredito 60 FPS (fps global {fmt(overall, 1)}; orçamento {fmt(budget, 1)} ms por quadro):")
+    print(f"  60 FPS verdict (overall fps {fmt(overall, 1)}; budget {fmt(budget, 1)} ms per frame):")
     if not gl_windows:
-        print("    sem glperf: GPU e render thread não medidos (crie config/gpu_timing no SD)")
+        print("    no glperf: GPU and render thread not measured (create config/gpu_timing on the SD)")
     over = []
     for name, value, limit in rows:
         share = 100.0 * value / limit
-        mark = "  <-- ESTOURA" if share > 100.0 else ("  (no limite)" if share > 90.0 else "")
-        print(f"    {name:<34}{fmt(value):>7} ms de {fmt(limit, 1):>5} ({share:4.0f}%){mark}")
+        mark = "  <-- OVER" if share > 100.0 else ("  (at the limit)" if share > 90.0 else "")
+        print(f"    {name:<34}{fmt(value):>7} ms of {fmt(limit, 1):>5} ({share:4.0f}%){mark}")
         if share > 100.0:
             over.append(name)
     hitches = []
@@ -552,30 +615,30 @@ def summarize_verdict(windows: list[Window], gl_windows: list[Window], overall: 
         if series and series[-1] > series[0]:
             hitches.append(f"{key[6:]} {int(series[-1] - series[0])}")
     if hitches:
-        print("    travadas na sessão: " + "  ".join(hitches))
+        print("    hitches in the session: " + "  ".join(hitches))
     if over:
-        print("    gargalo: " + ", ".join(over))
+        print("    bottleneck: " + ", ".join(over))
     elif rows and overall < 57.0:
-        print("    nada estoura na média: a queda vem de picos (travadas ou janelas lentas)")
+        print("    nothing exceeds on average: the drop comes from spikes (hitches or slow windows)")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("perf", help="caminho do perf.txt")
+    parser.add_argument("perf", help="path to perf.txt")
     parser.add_argument("--session", type=int, action="append",
-                        help="número da sessão (1 = primeira, -1 = última); repetível")
+                        help="session number (1 = first, -1 = last); repeatable")
     parser.add_argument("--skip", type=int, default=2,
-                        help="janelas do início de cada sessão a ignorar (carregamento); padrão 2")
+                        help="windows at the start of each session to ignore (loading); default 2")
     parser.add_argument("--min-windows", type=int, default=4,
-                        help="omite sessões com menos janelas que isto (padrão 4)")
-    parser.add_argument("--windows", action="store_true", help="lista cada janela")
-    parser.add_argument("--top", type=int, default=8, help="quantas etapas de GPU listar")
+                        help="omits sessions with fewer windows than this (default 4)")
+    parser.add_argument("--windows", action="store_true", help="lists each window")
+    parser.add_argument("--top", type=int, default=8, help="how many GPU stages to list")
     args = parser.parse_args()
 
     sessions = read_sessions(args.perf)
     if not sessions:
-        print("nenhuma linha host_frames= encontrada", file=sys.stderr)
+        print("no host_frames= line found", file=sys.stderr)
         return 1
     chosen = sessions
     if args.session:
@@ -583,12 +646,12 @@ def main() -> int:
         for number in args.session:
             index = number - 1 if number > 0 else len(sessions) + number
             if not 0 <= index < len(sessions):
-                print(f"sessão {number} não existe (há {len(sessions)})", file=sys.stderr)
+                print(f"session {number} does not exist (there are {len(sessions)})", file=sys.stderr)
                 return 1
             chosen.append(sessions[index])
     shown = [s for s in chosen if len(s.windows) >= args.min_windows]
-    print(f"{args.perf}: {len(sessions)} sessões, {sum(len(s.windows) for s in sessions)} janelas"
-          + (f"; {len(chosen) - len(shown)} sessões curtas omitidas (--min-windows)"
+    print(f"{args.perf}: {len(sessions)} sessions, {sum(len(s.windows) for s in sessions)} windows"
+          + (f"; {len(chosen) - len(shown)} short sessions omitted (--min-windows)"
              if len(shown) != len(chosen) else ""))
     chosen = shown
     for session in chosen:

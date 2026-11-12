@@ -30,15 +30,8 @@ class NativeA32UnobservedMemory final {
         : mMemory(memory), mCounters(counters), mEnabled(Eligible(memory)) {}
     NativeA32UnobservedMemory(const NativeA32UnobservedMemory&) = delete;
     NativeA32UnobservedMemory& operator=(const NativeA32UnobservedMemory&) = delete;
-    ~NativeA32UnobservedMemory() noexcept { Commit(); }
-
     static bool Eligible(const NativeA32Memory& memory) noexcept {
         return memory.AllowsUnobservedAccess();
-    }
-
-    void Commit() noexcept {
-        mMemory.mRangeGeneration += mWrites;
-        mWrites = 0;
     }
 
     template <typename T>
@@ -51,7 +44,6 @@ class NativeA32UnobservedMemory final {
                 return true;
             }
         }
-        Commit();
         if (mCounters) ++mCounters->CheckedAccesses;
         return mMemory.ReadFast<T>(address, value, fault);
     }
@@ -62,20 +54,16 @@ class NativeA32UnobservedMemory final {
         if (mEnabled) {
             if (auto* bytes = Resolve(address, sizeof(T), true)) {
                 std::memcpy(bytes, &value, sizeof(T));
-                ++mWrites;
-                mMemory.MarkRangeWritten(address, sizeof(T),
-                    mMemory.CurrentRangeGeneration() + mWrites);
+                mMemory.NoteWrite(address, sizeof(T));
                 return true;
             }
         }
-        Commit();
         if (mCounters) ++mCounters->CheckedAccesses;
         return mMemory.WriteFast<T>(address, value, fault);
     }
 
-    // LDM/STM spans inside a region: publish the locally accumulated store
-    // count first so generations keep their per-store order, then use the
-    // ordinary span path (or let the caller fall back word by word).
+    // LDM/STM spans inside a region: the ordinary span path (or the caller
+    // falls back word by word).
     OOT3D_REGION_INLINE bool ReadWordsFast(uint32_t address, uint32_t* values,
                                            uint32_t count) noexcept {
         return mMemory.ReadWordsFast(address, values, count);
@@ -83,7 +71,6 @@ class NativeA32UnobservedMemory final {
 
     OOT3D_REGION_INLINE bool WriteWordsFast(uint32_t address, const uint32_t* values,
                                             uint32_t count) noexcept {
-        Commit();
         return mMemory.WriteWordsFast(address, values, count);
     }
 
@@ -135,9 +122,7 @@ class NativeA32UnobservedMemory final {
         carried = lastCarry;
         scratch = lastScratch;
         context.BlocksRemaining -= iterations;
-        mWrites += uint64_t{iterations} * 2U;
-        mMemory.MarkRangeWritten(static_cast<uint32_t>(writeBegin), size_t(length),
-            mMemory.CurrentRangeGeneration() + mWrites);
+        mMemory.NoteWrite(static_cast<uint32_t>(writeBegin), size_t(length));
         if (mCounters) {
             ++mCounters->CopyChunks;
             mCounters->CopyIterations += iterations;
@@ -186,7 +171,6 @@ class NativeA32UnobservedMemory final {
     NativeA32RegionCounters* mCounters;
     const bool mEnabled;
     View mReadView{}, mWriteView{};
-    uint64_t mWrites = 0;
 };
 
 } // namespace Oot3dNativeGame

@@ -1,5 +1,9 @@
 // Block-entry policy of the A32 window: widescreen projection and guest observation hooks.
 #include "oot3d_native_a32_window_shared.h"
+#include "oot3d_damage_multiplier.h"
+#include "oot3d_landing_roll.h"
+#include "oot3d_master_quest_mirror.h"
+#include "oot3d_quick_put_away.h"
 
 namespace Oot3dA32Window {
 
@@ -7,6 +11,12 @@ void ApplyNativeWidescreenProjectionPolicy(
     uint32_t pc, oot3d::recomp::a32::GuestState &state,
     oot3d::recomp::a32::MemoryBus &memory, void *user) {
   auto &runtime = *static_cast<NativeWidescreenProjectionState *>(user);
+  // First, so the timed intervals carry as little of this policy as possible.
+  if (runtime.ActorProfile != nullptr) [[unlikely]] {
+    const uint64_t begin = Oot3dNativeGame::NativeProfileTicks();
+    if (runtime.ActorProfile->Observe(pc, state.r[1], state.r[4], state.r[14], memory, begin))
+      runtime.ActorProfile->AddHookOverhead(Oot3dNativeGame::NativeProfileTicks() - begin);
+  }
   (void)Oot3dNativeGame::ApplyNativeActorVisibilityHook(
       pc, state, memory, runtime.ActorVisibility);
   if (pc == Oot3dNativeGame::kNativeQbfA4Blit && runtime.HdFonts && runtime.TraceMemory)
@@ -420,7 +430,14 @@ void ApplyNativeWidescreenProjectionPolicy(
       runtime.FrameRatePolicy != nullptr) {
     runtime.FrameRatePolicy->BeginFramePacing(state.r[0]);
   }
-  if (pc == Oot3dNativeGame::kOot3dPlayerUpdateEntry) {
+  // Player_Update is also the Roll dash entry. While A is held, the dash
+  // calls FUN_0037577c from this entry and the call returns to it: that
+  // second entry carries the query's registers (r0 its answer, r1
+  // player+0x1000), not the title's (player, PlayState). Only the title's
+  // call is observed; the probes would otherwise lose the scene view, its
+  // environment and camera for as long as A is held (upstream a3eeb1e2, #91).
+  if (pc == Oot3dNativeGame::kOot3dPlayerUpdateEntry &&
+      (runtime.RollDash == nullptr || !runtime.RollDash->DashQueryPending())) {
     if (runtime.PlayerTimingProbe != nullptr) {
       runtime.PlayerTimingProbe->ObserveUpdateEntry(state);
     }
@@ -518,6 +535,84 @@ void ApplyNativeWidescreenProjectionPolicy(
         runtime.BlockSampleState * 1664525U + 1013904223U;
     if ((runtime.BlockSampleState & 63U) == 0U) {
       ++runtime.BlockSamples[pc];
+    }
+  }
+  // Landing roll (N64), oot3d_landing_roll.h: a run-jump landing N64 would
+  // have rolled leaves the compiled graph and resumes at the game's own roll
+  // setup in the same function and frame (registers as at this block entry).
+  if (pc == Oot3dNativeGame::kLandingRollHookPc && wholeAotExecutionActive &&
+      Oot3dNativeGame::LandingRollEnabled().load(std::memory_order_relaxed)) {
+    Oot3dNativeGame::LandingRollInputs landing;
+    if (Oot3dNativeGame::ReadLandingRollInputs(memory, state.r[4], &landing) &&
+        Oot3dNativeGame::DecideLandingRoll(landing) ==
+            Oot3dNativeGame::LandingRollChoice::Roll) {
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+      Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(
+          Oot3dNativeGame::kLandingRollSetupPc, state);
+#else
+      Oot3dNativeGame::Oot3dWholeAotExitAt(Oot3dNativeGame::kLandingRollSetupPc, state);
+#endif
+    }
+  }
+  // Roll dash (oot3d_roll_dash_runtime.h): a hook that issues a native call
+  // or redirects its block leaves the compiled graph at the target with the
+  // registers it set (a call returns to the hook pc, which finishes the
+  // step); otherwise the block runs natively with `state`. Off, it does
+  // nothing (ShouldObserve).
+  if (runtime.RollDash != nullptr && wholeAotExecutionActive &&
+      runtime.RollDash->ShouldObserve(pc)) {
+    oot3d::recomp::a32::ExecutionResult exit{};
+    if (runtime.RollDash->Execute(pc, state, &exit, nullptr)) {
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+      Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(exit.pc, state);
+#else
+      Oot3dNativeGame::Oot3dWholeAotExitAt(exit.pc, state);
+#endif
+    }
+  }
+  // Damage multiplier (oot3d_damage_multiplier.h): Health_ChangeBy's change,
+  // before the game's Master Quest doubling and double defence.
+  if (pc == Oot3dNativeGame::kDamageMultiplierHookPc) {
+    const auto multiplier = Oot3dNativeGame::DamageMultiplier().load(std::memory_order_relaxed);
+    if (multiplier != Oot3dNativeGame::kDamageMultiplierNormal)
+      state.r[1] = static_cast<uint32_t>(Oot3dNativeGame::ScaleHealthChange(
+          static_cast<int32_t>(state.r[1]), multiplier));
+  }
+  // Quick put away (oot3d_quick_put_away.h): the block is `mov r0,#30; b`
+  // to the store, which gets one frame instead.
+  if (pc == Oot3dNativeGame::kQuickPutAwayHookPc && wholeAotExecutionActive &&
+      Oot3dNativeGame::QuickPutAwayEnabled().load(std::memory_order_relaxed)) {
+    state.r[0] = Oot3dNativeGame::kQuickPutAwayFrames;
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+    Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(Oot3dNativeGame::kQuickPutAwayStorePc, state);
+#else
+    Oot3dNativeGame::Oot3dWholeAotExitAt(Oot3dNativeGame::kQuickPutAwayStorePc, state);
+#endif
+  }
+  // Unmirrored Master Quest (oot3d_master_quest_mirror.h): the setting
+  // applies where the game reads the flag for its save copy; then the mirror
+  // reads see 0.
+  if (pc == Oot3dNativeGame::kMasterQuestMirrorApplyPc) {
+    Oot3dNativeGame::ApplyMasterQuestUnmirrored();
+  } else if (Oot3dNativeGame::MasterQuestUnmirrorApplied().load(std::memory_order_relaxed)) {
+    if (const auto *read = Oot3dNativeGame::FindMasterQuestMirrorRead(pc))
+      state.r[read->Register] = 0U;
+  }
+  // Simple shadow (oot3d_simple_shadow.h): the foot shadows at alpha 0, whose
+  // return re-enters the hook, which leaves the graph at Actor_Draw. Only
+  // while the renderer draws the body (deko3d, its program loaded).
+  if (pc == Oot3dNativeGame::kSimpleShadowHookPc && runtime.SimpleShadow != nullptr &&
+      (wholeAotExecutionActive || runtime.SimpleShadow->Pending())) {
+    const bool simpleShadow = Oot3dNativeGame::SimpleShadowEnabled().load(std::memory_order_relaxed) &&
+                              Fast::Oot3d::PlayerShadowBridge::Instance().RendererReady();
+    if (const auto exitPc = runtime.SimpleShadow->Execute(
+            state, memory, simpleShadow, wholeAotExecutionActive,
+            Oot3dNativeGame::SimpleShadowCutscenes().load(std::memory_order_relaxed))) {
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+      Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(*exitPc, state);
+#else
+      Oot3dNativeGame::Oot3dWholeAotExitAt(*exitPc, state);
+#endif
     }
   }
   if (runtime.CollectExtendedDiagnostics &&

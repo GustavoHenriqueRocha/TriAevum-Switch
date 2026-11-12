@@ -1,16 +1,16 @@
-"""Lista as funções guest quentes a partir de perfis do jogo.
+"""Lists the hot guest functions from game profiles.
 
-Saída: uma entrada hex por linha (com o nome e o % como comentário), no
-formato que generate_whole_aot_cpp.py --hot-functions lê. As funções listadas
-nunca recebem o atributo de função gigante fria, de modo que o caminho quente continua com
-todas as otimizações de -O3.
+Output: one hex entry per line (with the name and % as a comment), in the
+format that generate_whole_aot_cpp.py --hot-functions reads. The listed functions
+never get the cold giant-function attribute, so the hot path keeps
+all -O3 optimizations.
 
-Entradas aceitas (repetíveis, misturáveis):
-  --profile guest_profile.txt   linhas "0xPC  N.NN%  ..." (triaevum guest_profile v1)
-  --entries arquivo             entradas hex já conhecidas (uma por linha)
+Accepted inputs (repeatable, mixable):
+  --profile guest_profile.txt   lines "0xPC  N.NN%  ..." (triaevum guest_profile v1)
+  --entries file                already-known hex entries (one per line)
 
-Um perfil cobre só as cenas jogadas; por isso o padrão é conservador: toda
-função que aparece em qualquer perfil (--min-percent 0) conta como quente.
+A profile only covers the scenes played; so the default is conservative: every
+function that appears in any profile (--min-percent 0) counts as hot.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ PROFILE_LINE = re.compile(r"^0x([0-9A-Fa-f]+)\s+([\d.]+)%")
 
 
 def block_owners(program: dict[str, object]) -> tuple[list[int], list[tuple[int, int, int]]]:
-    """Intervalos [pc, end_pc) de cada bloco -> entrada da função dona."""
+    """[pc, end_pc) ranges of each block -> entry of the owning function."""
     blocks = {int(block["id"]): block for block in program["blocks"]}
     ranges: list[tuple[int, int, int]] = []
     for function in program["functions"]:
@@ -39,8 +39,8 @@ def block_owners(program: dict[str, object]) -> tuple[list[int], list[tuple[int,
 
 
 def owner_of(pc: int, starts: list[int], ranges: list[tuple[int, int, int]]) -> int | None:
-    # Blocos compartilhados aparecem uma vez por função; a busca para nos
-    # 64 intervalos que começam antes do PC (blocos são curtos).
+    # Shared blocks appear once per function; the search stops at the
+    # 64 ranges that start before the PC (blocks are short).
     index = bisect.bisect_right(starts, pc) - 1
     for candidate in range(index, max(-1, index - 64), -1):
         start, end, entry = ranges[candidate]
@@ -52,7 +52,7 @@ def owner_of(pc: int, starts: list[int], ranges: list[tuple[int, int, int]]) -> 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--program", type=Path, required=True,
-                        help="aot_program.json (blocos e funções)")
+                        help="aot_program.json (blocks and functions)")
     parser.add_argument("--profile", type=Path, action="append", default=[])
     parser.add_argument("--entries", type=Path, action="append", default=[])
     parser.add_argument("--min-percent", type=float, default=0.0)
@@ -91,7 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         encoding="utf-8",
     )
-    print(f"{len(hot)} função(ões) quente(s); {unknown:.2f}% sem função dona")
+    print(f"{len(hot)} hot function(s); {unknown:.2f}% without an owning function")
     return 0
 
 

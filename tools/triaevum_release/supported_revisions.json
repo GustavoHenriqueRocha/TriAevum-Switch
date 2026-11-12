@@ -25,10 +25,10 @@
         "executable_size": 3973120
       },
       "optional_inputs": {
-        "topscreen_2_1_1_archive": {
-          "url": "https://gamebanana.com/dl/1772020",
-          "bytes": 179430508,
-          "sha256": "e0c143c872ccf4ad72033caab768753b147a4033d260a701204a63ee6bc16df4"
+        "topscreen_archive": {
+          "url": "https://gamebanana.com/dl/1875895",
+          "bytes": 56466735,
+          "sha256": "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0"
         }
       }
     },
@@ -57,10 +57,10 @@
         "executable_size": 3973120
       },
       "optional_inputs": {
-        "topscreen_2_1_1_archive": {
-          "url": "https://gamebanana.com/dl/1772020",
-          "bytes": 179430508,
-          "sha256": "e0c143c872ccf4ad72033caab768753b147a4033d260a701204a63ee6bc16df4"
+        "topscreen_archive": {
+          "url": "https://gamebanana.com/dl/1875895",
+          "bytes": 56466735,
+          "sha256": "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0"
         }
       },
       "catalogue_records": ["no-intro-3ds-0004", "no-intro-3ds-1168"]

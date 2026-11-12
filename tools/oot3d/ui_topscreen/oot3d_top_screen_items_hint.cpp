@@ -17,10 +17,13 @@ constexpr std::uint16_t kMaximumStableFrames =
 constexpr std::uint32_t kPulsePeriod = 90U;
 constexpr float kCursorMovementEpsilon = 0.5F;
 
+// custom_ui01 rects 0x0060A6F8 (SELECT) and 0x0060A708 (?), 512x256: the
+// art the 2.1.1 menu atlas copied to (434,410) and (492,104), drawn from
+// custom_ui01 itself so TopScreen's HD UI atlas replaces it.
 constexpr TopScreenItemsHintQuad kSelectTemplate{
-    true, 0.0F, 0.0F, 0.0F, 0.0F, 434.0F, 410.0F, 64.0F, 16.0F, 0.0F};
+    true, 0.0F, 0.0F, 0.0F, 0.0F, 277.0F, 222.0F, 64.0F, 16.0F, 0.0F};
 constexpr TopScreenItemsHintQuad kQuestionTemplate{
-    true, 0.0F, 0.0F, 0.0F, 0.0F, 492.0F, 104.0F, 16.0F, 16.0F, 0.0F};
+    true, 0.0F, 0.0F, 0.0F, 0.0F, 344.0F, 222.0F, 16.0F, 16.0F, 0.0F};
 
 float AspectHeight(float width, const TopScreenItemsHintQuad &source) noexcept {
   return source.AtlasWidth > 0.0F
@@ -126,9 +129,9 @@ BuildTopScreenItemsHintGeometry(const TopScreenItemsHintRuntimeState &state,
 
 std::size_t AppendTopScreenItemsHintPresentation(
     const TopScreenItemsHintGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &menuAtlas,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output) {
-  if (!geometry.Visible || menuAtlas.semantic_name.empty()) {
+  if (!geometry.Visible || uiAtlas.semantic_name.empty()) {
     return 0U;
   }
   const std::size_t startSize = output.size();
@@ -142,12 +145,12 @@ std::size_t AppendTopScreenItemsHintPresentation(
     primitive.role = oot3d::ui::UiPrimitiveRole::PauseText;
     primitive.owner_address = 0x005D2078U;
     primitive.source_quad = static_cast<std::uint32_t>(index);
-    primitive.texture = menuAtlas;
+    primitive.texture = uiAtlas;
     primitive.destination = {quad.X * kPromotedPauseHorizontalScale, quad.Y,
                              quad.Width * kPromotedPauseHorizontalScale,
                              quad.Height};
-    primitive.uv = {quad.AtlasX / 512.0F, quad.AtlasY / 512.0F,
-                    quad.AtlasWidth / 512.0F, quad.AtlasHeight / 512.0F};
+    primitive.uv = {quad.AtlasX / 512.0F, quad.AtlasY / 256.0F,
+                    quad.AtlasWidth / 512.0F, quad.AtlasHeight / 256.0F};
     primitive.color.alpha = quad.Alpha;
     primitive.layer = 15U;
     output.push_back(std::move(primitive));

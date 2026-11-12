@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -286,6 +287,32 @@ bool BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
     Oot3dPicaVulkanDrawPlan& plan,
     std::string* error = nullptr,
     Oot3dPicaVulkanShaderSourceCache* shaderCache = nullptr);
+
+// How a plan is built (config/plan_*, SWITCH_PORT.md "Plan build cost per
+// draw"). The defaults build exactly what the builder always built.
+struct Oot3dPicaPlanBuildOptions {
+    // CanonicalIdentity (seven FNV hashes over the draw's registers,
+    // uniforms and LUT words, ~60% of a warm build) is read only by the
+    // Vulkan backend, the semantic trace and the scene-frame statistics.
+    // false leaves it empty, as in a plan restored from a visual savestate;
+    // the shader cache still learns exactly what it always learned.
+    bool CanonicalIdentity = true;
+    // Resets the plan in place (one zeroing instead of a zeroed temporary
+    // moved over it), builds both uniform states in place and reuses the
+    // previous draw's converted fog table when its raw words are equal.
+    bool InPlace = false;
+    // Held only around the shader-cache accesses; the rest of the build runs
+    // unlocked, so two threads may build different plans at once. nullptr:
+    // the caller serializes whole builds.
+    std::mutex* CacheMutex = nullptr;
+};
+
+bool BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
+    Oot3dPicaDrawSubmission& submission,
+    Oot3dPicaVulkanDrawPlan& plan,
+    std::string* error,
+    Oot3dPicaVulkanShaderSourceCache* shaderCache,
+    const Oot3dPicaPlanBuildOptions& options);
 
 // A plan restored from a visual savestate keeps its specialized program but
 // not its register packet. Its always-available pair is the parametric

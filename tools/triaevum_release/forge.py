@@ -295,7 +295,7 @@ def verify_sources(
     if topscreen_archive is not None:
         optional = recipe.get("optional_inputs", {})
         contract = (
-            optional.get("topscreen_2_1_1_archive")
+            optional.get("topscreen_archive")
             if isinstance(optional, dict)
             else None
         )
@@ -311,7 +311,7 @@ def verify_sources(
                 f"TopScreen archive SHA-256 mismatch: expected {expected}, got {digest}"
             )
         verified_mod = VerifiedInput(
-            "topscreen_2_1_1_archive", resolved, resolved.stat().st_size, digest
+            "topscreen_archive", resolved, resolved.stat().st_size, digest
         )
     cache.save()
     return verified, verified_mod

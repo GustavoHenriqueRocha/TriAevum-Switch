@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
-"""Gera sequências de acessos à memória guest no formato do C++ gerado.
+"""Generates guest memory access sequences in the generated-C++ format.
 
-Cada função Seq_N imita um bloco do whole-AOT: registradores guest como
-referências para state.R[i] (como o gerador faz), escritas WriteFast<T> de
-todos os tamanhos em endereços sobrepostos e desalinhados, leituras
-ReadFast<T>, LDM/STM com ReadWordsFast/WriteWordsFast e o fallback palavra a
-palavra, exclusivos (LoadExclusive/StoreExclusive), flags, observações da
-geração no meio da sequência e falhas (página só leitura, buraco, borda de
-página), além de rajadas de acessos sobrepostos de tamanhos diferentes. Cada
-Raw_N é uma sequência em linha reta só com StoreGuestValue/LoadGuestValue
-(sem caminho lento entre os acessos). O mesmo texto é compilado contra a
-memória atual e contra a antiga (store_sequence_side.cpp); o objetivo é pegar
-qualquer reordenação ou encaminhamento errado introduzido pelo otimizador
-(TBAA) nos acessos inlinados. Sensibilidade conferida: com um conjunto de
-alias por tamanho (enums soltos em vez da união GuestCell) todas as execuções
-divergem, no host e no devkitA64/qemu.
+Each Seq_N function mimics a whole-AOT block: guest registers as
+references to state.R[i] (as the generator does), WriteFast<T> writes of
+all sizes at overlapping and misaligned addresses, ReadFast<T> reads,
+LDM/STM with ReadWordsFast/WriteWordsFast and the word-by-word fallback,
+exclusives (LoadExclusive/StoreExclusive), flags, generation observations
+mid-sequence and faults (read-only page, hole, page boundary), plus bursts
+of overlapping accesses of different sizes. Each Raw_N is a straight-line
+sequence using only StoreGuestValue/LoadGuestValue (no slow path between
+accesses). The same text is compiled against the current memory and the old
+one (store_sequence_side.cpp); the goal is to catch any wrong reordering or
+forwarding introduced by the optimizer (TBAA) in the inlined accesses.
+Sensitivity verified: with one alias set per size (loose enums instead of
+the GuestCell union) every run diverges, on host and on devkitA64/qemu.
 
-uso: gen_store_sequences.py <saida.inc> [funcoes] [operacoes] [semente]
+usage: gen_store_sequences.py <output.inc> [functions] [operations] [seed]
 """
 import random
 import sys
 
 SIZES = {8: "uint8_t", 16: "uint16_t", 32: "uint32_t", 64: "uint64_t"}
-VALUE_REGS = list(range(0, 8))      # r0..r7: valores
-BASE_REGS = list(range(8, 13))      # r8..r12: bases de endereço (nunca destino de ALU)
+VALUE_REGS = list(range(0, 8))      # r0..r7: values
+BASE_REGS = list(range(8, 13))      # r8..r12: address bases (never an ALU destination)
 
 
 def emit_function(rng, index, ops):
@@ -56,7 +55,7 @@ def emit_function(rng, index, ops):
             out.append(f"        if (!MEM.WriteFast<{t}>(address, {value})) {{ FAULT(0x{pc:X}U, address); }}")
             out.append("    }")
             if kind == "rw":
-                # Leitura logo depois, possivelmente sobreposta à escrita.
+                # Read right after, possibly overlapping the write.
                 size2 = rng.choice([8, 16, 32, 64])
                 t2 = SIZES[size2]
                 d = rng.choice(VALUE_REGS)
@@ -93,7 +92,7 @@ def emit_function(rng, index, ops):
             count = rng.choice([2, 3, 4, 5, 8])
             regs = rng.sample(VALUE_REGS, min(count, 8)) if count <= 8 else VALUE_REGS
             regs = (regs * 2)[:count]
-            # STM/LDM: endereço alinhado como no gerador (pode cruzar página).
+            # STM/LDM: aligned address as in the generator (may cross a page).
             imm = rng.choice([0, 4, 8, 16, 0xFF8, 0xFFC, 0xFF0])
             out.append("    {")
             out.append(f"        const uint32_t firstAddress = {base} + 0x{imm:X}U;")
@@ -139,11 +138,11 @@ def emit_function(rng, index, ops):
             out.append(f"    Oot3dAotSetSubtractFlags(flags, r{a}, r{b}, static_cast<Oot3dAotFlagMask>(0xFU));")
             out.append(f"    if (flags.C()) {{ r{rng.choice(VALUE_REGS)} += 1U; }}")
         elif kind == "hazard":
-            # Acessos sobrepostos de tamanhos diferentes na mesma base, sem
-            # nada entre eles: escrita, escrita parcial por cima e leitura
-            # (ou leitura entre as duas). Um otimizador que separasse os
-            # tamanhos em conjuntos de alias diferentes encaminharia valores
-            # velhos ou trocaria a ordem das escritas aqui.
+            # Overlapping accesses of different sizes on the same base, with
+            # nothing between them: write, partial write on top, and read
+            # (or a read between the two). An optimizer that split the
+            # sizes into different alias sets would forward stale values
+            # or reorder the writes here.
             imm = rng.choice([0, 4, 8, 0x20, 0xFF8, 0xFFC])
             steps = []
             for _ in range(rng.choice([2, 3, 3, 4])):
@@ -172,17 +171,17 @@ def emit_function(rng, index, ops):
         elif kind == "rebase":
             b = rng.choice(BASE_REGS)
             a = rng.choice(VALUE_REGS)
-            # Mantém a base nas páginas de teste: o valor vem da memória guest,
-            # então a escolha do endereço depende de escritas anteriores.
+            # Keep the base within the test pages: the value comes from guest
+            # memory, so the address choice depends on earlier writes.
             out.append(f"    r{b} = kSeqBases[(r{a} >> 3U) % kSeqBaseCount] + (r{a} & 0x1FU);")
     out.append("}")
     return "\n".join(out)
 
 
 def emit_raw_function(rng, index, ops):
-    """Sequência em linha reta só com os auxiliares de acesso (sem caminho
-    lento nem chamadas entre os acessos): é aqui que um conjunto de alias
-    errado apareceria primeiro (valor velho encaminhado, escritas trocadas)."""
+    """Straight-line sequence using only the access helpers (no slow path
+    or calls between accesses): this is where a wrong alias set would show
+    up first (stale value forwarded, writes swapped)."""
     out = [f"RAW_FN(Raw_{index}) {{"]
     for r in range(8):
         out.append(f"    uint32_t& r{r} = state.R[{r}];")
@@ -212,7 +211,7 @@ def main():
     ops = int(sys.argv[3]) if len(sys.argv) > 3 else 60
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 1
     rng = random.Random(seed)
-    parts = ["// Gerado por gen_store_sequences.py; não editar."]
+    parts = ["// Generated by gen_store_sequences.py; do not edit."]
     for index in range(functions):
         parts.append(emit_function(rng, index, ops))
     names = ", ".join(f"Seq_{i}" for i in range(functions))

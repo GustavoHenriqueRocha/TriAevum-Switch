@@ -1,6 +1,6 @@
 #pragma once
 
-// Package 5 of the deko3d backend (docs/DEKO3D_PROGRESSO.md): render targets,
+// Package 5 of the deko3d backend (docs/DEKO3D_PROGRESS.md): render targets,
 // pipeline state, display transfers and the scanout, as plain decisions free
 // of deko3d so the host checks them (oot3d_deko3d_backend_tests). The console
 // side (gfx_deko3d.cpp, gfx_deko3d_pica_targets.cpp) turns them into
@@ -13,6 +13,7 @@
 // DkBlendOp, DkBlendFactor, DkPrimitive); gfx_deko3d.cpp static_asserts them.
 
 #include "fast/oot3d/pica_display_transfer.h"
+#include "fast/oot3d/render_resolution_policy.h"
 #include "fast/renderer3ds/pica_native_state.h"
 #include "fast/renderer3ds/pica_render_backend.h"
 
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <string_view>
 #include <utility>
 
 namespace Fast::Deko3d {
@@ -208,24 +210,70 @@ struct PicaTargetKeyHash {
 constexpr uint32_t kTopScreenPhysicalWidth = 480U;
 constexpr uint32_t kTopScreenPhysicalHeight = 400U;
 
+// Samples per presented line of the top screen (config/deko3d_line_samples).
+// The game samples its 240 presented lines twice (480 native columns) and
+// its display transfer averages each pair. Kept (2), the host renders both
+// samples at the resolution scale: 1440x1280 at 3x for 720 lines. One sample
+// (the Vulkan backend's policy, render_resolution_policy.h) renders the
+// presented density, 720x1280 at 3x, and the transfer becomes a 1:1 copy:
+// the same lines at every scale, half the pixels, without the game's
+// vertical averaging.
+enum class TopScreenLineSamples : uint8_t { One, Two };
+
+// "2" keeps the game's two samples; absent or anything else: one.
+[[nodiscard]] inline TopScreenLineSamples ParseTopScreenLineSamples(std::string_view text) noexcept {
+    for (const char c : text) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            continue;
+        }
+        return c == '2' ? TopScreenLineSamples::Two : TopScreenLineSamples::One;
+    }
+    return TopScreenLineSamples::One;
+}
+
+// The unwidened 400x240 top screen at a resolution scale: the output the
+// allocation presents, in Oot3d::RenderExtent terms.
+[[nodiscard]] inline Oot3d::RenderExtent PresentedTopScreenExtent(float scale) noexcept {
+    return {static_cast<uint32_t>(std::max<int64_t>(1, std::llround(Oot3d::kNativeTopScreenLogicalWidth * double{scale}))),
+            static_cast<uint32_t>(std::max<int64_t>(1, std::llround(Oot3d::kNativeTopScreenLogicalHeight * double{scale})))};
+}
+
+// Host samples per native sample along X of a target allocated at
+// allocScale: 0.5 for the top screen at one sample per line when the
+// allocation presents at least the game's 480 samples
+// (Oot3d::NativeTopScreenStorageSamplingX, scale >= 2), otherwise 1. Fixed per
+// allocation, so every dynamic-resolution level keeps the same sampling.
+[[nodiscard]] inline float PicaTargetSamplingX(uint32_t width, uint32_t height, float allocScale,
+                                               TopScreenLineSamples lines) noexcept {
+    if (lines == TopScreenLineSamples::Two) {
+        return 1.0F;
+    }
+    return Oot3d::NativeTopScreenStorageSamplingX({width, height}, PresentedTopScreenExtent(allocScale));
+}
+
 struct PicaTargetExtent {
     uint32_t Width = 0;
     uint32_t Height = 0;
-    float Scale = 1.0F;  // host pixels per native pixel along X
-    float ScaleY = 1.0F; // along Y (wider on a widescreen top target)
+    float Scale = 1.0F;     // resolution scale (dynamic resolution's level): host pixels per native pixel along Y
+                            // before widescreen, and along X for a target at its native sampling
+    float SamplingX = 1.0F; // host samples per native sample along X (PicaTargetSamplingX)
+    float ScaleX = 1.0F;    // host pixels per native pixel along X (Scale * SamplingX)
+    float ScaleY = 1.0F;    // along Y (wider on a widescreen top target)
     bool Wide = false;
     float WideFactor = 1.0F;
 };
 
-// GetPicaGlTarget's extent: the native extent times the scale; a top-screen
-// target taller by the widescreen factor (> 1 only when enabled and the
-// window is wider than 5:3).
+// GetPicaGlTarget's extent: the native extent times the scale (X times the
+// sampling too); a top-screen target taller by the widescreen factor (> 1
+// only when enabled and the window is wider than 5:3).
 [[nodiscard]] inline PicaTargetExtent PlanPicaTargetExtent(uint32_t width, uint32_t height, float scale,
                                                            float widescreenFactor, uint32_t topWidth,
-                                                           uint32_t topHeight) noexcept {
+                                                           uint32_t topHeight, float samplingX = 1.0F) noexcept {
     PicaTargetExtent extent;
     extent.Scale = scale;
-    extent.Width = ScaledExtent(width, scale);
+    extent.SamplingX = samplingX;
+    extent.ScaleX = scale * samplingX;
+    extent.Width = ScaledExtent(width, extent.ScaleX);
     extent.Height = ScaledExtent(height, scale);
     extent.ScaleY = scale;
     if (width == topWidth && height == topHeight && widescreenFactor > 1.0F) {
@@ -234,6 +282,29 @@ struct PicaTargetExtent {
         extent.Wide = true;
         extent.WideFactor = widescreenFactor;
     }
+    return extent;
+}
+
+// Dynamic resolution (gl_pica_dynamic_scale.h): the drawn extent of a target
+// allocated as `alloc` when drawn at `scale`, its bottom-left sub-rectangle
+// (PicaGlScale::DynamicSubRectangle) with the allocation's sampling and
+// widening. Never larger than the allocation; the allocation's own scale
+// gives the allocation.
+[[nodiscard]] inline PicaTargetExtent PlanPicaDynamicExtent(uint32_t width, uint32_t height, float scale,
+                                                            const PicaTargetExtent& alloc) noexcept {
+    if (scale == alloc.Scale) {
+        return alloc;
+    }
+    PicaTargetExtent extent = alloc;
+    extent.Scale = scale;
+    extent.ScaleX = scale * alloc.SamplingX;
+    extent.Width = std::min(alloc.Width, ScaledExtent(width, extent.ScaleX));
+    uint32_t scaledHeight = ScaledExtent(height, scale);
+    if (alloc.Wide) {
+        scaledHeight = static_cast<uint32_t>(std::lround(static_cast<float>(scaledHeight) * alloc.WideFactor));
+    }
+    extent.Height = std::min(alloc.Height, std::max<uint32_t>(1U, scaledHeight));
+    extent.ScaleY = static_cast<float>(extent.Height) / static_cast<float>(height);
     return extent;
 }
 
@@ -247,19 +318,23 @@ struct PicaRect {
 };
 
 // Viewport of a draw on a target that is not widened: both edges of the
-// guest rectangle (truncated to integers first) scaled, as the GL backend.
-[[nodiscard]] inline PicaRect PlanPicaViewport(float x, float y, float width, float height, float scale) noexcept {
+// guest rectangle (truncated to integers first) scaled, as the GL backend;
+// X by the target's ScaleX (half the scale on a top screen at one sample
+// per line), Y by its Scale.
+[[nodiscard]] inline PicaRect PlanPicaViewport(float x, float y, float width, float height, float scaleX,
+                                               float scaleY) noexcept {
     const auto vx = static_cast<int64_t>(static_cast<int32_t>(x));
     const auto vy = static_cast<int64_t>(static_cast<int32_t>(y));
     const auto vw = static_cast<int64_t>(static_cast<int32_t>(width));
     const auto vh = static_cast<int64_t>(static_cast<int32_t>(height));
-    return {ScaledEdge(vx, scale), ScaledEdge(vy, scale), ScaledEdge(vx + vw, scale) - ScaledEdge(vx, scale),
-            ScaledEdge(vy + vh, scale) - ScaledEdge(vy, scale)};
+    return {ScaledEdge(vx, scaleX), ScaledEdge(vy, scaleY), ScaledEdge(vx + vw, scaleX) - ScaledEdge(vx, scaleX),
+            ScaledEdge(vy + vh, scaleY) - ScaledEdge(vy, scaleY)};
 }
 
 // Scissor (mode 3 = inclusive rectangle; anything else = the whole target).
 [[nodiscard]] inline PicaRect PlanPicaScissor(uint8_t mode, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2,
-                                              float scale, uint32_t targetWidth, uint32_t targetHeight) noexcept {
+                                              float scaleX, float scaleY, uint32_t targetWidth,
+                                              uint32_t targetHeight) noexcept {
     if (mode != 3U) {
         return {0, 0, static_cast<int32_t>(targetWidth), static_cast<int32_t>(targetHeight)};
     }
@@ -267,8 +342,8 @@ struct PicaRect {
     const int64_t height = y2 >= y1 ? static_cast<int64_t>(y2) - y1 + 1 : 0;
     const auto sx = static_cast<int64_t>(x1);
     const auto sy = static_cast<int64_t>(y1);
-    return {ScaledEdge(sx, scale), ScaledEdge(sy, scale), ScaledEdge(sx + width, scale) - ScaledEdge(sx, scale),
-            ScaledEdge(sy + height, scale) - ScaledEdge(sy, scale)};
+    return {ScaledEdge(sx, scaleX), ScaledEdge(sy, scaleY), ScaledEdge(sx + width, scaleX) - ScaledEdge(sx, scaleX),
+            ScaledEdge(sy + height, scaleY) - ScaledEdge(sy, scaleY)};
 }
 
 // A deko3d scissor is unsigned: clip a rectangle to the target (an empty
@@ -375,7 +450,7 @@ struct PicaTransferPlan {
     const char* Error = nullptr;
     uint32_t OutputWidth = 0;  // native, in source pixels' terms
     uint32_t OutputHeight = 0;
-    bool Linear = false;       // 2:1 box filter (scaling 1 or 2)
+    bool Linear = false;       // a 2:1 box filter the source still holds (scaling 1 or 2)
     uint32_t SourceWidth = 0;  // host pixels read from the target
     uint32_t SourceHeight = 0;
     uint32_t AllocWidth = 0;   // display image
@@ -385,14 +460,17 @@ struct PicaTransferPlan {
     bool Flip = false;         // scanout reads the image upside down
 };
 
-// SubmitPicaDisplayTransfer of the GL backend, minus dynamic resolution
-// (scale == allocation scale): the extents of the copy into the display
-// image (keyed by namespace and output address) and the scanout flip.
+// SubmitPicaDisplayTransfer of the GL backend: the extents of the copy into
+// the display image (keyed by namespace and output address) and the scanout
+// flip. `drawn` is the source target's extent now, `alloc` its allocation
+// (below it while dynamic resolution lowers the scale). A source at one
+// sample per presented line (SamplingX 0.5) already holds what the game's
+// horizontal 2:1 filter makes: that filter becomes a 1:1 copy
+// (Oot3d::BuildPicaDisplayTransferPlan's SourceAtPresentedDensity).
 [[nodiscard]] inline PicaTransferPlan PlanPicaTransfer(const Renderer3ds::PicaDisplayTransferView& transfer,
                                                        uint32_t sourceNativeWidth, uint32_t sourceNativeHeight,
-                                                       float scale, float scaleY, uint32_t targetWidth,
-                                                       uint32_t targetHeight, float allocScale = 0.0F,
-                                                       float allocScaleY = 0.0F) noexcept {
+                                                       const PicaTargetExtent& drawn,
+                                                       const PicaTargetExtent& alloc) noexcept {
     PicaTransferPlan plan;
     const auto fail = [&](const char* why) {
         plan.Error = why;
@@ -424,26 +502,21 @@ struct PicaTransferPlan {
         return fail("PICA display transfer samples out of bounds");
     }
     const auto scaledY = [&](uint32_t native) {
-        return static_cast<uint32_t>(std::lround(static_cast<float>(native) * scaleY));
+        return static_cast<uint32_t>(std::lround(static_cast<float>(native) * drawn.ScaleY));
     };
-    plan.Linear = scaling != 0U;
+    const uint32_t collapsedH = drawn.SamplingX < 1.0F ? horizontalSamples : 1U;
+    plan.Linear = horizontalSamples / collapsedH == 2U || verticalSamples == 2U;
     // Dynamic resolution (gl_pica_dynamic_scale.h): the source may be drawn
     // below its allocation scale. The display image keeps the allocation's
     // extent (never reallocated as the scale moves) and the copy fills its
     // bottom-left part, the content the scanout reads.
-    if (!(allocScale > 0.0F)) {
-        allocScale = scale;
-    }
-    if (!(allocScaleY > 0.0F)) {
-        allocScaleY = scaleY;
-    }
-    plan.AllocWidth = ScaledExtent(plan.OutputWidth, allocScale);
+    plan.AllocWidth = ScaledExtent(plan.OutputWidth * collapsedH, alloc.ScaleX);
     plan.AllocHeight = std::max<uint32_t>(
-        1U, static_cast<uint32_t>(std::lround(static_cast<float>(plan.OutputHeight) * allocScaleY)));
-    plan.ContentWidth = std::min(plan.AllocWidth, ScaledExtent(plan.OutputWidth, scale));
+        1U, static_cast<uint32_t>(std::lround(static_cast<float>(plan.OutputHeight) * alloc.ScaleY)));
+    plan.ContentWidth = std::min(plan.AllocWidth, ScaledExtent(plan.OutputWidth * collapsedH, drawn.ScaleX));
     plan.ContentHeight = std::min(plan.AllocHeight, std::max<uint32_t>(1U, scaledY(plan.OutputHeight)));
-    plan.SourceWidth = std::min<uint32_t>(ScaledExtent(plan.OutputWidth * horizontalSamples, scale), targetWidth);
-    plan.SourceHeight = std::min<uint32_t>(scaledY(plan.OutputHeight * verticalSamples), targetHeight);
+    plan.SourceWidth = std::min<uint32_t>(ScaledExtent(plan.OutputWidth * horizontalSamples, drawn.ScaleX), drawn.Width);
+    plan.SourceHeight = std::min<uint32_t>(scaledY(plan.OutputHeight * verticalSamples), drawn.Height);
     const bool inputLinear = (transfer.Flags & (1U << 1U)) != 0U;
     const bool dontSwizzle = (transfer.Flags & (1U << 5U)) != 0U;
     plan.Flip = (!inputLinear != (inputLinear != dontSwizzle)) ^ ((transfer.Flags & 1U) != 0U);

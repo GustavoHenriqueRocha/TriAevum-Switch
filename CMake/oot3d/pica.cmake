@@ -80,6 +80,16 @@ target_link_libraries(oot3d_native_pica_frontend_tests PRIVATE
     oot3d_native_pica_frontend)
 oot3d_target_defaults(oot3d_native_pica_frontend_tests FOLDER Tests)
 
+# config/list_walk_fast: the fast command-list walk against the per-word
+# walk on the same streams (packets, savestate, composition compared after
+# every list); --bench for the walk's ns per word.
+add_executable(oot3d_native_pica_list_walk_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_pica_frontend/oot3d_native_pica_list_walk_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_list_walk_tests PRIVATE
+    oot3d_native_pica_frontend)
+oot3d_target_defaults(oot3d_native_pica_list_walk_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_program_descriptor_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_pica_frontend/oot3d_native_pica_program_descriptor_tests.cpp
 )
@@ -95,7 +105,7 @@ add_executable(oot3d_native_pica_cache_inventory EXCLUDE_FROM_ALL
     tools/oot3d/native_pica_frontend/oot3d_native_pica_cache_inventory.cpp
     runtime/three_ds_recomp/src/fast/renderer3ds/pica_nri_shader_contract.cpp)
 target_link_libraries(oot3d_native_pica_cache_inventory PRIVATE oot3d_native_pica_frontend)
-# deko3d: GLSL 4.3 dos 4 programas paramétricos (uber) para o deko3d.pack
+# deko3d: GLSL 4.3 of the 4 parametric (uber) programs for deko3d.pack
 # (tools/oot3d/deko3d_shader_pack.py --glsl).
 add_executable(oot3d_deko3d_register_glsl_dump EXCLUDE_FROM_ALL
     tools/oot3d/deko3d_register_glsl_dump.cpp
@@ -108,6 +118,16 @@ add_executable(oot3d_deko3d_parametric_glsl_dump EXCLUDE_FROM_ALL
     runtime/three_ds_recomp/src/fast/renderer3ds/pica_gl_shader_dialect.cpp)
 target_compile_features(oot3d_deko3d_parametric_glsl_dump PRIVATE cxx_std_20)
 target_link_libraries(oot3d_deko3d_parametric_glsl_dump PRIVATE oot3d_native_pica_frontend)
+# deko3d: toon and per-pixel lighting variants of recorded fragment texts
+# (tools/oot3d/deko3d_shader_pack.py --lighting-variants).
+add_executable(oot3d_deko3d_lighting_variants EXCLUDE_FROM_ALL
+    tools/oot3d/deko3d_lighting_variants.cpp
+    runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/pica_toon_shader.cpp
+    runtime/three_ds_recomp/src/fast/renderer3ds/pica_vertex_surface.cpp)
+target_compile_features(oot3d_deko3d_lighting_variants PRIVATE cxx_std_20)
+target_include_directories(oot3d_deko3d_lighting_variants PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
 add_executable(oot3d_native_pica_capture_inventory EXCLUDE_FROM_ALL
     tools/oot3d/native_pica_frontend/oot3d_native_pica_capture_inventory.cpp
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan.cpp
@@ -214,6 +234,7 @@ oot3d_target_defaults(oot3d_native_pica_transfer_tests FOLDER Tests)
 add_library(oot3d_native_pica_submission STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_submission.cpp
     tools/oot3d/native_game_runtime/oot3d_native_pica_a32_memory_view.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_pica_capture_delta.cpp
 )
 target_include_directories(oot3d_native_pica_submission PUBLIC
     tools/oot3d/native_game_runtime
@@ -231,6 +252,7 @@ add_executable(oot3d_native_pica_submission_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_pica_submission_tests PRIVATE
     oot3d_native_pica_submission)
 oot3d_target_defaults(oot3d_native_pica_submission_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_pica_submission_tests)
 
 add_library(oot3d_native_pica_composition STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_composition.cpp
@@ -349,6 +371,44 @@ target_link_libraries(oot3d_native_offload_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_offload_tests FOLDER Tests)
 
+# config/capture_delta: command streams replayed through the frontend and the
+# queue with and without capture delta (taken, deferred to the plan builder,
+# savestates), every submission compared byte for byte; --bench for the
+# capture sub-stages on the real guest memory.
+add_executable(oot3d_native_capture_delta_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_capture_delta_tests.cpp
+)
+target_link_libraries(oot3d_native_capture_delta_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_capture_delta_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_capture_delta_tests)
+
+# config/texture_snapshot_fast: texture snapshots captured with the direct,
+# page-certified path, the previous path and the switch toggled, over the
+# same guest memory history (store cards, escaped pointers, deferred writes,
+# aliases, payload transforms); every snapshot compared with the others and
+# with guest memory; --bench for the texture and packet stages per draw.
+add_executable(oot3d_native_texture_snapshot_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_texture_snapshot_tests.cpp
+)
+target_link_libraries(oot3d_native_texture_snapshot_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_texture_snapshot_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_texture_snapshot_tests)
+
+# config/vertex_snapshot_fast: index buffers and vertex loaders captured with
+# the page-certified path, the previous path and the switch toggled, over the
+# same guest memory history (store cards, escaped pointers, deferred writes,
+# aliases); every snapshot compared with the others and with guest memory;
+# --bench for the vertex stage per draw.
+add_executable(oot3d_native_vertex_snapshot_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_vertex_snapshot_tests.cpp
+)
+target_link_libraries(oot3d_native_vertex_snapshot_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_vertex_snapshot_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_vertex_snapshot_tests)
+
 add_executable(oot3d_native_pica_visual_frame_soak_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_visual_frame_soak_tests.cpp
 )
@@ -373,6 +433,16 @@ add_executable(oot3d_native_pica_visual_cull_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_pica_visual_cull_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_visual_cull_tests FOLDER Tests)
+
+# Plan build cost per draw (config/plan_*): every option set against a frozen
+# copy of the previous builder, parallel builds under several resolving
+# threads (run with TSan too; --bench for the cost per draw and per resolve).
+add_executable(oot3d_native_pica_plan_build_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_pica_plan_build_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_plan_build_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_pica_plan_build_tests FOLDER Tests)
 
 add_executable(oot3d_native_pica_vulkan_plan_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan_tests.cpp
@@ -674,3 +744,21 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 set_property(TARGET oot3d_native_pica_vulkan_bridge_tests PROPERTY FOLDER Tests)
+
+# deko3d per-pixel lighting of fps60 in-between frames: two real frames
+# through the prepared transition, the bridge's draw view and the backend's
+# per-pixel decision (Deko3d::BuildPerPixelSurface).
+add_executable(oot3d_deko3d_inbetween_lighting_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_deko3d_inbetween_lighting_tests.cpp
+    runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp
+    runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/directional_shadows.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/pica_toon_shader.cpp)
+target_include_directories(oot3d_deko3d_inbetween_lighting_tests PRIVATE
+    tools/oot3d/native_pica_frontend)
+target_link_libraries(oot3d_deko3d_inbetween_lighting_tests PRIVATE
+    oot3d_native_pica_vulkan_bridge
+    ThreeDsRecomp::Renderer3dsPicaCore)
+target_compile_options(oot3d_deko3d_inbetween_lighting_tests PRIVATE
+    "${WARNING_OVERRIDE}")
+set_property(TARGET oot3d_deko3d_inbetween_lighting_tests PROPERTY FOLDER Tests)

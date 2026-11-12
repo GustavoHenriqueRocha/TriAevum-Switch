@@ -54,7 +54,10 @@ void PrintOot3dNativeGameUsage() {
                  "--resource-root <directory> "
                  "[--ui-profile <oot3d|topscreen>] "
                  "[--topscreen-texture-overrides <textures.o3tu>] "
+                 "[--topscreen-ui-atlas-hd <ui_atlas_hd.png>] "
+                 "[--topscreen-hd-textures <directory>] "
                  "[--topscreen-config <topscreen_ui.json>] "
+                 "[--romfs-overlay <romfs_overlay.o3ro>] "
                  "[--controls-config <oot3d_controls.json>] "
                  "[--save-data <directory>] "
                  "[--output <summary.json>] [--screenshot "
@@ -135,8 +138,21 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
         } else if (arg == "--topscreen-texture-overrides" &&
                    index + 1 < argc) {
             launch.TopScreenTextureOverridePackPath = argv[++index];
+        } else if (arg == "--topscreen-ui-atlas-hd" && index + 1 < argc) {
+            launch.TopScreenUiAtlasHdPath = argv[++index];
+        } else if (arg == "--topscreen-hd-textures" && index + 1 < argc) {
+            launch.TopScreenHdTexturesPath = argv[++index];
         } else if (arg == "--topscreen-config" && index + 1 < argc) {
             launch.TopScreenConfigPath = argv[++index];
+        } else if (arg == "--romfs-overlay" && index + 1 < argc) {
+#if defined(__SWITCH__)
+            // sdmc:/ paths stay as they are, like --controls-config below.
+            launch.RomFsOverlayPath =
+                std::filesystem::path(argv[++index]).lexically_normal();
+#else
+            launch.RomFsOverlayPath =
+                std::filesystem::absolute(std::filesystem::u8path(argv[++index])).lexically_normal();
+#endif
         } else if (arg == "--controls-config" && index + 1 < argc) {
 #if defined(__SWITCH__)
             // devoptab paths (sdmc:/...) are absolute to Horizon even though
@@ -457,13 +473,39 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
                 launch.TopScreenTextureOverridePackPath.string());
         }
     }
+    // A missing or unreadable HD atlas or image is not an error: the window
+    // setup logs it and the HUD keeps the native art.
+    if (!launch.TopScreenUiAtlasHdPath.empty() &&
+        (launch.UiProfile != Oot3dNativeGame::Oot3dUiProfile::TopScreen ||
+         launch.TopScreenTextureOverridePackPath.empty())) {
+        throw std::runtime_error(
+            "--topscreen-ui-atlas-hd requires --ui-profile topscreen and "
+            "--topscreen-texture-overrides");
+    }
+    if (!launch.TopScreenHdTexturesPath.empty() &&
+        (launch.UiProfile != Oot3dNativeGame::Oot3dUiProfile::TopScreen ||
+         launch.TopScreenTextureOverridePackPath.empty())) {
+        throw std::runtime_error(
+            "--topscreen-hd-textures requires --ui-profile topscreen and "
+            "--topscreen-texture-overrides");
+    }
+
+#if !defined(__SWITCH__)
+    // On the Switch the start-up composes the overlay itself, and the window
+    // setup falls back to no mods when it cannot load it (never fatal there).
+    if (!launch.RomFsOverlayPath.empty() &&
+        !std::filesystem::is_regular_file(launch.RomFsOverlayPath)) {
+        throw std::runtime_error("RomFS overlay does not exist: " +
+                                 launch.RomFsOverlayPath.string());
+    }
+#endif
 
     if (!launch.TopScreenConfigPath.empty()) {
         if (launch.UiProfile != Oot3dNativeGame::Oot3dUiProfile::TopScreen) {
             throw std::runtime_error(
                 "--topscreen-config requires --ui-profile topscreen");
         }
-        // Um save interrompido no Switch deixa o arquivo só no backup
+        // A save cut off on the Switch leaves the file only in its backup
         // (ship/config/FileReplace.h).
         Ship::RestoreInterruptedReplace(launch.TopScreenConfigPath);
         if (!std::filesystem::is_regular_file(launch.TopScreenConfigPath)) {
@@ -488,7 +530,7 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
         launch.ControlConfigPath =
             runtimePath.parent_path() / "oot3d_controls.json";
     }
-    // Um save interrompido no Switch deixa o controle só no backup.
+    // A save cut off on the Switch leaves the controls only in their backup.
     Ship::RestoreInterruptedReplace(launch.ControlConfigPath);
     if (std::filesystem::is_regular_file(launch.ControlConfigPath)) {
         std::string configError;

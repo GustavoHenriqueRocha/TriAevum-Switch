@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Guardas de regressão dos bugs já corrigidos no port do Switch.
+"""Regression guards for bugs already fixed in the Switch port.
 
-Cada guarda confere no código-fonte que a correção de um bug visto no console
-continua no lugar. São checagens estáticas (rodam em segundos, sem build): elas
-não provam que o código está certo, mas falham se um merge do upstream, um
-refactor ou um conflito resolvido às pressas apagar a correção. O teste de
-comportamento de cada bug, quando existe, fica no alvo citado em `test`.
+Each guard checks in the source code that the fix for a bug seen on the console
+is still in place. They are static checks (they run in seconds, no build): they
+don't prove the code is right, but they fail if an upstream merge, a refactor
+or a hastily resolved conflict erases the fix. The behavior test for each bug,
+when there is one, lives in the target named in `test`.
 
-Uso: python3 tests/switch/test_bug_guards.py [--list]
+Usage: python3 tests/switch/test_bug_guards.py [--list]
 """
 import json
 import re
@@ -20,27 +20,214 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @dataclass
 class Guard:
-    bug: str          # o que se via no console
-    path: str         # arquivo onde a correção mora
-    pattern: str      # regex que precisa existir (re.S)
-    test: str = ""    # teste de comportamento, quando houver
-    forbid: str = ""  # regex que NÃO pode existir no mesmo arquivo
+    bug: str          # what was seen on the console
+    path: str         # file where the fix lives
+    pattern: str      # regex that must exist (re.S)
+    test: str = ""    # behavior test, when there is one
+    forbid: str = ""  # regex that must NOT exist in the same file
 
 
 GUARDS = [
-    # --- 08/11: "cannot replace TopScreen UI config: File exists" ao salvar uma opção ---
-    # O FS do Horizon recusa rename() por cima de arquivo existente (EEXIST); o gravador do
-    # TopScreen (e o do cache) só tinham o rename POSIX. Uma troca para todos os gravadores
-    # (ship/config/FileReplace.h): arquivo antigo para <arquivo>.bak, novo no lugar, backup
-    # apagado; um save interrompido é recuperado do .bak ao carregar.
-    Guard("salvar uma opção do TopScreen falhava no Switch: 'cannot replace TopScreen UI config: File exists'",
+    # --- 11/11 (0.2.3-test.3): heavy lag at the final boss's light attack, raw texture copies ---
+    Guard("the final boss lagged badly at its light attack in 0.2.3-test.2 (player report): each raw texture "
+          "copy waited for the mailbox present thread, then read the whole source target back (colour and "
+          "depth, 7 MiB at scale 3); it now reads only the colour rows the encoder samples, and the mailbox "
+          "present thread (a queue of its own) is not waited for",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(!mDevice\.Mailbox\(\)\) \{\s*mDevice\.WaitPresentIdle\(\);\s*\}.*?'
+          r'mTargets\.ReadCopyRows\(\*source, key->Height, mFlipY, mCopyRgba, &readError\)',
+          "oot3d_deko3d_backend_tests (TestRawTextureCopy)",
+          forbid=r'mTargets\.ReadTarget\(\*source, mCopyRgba'),
+    Guard("the frame rate fell to 30 in a Temple of Time cutscene with the camera facing Link (0.2.3 candidate, "
+          "logs34-36: governor estimate 15.3-16.8 ms without the body shadow, 16.2-17.9 with it, budget 16.7): "
+          "the body shadow is skipped while Link is in a cutscene (stateFlags1 0x20000000), the foot shadows "
+          "draw there, unless L3+R3 > Video > Shadow in cutscenes (config/simple_shadow_cutscenes) is on",
+          "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
+          r'kSimpleShadowCutscene = 0x20000000U;.*?'
+          r'const std::uint32_t skipped = kSimpleShadowRiding \| \(cutscenes \? 0U : kSimpleShadowCutscene\);\s+'
+          r'if \(actor\.Id != 0U \|\| \(actor\.StateFlags1 & skipped\) != 0U',
+          "oot3d_simple_shadow_tests (TestDecision)"),
+    Guard("a translation in mods/ptbr/romfs/ read 'romfs mods: no file applies, 0 ignored' with no reason "
+          "(issue #12): a mod folder without files, and entries the console reads as neither a file nor a "
+          "folder, are ignored notes with their reason (log line and panel)",
+          "tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp",
+          r'else if \(!it->is_directory\(fileError\)\)\s+scan\.Unread\.push_back\(\{name, path, NeitherReason\(fileError\)\}\);.*?'
+          r'else if \(modFiles\.empty\(\)\)\s+scan\.Unread\.push_back\(\{name, std::string\(\), kNoFilesReason\}\);.*?'
+          r'if \(scan\.Files\.empty\(\)\) \{\s+RemoveOutputs\(request\);\s+'
+          r'return finishWithUnread\(RomFsModsOutcome::NoMods\);',
+          "oot3d_romfs_mods_tests (TestUnread)"),
+    # --- 11/09 (0.2.1): the TopScreen pause menu at 60 FPS, and a button piece beside Save/Quit ---
+    Guard("the TopScreen pause menu animated janky at 60 FPS (interpolated positions with stepped alpha, "
+          "~1 s of governor drops after each opening): with a pause page up the in-between frame shows "
+          "the step image without asking the governor",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'const bool topScreenMenuHold = Oot3dNativeGame::ResolveTopScreenMenuHold\(.*?'
+          r'ResolveInBetweenSource\(\s*cadenceGovernor\.DropsInBetween\(\), topScreenMenuHold\);\s*'
+          r'auto level =\s*inBetweenSource == Oot3dNativeGame::InBetweenSource::Governor\s*'
+          r'\? interpolationPacing\.Decide\(\)',
+          "oot3d_top_screen_menu_cadence_tests",
+          forbid=r'cadenceGovernor\.DropsInBetween\(\)\s*\?\s*Oot3dNativeGame::InterpolatedSampleLevel::Dropped'
+                 r'\s*:\s*interpolationPacing\.Decide\(\)'),
+    Guard("a piece of a button showed left of the Save/Quit prompt: System is drawn in the centred page "
+          "viewport (0, 40, 480, 320), clipped to the lower screen's 320 columns",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
+          r'const bool beforeDraw = mPhase == 2U;\s*state\.r\[0\] = 0U;\s*'
+          r'state\.r\[1\] = beforeDraw \? kTopScreenCentredPageX : 0U;\s*state\.r\[2\] = 480U;\s*'
+          r'state\.r\[3\] = beforeDraw \? kTopScreenPageWidthPixels : kTopScreenPresentedWidthPixels;',
+          "oot3d_top_screen_pause_transaction_tests"),
+    Guard("a piece of a button showed left of the Save/Quit prompt: the System draw keeps the page's own "
+          "projection (the wide one would squeeze the page into the centred viewport)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
+          r'if \(dispatch\.SystemPage != nullptr && dispatch\.SystemPage->Drawing\(\)\)\s*'
+          r'return dispatch\.WideItems->ExecutePageProjection\(state, false\);',
+          "oot3d_top_screen_wide_items_runtime_tests"),
+    # --- 11/09 (issue #5): a forwarder closed the game without a word, and nothing recorded how it started ---
+    Guard("a launch that ended before the window left the previous run's boot-status: status=starting with "
+          "the launch environment is written before anything else in main (issue #5)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'const auto launchEnvironment = ReadSwitchLaunchEnvironment\(argc, argv\);\s+'
+          r'WriteSwitchBootStatus\("starting", \{\},\s+Oot3dNativeGame::FormatSwitchLaunchEnvironment\(launchEnvironment\)\);'
+          r'.*?PlaceSwitchMainThread\(\);',
+          "oot3d_switch_launch_environment_tests"),
+    Guard("unexpected launch arguments closed the game silently (return 2): on the Switch they end with the "
+          "error dialog naming them (issue #5)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!ParseOot3dNativeGameArgs\(argc, argv, launch\)\) \{\s+#if defined\(__SWITCH__\).*?'
+          r'throw std::runtime_error\("the launch arguments were not understood: "',
+          "oot3d_switch_launch_environment_tests"),
+    # --- 11/09 (issue #7): the free camera kept turning after the right stick was released ---
+    Guard("free camera kept moving ~0.3 s after the right stick was released, with no way to turn it off "
+          "(issue #7): the commit's step follows config/free_camera_smoothing",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp",
+          r'runtime->Camera\.Smoothing \? kTopScreenFreeCameraFollowStep : 1\.0F;.*?'
+          r'InterpolateTopScreenFreeCameraPosition\(\s*currentEye, intendedEye, step\)',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("free camera smoothing choice not reaching the camera: the dispatch copies the live value before "
+          "each update (issue #7)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
+          r'TopScreenCamera\.Camera\.Smoothing =\s+Oot3dNativeGame::LiveFreeCameraSmoothing\(\)\.load\(',
+          "oot3d_top_screen_mod_profile_tests"),
+    # --- 11/09: far Kokiri Forest objects still popped in at Draw distance Maximum (logs25) ---
+    Guard("far objects held back at Draw distance Maximum: 32 extensions per walk for every choice (logs25: "
+          "up to 14 capped a step in Kokiri Forest); the limit follows the choice",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_actor_visibility.cpp",
+          r'SelectActorExtensions\(candidates, v\.ExtensionLimit\);',
+          "oot3d_native_a32_actor_visibility_tests"),
+    Guard("Draw distance limit not following the live choice: set every frame next to the multiplier",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'visibility\.ExtensionLimit = Oot3dNativeGame::ActorExtensionLimit\(choice\);',
+          "oot3d_native_a32_actor_visibility_tests"),
+    Guard("[#69/#74] the light budget stays 120 of 128 records whatever the Draw distance limit",
+          "tools/oot3d/native_game_runtime/oot3d_actor_visibility_policy.h",
+          r'kActorLightCapacity = 128U;\s+inline constexpr uint32_t kActorLightBudget = 120U;',
+          "oot3d_actor_visibility_policy_tests"),
+    # --- 11/09: RomFS mods (mods/<name>/romfs/, config/no_romfs_mods; upstream 9c90abb9 overlay) ---
+    # Absent a mods folder (or with the option off) the launch must stay 0.2.0's; a bad overlay
+    # starts the game without mods instead of the fatal error dialog.
+    Guard("RomFS mods: a rejected overlay closed the game (upstream throws; the Switch starts without mods)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(!hostConfig\.RomFsOverlay\) \{\s*#if defined\(__SWITCH__\).*?'
+          r'WriteGameLog\("romfs mods: overlay rejected, starting without mods: "',
+          "oot3d_native_a32_romfs_overlay_tests"),
+    Guard("RomFS mods: --romfs-overlay must keep sdmc:/ paths (std::filesystem::absolute mangles them)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game_bootstrap.cpp",
+          r'arg == "--romfs-overlay" && index \+ 1 < argc\) \{\s*#if defined\(__SWITCH__\)\s*//[^\n]*\n\s*'
+          r'launch\.RomFsOverlayPath =\s*std::filesystem::path\(argv\[\+\+index\]\)\.lexically_normal\(\);.*?'
+          r'#if !defined\(__SWITCH__\)\s*//.*?"RomFS overlay does not exist: "'),
+    Guard("RomFS mods: --romfs-overlay only when the start-up composed an overlay, before argv is handed over",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'PrepareRomFsMods\(\{.*?if \(!romFsOverlayArgument\.empty\(\)\) \{\s*'
+          r'homebrewArgv\.push_back\(const_cast<char\*>\("--romfs-overlay"\)\);.*?if \(argc <= 1\) \{',
+          "oot3d_romfs_mods_tests (TestStartup)"),
+    Guard("RomFS mods: off or no mods folder must not scan, compose or pass an overlay",
+          "tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp",
+          r'if \(!ReadRomFsModsEnabled\(startup\.ConfigDirectory\)\) \{.*?return result;\s*\}.*?'
+          r'if \(!fs::is_directory\(startup\.ModsDirectory, error\)\) \{.*?return result;\s*\}',
+          "oot3d_romfs_mods_tests (TestStartup)"),
+    Guard("RomFS mods: rename over an existing overlay/receipt gives EEXIST on Horizon; no canonical paths with sdmc:/",
+          "tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp",
+          r'fs::remove\(to, error\);\s*error\.clear\(\);\s*fs::rename\(from, to, error\);.*?'
+          r'fs::remove\(request\.ReceiptPath, ignored\);\s*ReplaceFile\(partial, request\.OverlayPath\);',
+          "oot3d_romfs_mods_tests (TestReceipt)",
+          forbid=r'canonical\(|fs::relative\(|std::filesystem::relative\('),
+    Guard("RomFS mods: the guest's RomFS size and save-state check use the overlaid view",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'file->FileSize = RomFsServiceViewSize\(\);.*?'
+          r'std::make_shared<RomFsBackingFile>\(\s*file->FilePath, mConfig\.RomFsOverlay,',
+          "oot3d_native_a32_romfs_overlay_tests (TestHostServiceView)"),
+    Guard("RomFS mods: a save state made with other mods is refused (RomFS view size)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_state.cpp",
+          r'object->FileSize != RomFsServiceViewSize\(\)\)\) \{.*?made with different RomFS mods'),
+    # --- 11/08: coccofresco's SingleScreen 3.0 HUD fixes (upstream 2026-10-17), ported for 0.2.0 ---
+    Guard("D-pad cross stayed opaque where 3.0 greys it (fc5ddfa6: 0x005CCF6C, first visible ZR/ZL lane, "
+          "else 0.3 with a nested owner)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'ResolveTopScreenDpadGroupAlpha\(.*?lanes\.ItemZr > 0\.0F \? lanes\.ItemZr : lanes\.ItemZl;.*?'
+          r'std::min\(lane, 1\.0F\);\s+return nestedOwner \? 0\.3F : 1\.0F;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("D-pad cross and its icons/marks not dimmed by the group alpha (fc5ddfa6, 94b293ea)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'const std::size_t clusterStart = output\.size\(\);.*?'
+          r'ReadTopScreenPlayerNestedOwner\(mMemory, &nestedOwner\).*?'
+          r'source_quad == 5U\) output\[index\]\.color\.alpha \*= dpadAlpha;.*?'
+          r'dpadState\.GroupAlpha = dpadAlpha;',
+          "oot3d_top_screen_mod_profile_tests (D-pad presentation)"),
+    Guard("D-pad boots/marks stayed opaque on Epona while 3.0 halves them (94b293ea, loop 0x005DD78C)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp",
+          r'p\.color\.alpha \*= state\.ItemOpacity\.Ocarina;\s+else\s+p\.color\.alpha \*= state\.GroupAlpha;.*?'
+          r'std::clamp\(alpha, 0\.0F, 1\.0F\) \* state\.GroupAlpha',
+          "oot3d_top_screen_mod_profile_tests (D-pad presentation)"),
+    # --- D-pad item buttons 6..9 (SingleScreen 3.2.2 action 14) ---
+    Guard("D-pad items: a scan exit changed r4 = 6 without a D-pad item, or the slot resolver answered "
+          "6..9 outside the two scan calls (0x0034D1F8 / 0x0034D274)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_item_dispatch.cpp",
+          r'state\.r\[4\] != kTopScreenNativeScanNoButton \|\|.*?'
+          r'state\.r\[14\] == kTopScreenDpadItemPressResolverReturn \|\|\s+'
+          r'state\.r\[14\] == kTopScreenDpadItemHoldResolverReturn',
+          "oot3d_top_screen_mod_profile_tests (D-pad items)"),
+    Guard("D-pad items: native Inventory_UpdateBottleItem ran for button 6..9 (it indexes the four "
+          "button slots with button - 1)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_item_dispatch.cpp",
+          r'if \(pc == kTopScreenBottleUpdateEntry\)\s+return IsDpadItemButton\(state\.r\[2\]\);.*?'
+          r'if \(pc == kTopScreenBottleUpdateEntry\) \{.*?state\.r\[15\] = state\.r\[14\];\s+return true;',
+          "oot3d_top_screen_mod_profile_tests (D-pad items)"),
+    Guard("A ring 13% and its label 40% larger than 3.0 (5da8aa7c: ring 32 px, label 0.68, label hidden "
+          "in alternate HUD mode 1/4)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'constexpr float targetX = 288\.0F;\s+constexpr float targetY = 24\.0F;.*?'
+          r'if \(!square && context\.ActionLabelHidden\).*?'
+          r'const float size = square \? 32\.0F / width : 0\.68F;.*?'
+          r'ActionLabelHidden = alternateHudMode == 1U \|\| alternateHudMode == 4U;',
+          "oot3d_top_screen_mod_profile_tests",
+          forbid=r'\(vertex\.X - centerX\) \* 0\.95F'),
+    Guard("B circle's translucent fill washed out the B item icon and ammo digits (d8ffc8f1)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'gate\.Draw && !CaptureTopScreenQuestBButtonCopies\(mMemory, mTopScreenConfig,.*?'
+          r'ApplyTopScreenHudScale\(output, mTopScreenConfig\);.*?'
+          r'AppendTopScreenQuestBButtonCopiesPresentation\(.*?ApplyTopScreenGameplayCanvas\(output\);',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("B icon copies: captured around (248, 24) after the HUD transform, native quads moved off screen",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'400\.0F \+ \(248\.0F - 400\.0F\) \* scale - static_cast<float>\(config\.HudMarginX\);.*?'
+          r'vertex\.X \+= 500\.0F - quadX;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("lower-screen controls (circles, rupees, D-pad) stayed on screen in cutscenes (6f478bcc: "
+          "Gameplay_InCsMode hides the HUD)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'if \(gate->Draw && player != 0U\) \{.*?ReadTopScreenGameplayInCutsceneMode\(.*?gate->Draw = !cutscene;',
+          "oot3d_top_screen_mod_profile_tests"),
+    # --- 11/08: test.12 "Cannot replace topscreen UI config: File exists" when saving a setting ---
+    # Horizon's FS refuses rename() over an existing file (EEXIST); the TopScreen writer (and the
+    # cache writer) only had the POSIX rename. One replace for every writer: old file to <file>.bak,
+    # new file into place, backup dropped; a cut-off save is recovered from the .bak on load.
+    Guard("saving a TopScreen setting failed on Switch: 'cannot replace TopScreen UI config: File exists'",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp",
           r'Ship::RestoreInterruptedReplace\(path\);\s+std::ifstream stream\(path.*?'
           r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
           "oot3d_config_file_replace_tests (TestTopScreenConfig)",
           forbid=r'std::filesystem::rename\('),
-    Guard("troca de arquivo no Switch: EEXIST sobre arquivo existente tira o antigo do lugar, põe o novo, "
-          "devolve o antigo se isso falhar; um arquivo que sumiu volta do backup",
+    Guard("Switch file replace: EEXIST over an existing file moves it aside, puts the new file in place, "
+          "restores the old one if that fails; a missing file comes back from its backup",
           "runtime/three_ds_recomp/include/ship/config/FileReplace.h",
           r'std::filesystem::rename\(temporary, target, error\);\s+if \(error != std::errc::file_exists\).*?'
           r'std::filesystem::rename\(target, backup, error\);.*?'
@@ -49,582 +236,2552 @@ GUARDS = [
           r'RestoreInterruptedReplace\(.*?if \(std::filesystem::exists\(target, error\) \|\| error\)\s+\{\s+return true;'
           r'\s+\}\s+std::filesystem::rename\(backup, target, error\);',
           "oot3d_config_file_replace_tests (TestReplace, TestReplaceFailures, TestRecovery)"),
-    Guard("troca de arquivo no Switch: arquivos de cache do renderer são substituídos, não recusados com EEXIST",
+    Guard("Switch file replace: renderer cache files are replaced, not refused with EEXIST",
           "runtime/three_ds_recomp/src/fast/renderer/cache_file.cpp",
           r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\)',
           "oot3d_config_file_replace_tests (TestCacheFileWriter)",
           forbid=r'std::filesystem::rename\('),
-    Guard("troca de arquivo no Switch: a inicialização recupera um save interrompido do TopScreen/controle antes de checar os arquivos",
+    Guard("Switch file replace: start-up restores a cut-off TopScreen/controls save before checking the files",
           "tools/oot3d/native_game_runtime/oot3d_native_game_bootstrap.cpp",
           r'Ship::RestoreInterruptedReplace\(launch\.TopScreenConfigPath\);\s+'
           r'if \(!std::filesystem::is_regular_file\(launch\.TopScreenConfigPath\)\).*?'
           r'Ship::RestoreInterruptedReplace\(launch\.ControlConfigPath\);\s+'
           r'if \(std::filesystem::is_regular_file\(launch\.ControlConfigPath\)\)'),
-    Guard("troca de arquivo no Switch: o arquivo de configurações volta do backup antes de ser lido",
+    Guard("Switch file replace: the settings file is restored from its backup before it is read",
           "runtime/three_ds_recomp/src/ship/config/Config.cpp",
           r'void Config::Reload\(\) \{\s+if \(mPath != "None"\) \{\s+RestoreInterruptedReplace\(mPath\);'),
-    Guard("troca de arquivo no Switch: developer-tools.json volta do backup antes de ser lido",
+    Guard("Switch file replace: developer-tools.json is restored from its backup before it is read",
           "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
           r'Ship::RestoreInterruptedReplace\(mStorage\);\s+std::error_code exists;'),
-    Guard("troca de arquivo no Switch: o arquivo de idioma volta do backup antes de ser lido",
+    Guard("Switch file replace: the game language file is restored from its backup before it is read",
           "tools/oot3d/native_game_runtime/oot3d_game_language.cpp",
           r'Ship::RestoreInterruptedReplace\(mPath\);\s+if \(std::filesystem::exists\(mPath\)\)'),
-    Guard("troca de arquivo no Switch: as preferências de savestate voltam do backup antes de serem lidas",
+    Guard("Switch file replace: save-state preferences are restored from their backup before they are read",
           "tools/oot3d/native_game_runtime/oot3d_savestate_library.cpp",
           r'Ship::RestoreInterruptedReplace\(mPreferencesPath\);\s+std::ifstream input\(mPreferencesPath'),
-    Guard("troca de arquivo no Switch: perfis de ambiente voltam do backup antes de serem lidos",
+    Guard("Switch file replace: environment profiles are restored from their backup before they are read",
           "tools/oot3d/native_game_runtime/oot3d_scene_environment_codec.cpp",
           r'Ship::RestoreInterruptedReplace\(path\);\s+std::error_code error;\s+'
           r'file\.Exists = std::filesystem::exists\(path, error\);'),
-    # --- 08/11: correções do HUD do SingleScreen 3.0 do coccofresco (upstream main, 17/10) ---
-    # Ele comparou o port do 3.0 com o mod original no Azahar e corrigiu o que divergia.
-    # Portadas de JohnUzoka/TriAevum-Switch; ac63eb21 e as partes de pausa do 6f478bcc ficaram de fora.
-    Guard("cruz do D-pad ficava opaca onde o 3.0 a deixa cinza (fc5ddfa6: 0x005CCF6C, primeira "
-          "faixa ZR/ZL visível, senão 0,3 com dono aninhado)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'ResolveTopScreenDpadGroupAlpha\(.*?lanes\.ItemZr > 0\.0F \? lanes\.ItemZr : lanes\.ItemZl;.*?'
-          r'std::min\(lane, 1\.0F\);\s+return nestedOwner \? 0\.3F : 1\.0F;',
-          "oot3d_top_screen_mod_profile_tests"),
-    Guard("cruz do D-pad, ícones e marcas sem o alfa do grupo (fc5ddfa6, 94b293ea)",
-          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
-          r'const std::size_t clusterStart = output\.size\(\);.*?'
-          r'ReadTopScreenPlayerNestedOwner\(mMemory, &nestedOwner\).*?'
-          r'source_quad == 5U\) output\[index\]\.color\.alpha \*= dpadAlpha;.*?'
-          r'dpadState\.GroupAlpha = dpadAlpha;',
-          "oot3d_top_screen_mod_profile_tests (apresentação do D-pad)"),
-    Guard("botas/marcas do D-pad opacas na Epona, o 3.0 desenha pela metade (94b293ea, laço 0x005DD78C)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp",
-          r'p\.color\.alpha \*= state\.ItemOpacity\.Ocarina;\s+else\s+p\.color\.alpha \*= state\.GroupAlpha;.*?'
-          r'std::clamp\(alpha, 0\.0F, 1\.0F\) \* state\.GroupAlpha',
-          "oot3d_top_screen_mod_profile_tests (apresentação do D-pad)"),
-    Guard("anel do A 13% e texto 40% maiores que no 3.0 (5da8aa7c: anel 32 px, texto 0,68, texto "
-          "escondido no modo de HUD alternativo 1/4)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
-          r'if \(!square && context\.ActionLabelHidden\).*?'
-          r'const float size = square \? 32\.0F / width : 0\.68F;\s+for \(auto &vertex : quad\) \{\s+'
-          r'vertex\.X = 288\.0F \+ \(vertex\.X - centerX\) \* size;.*?'
-          r'ActionLabelHidden = alternateHudMode == 1U \|\| alternateHudMode == 4U;',
-          "oot3d_top_screen_mod_profile_tests",
-          forbid=r'\(vertex\.X - centerX\) \* 0\.95F'),
-    Guard("preenchimento translúcido do círculo do B apagava o ícone do B e a munição (d8ffc8f1)",
-          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
-          r'gate\.Draw && !CaptureTopScreenQuestBButtonCopies\(mMemory, mTopScreenConfig,.*?'
-          r'ApplyTopScreenHudScale\(output, mTopScreenConfig\);.*?'
-          r'AppendTopScreenQuestBButtonCopiesPresentation\(.*?ApplyTopScreenGameplayCanvas\(output\);',
-          "oot3d_top_screen_mod_profile_tests"),
-    Guard("cópias do B: capturadas em torno de (248, 24) depois da transformação do HUD, quads nativos "
-          "tirados da tela",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
-          r'400\.0F \+ \(248\.0F - 400\.0F\) \* scale - static_cast<float>\(config\.HudMarginX\);.*?'
-          r'vertex\.X \+= 500\.0F - quadX;',
-          "oot3d_top_screen_mod_profile_tests"),
-    Guard("controles da tela de baixo (círculos, rupias, D-pad) ficavam na tela em cutscene (6f478bcc: "
-          "Gameplay_InCsMode esconde o HUD)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'if \(gate->Draw && player != 0U\) \{.*?ReadTopScreenGameplayInCutsceneMode\(.*?gate->Draw = !cutscene;',
-          "oot3d_top_screen_mod_profile_tests"),
-    # --- 04/11: mapa da dungeon (pausa, TopScreen) preso no andar em que abre ---
-    # 0x00442F38 (PauseDungeonMap_HandleCursorInput) é o cursor de andares por
-    # D-pad/analógico (Cima/Baixo mudam o andar via SetSelectedFloor); o toque é
-    # 0x004435B0. O port do TopScreen fazia o 0x00442F38 retornar na hora.
-    Guard("mapa da dungeon na pausa não trocava de andar com o analógico (TopScreen pulava 0x00442F38)",
+    # --- 11/07: Upscaling looked live on deko3d; only the OpenGL backend reads config/upscaler ---
+    Guard("Video > Upscaling: disabled with a note on deko3d (no FSR step there)",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'const bool upscalerApplies = VideoSettings::UpscalerApplies\(Fast::Deko3dRendererSelected\(\)\);\s+'
+          r'ImGui::BeginDisabled\(!upscalerApplies\);\s+if \(ImGui::Combo\("Upscaling".*?ImGui::EndDisabled\(\);\s+'
+          r'if \(!upscalerApplies\) ImGui::TextDisabled\("%s", VideoSettings::kUpscalerDeko3dNote\);',
+          test="oot3d_video_settings_tests (UpscalerApplies)"),
+    # --- 11/06: fastmem phase 1, config/fastmem_window (oot3d_switch_guest_window.h) ---
+    # Absent must stay today's allocation bit for bit; phase 1 must not touch a shard-visible
+    # header (the 256 shards and the PGO profile stay valid).
+    Guard("fastmem window, switch absent: a region is allocated as before unless the window takes it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'const bool windowOwner =\s+GuestWindow::Accepting\(\) &&.*?'
+          r'if \(windowOwner\) GuestWindow::Reserve\(region\.Bytes, config\.BaseAddress, config\.Size\);\s+'
+          r'region\.Bytes\.assign\(config\.Size, 0\);',
+          test="oot3d_switch_guest_window_tests (TestAbsent), sweep of the memory tests with the window off"),
+    Guard("fastmem window, switch absent: a copy assignment copies the regions as before",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(GuestWindow::IsOwner\(this\)\) \{\s+CopyRegionsHome\(mRegions, other\.mRegions\);\s+'
+          r'\} else \{\s+mRegions = other\.mRegions;',
+          test="oot3d_switch_guest_window_tests (TestAbsent, TestRehome)"),
+    Guard("fastmem window: on by default on Switch (the file only turns it off or asks for verify), "
+          "and no process handle (emulator) keeps it off",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp",
+          r'"sdmc:/switch/oot3dre/config/fastmem_window".*?if \(file == nullptr\) \{\s+mode = Mode::On;.*?'
+          r'gProcess = envGetOwnProcessHandle\(\);\s+if \(gProcess == INVALID_HANDLE\) \{'),
+    Guard("fastmem window: a refused slab mapping stops every new placement (today's allocation from then on)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp",
+          r'if \(!PlatformMapSlab\(index\)\) \{.*?gAccepting\.store\(false, std::memory_order_release\);',
+          test="oot3d_switch_guest_window_tests (TestRefusedMapping)"),
+    Guard("fastmem window: newlib's free never gets a window buffer",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'void __wrap__free_r\(struct _reent\* reent, void\* pointer\) \{.*?'
+          r'if \(Oot3dNativeGame::GuestWindow::Contains\(pointer\)\) \{\s+'
+          r'Oot3dNativeGame::GuestWindow::ReleaseAllocation\(pointer\);\s+return;'),
+    # --- 11/06: fastmem phase 2, checked window access (ABI 5, every shard rebuilt) ---
+    # One flag byte per guest page decides whether a typed access completes inline at window
+    # base + address; everything else takes the original slow path (exact faults, observers,
+    # deferred writes, watches, traces). An image outside the window (file absent, emulator,
+    # refused mapping, copies) points at the all-trap table. mWritten is gone from the stores.
+    Guard("fastmem phase 2: a typed load completes inline only where its page's flag allows it, at window base + address",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'if \(value != nullptr && \(address & PageMask\) <= PageSize - sizeof\(T\) &&\s*'
+          r'PageAllows\(address, kGuestPageLoadFast\)\) \[\[likely\]\] \{\s*'
+          r'\*value = LoadGuestValue<T>\(mWindowBase \+ address\);\s*return true;\s*\}\s*'
+          r'return ReadFastSlow<T>\(address, value, faultAddress\);',
+          test="oot3d_switch_guest_window_tests (TestPageFlags), memory_lean_diff/run_store_sequence_diff.sh"),
+    Guard("fastmem phase 2: a typed store completes inline only where its page's flag allows it, then marks its card",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'if \(\(address & PageMask\) <= PageSize - sizeof\(T\) &&\s*'
+          r'PageAllows\(address, kGuestPageStoreFast\)\) \[\[likely\]\] \{\s*'
+          r'StoreGuestValue<T>\(mWindowBase \+ address, value\);\s*MarkCard\(address >> PageShift\);\s*'
+          r'return true;\s*\}\s*return WriteFastSlow<T>\(address, value, faultAddress\);',
+          test="oot3d_switch_guest_window_tests (TestPageFlags), memory_lean_diff/run_store_sequence_diff.sh"),
+    Guard("fastmem phase 2: page flags keep their own alias set (union of an enum class), not uint8_t",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'enum class GuestPageFlags : uint8_t \{\};\s*union GuestPageFlag \{\s*GuestPageFlags Bits;'),
+    Guard("fastmem phase 2: a flag allows an access only when the page entry's own pointer is the page's window address",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'\(entry\.Read == home \? kGuestPageLoadFast : 0U\) \|\s*'
+          r'\(entry\.Write == home \? kGuestPageStoreFast : 0U\)',
+          test="oot3d_switch_guest_window_tests (TestPageFlags, TestConflicts), TRIAEVUM_FASTMEM_WINDOW=verify sweep"),
+    Guard("fastmem phase 2, window inactive: an image outside the window points at the all-trap table",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(!inWindow \|\| !mOwnPageFlags\) \{\s*'
+          r'if \(mPageFlags != sNoFastPages\) mPageFlags = sNoFastPages;',
+          test="oot3d_switch_guest_window_tests (TestAbsent, TestConflicts, TestRefusedMapping), sweep with the window off"),
+    Guard("fastmem phase 2: a store marks its card only when it is not Dirty already (no memory-wide written mark)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'OOT3D_AOT_HOT void MarkCard\(size_t page\) noexcept \{\s*GuestCard& card = mCards\[page\];\s*'
+          r'if \(card\.State != GuestCardState::Dirty\) \[\[unlikely\]\] \{',
+          test="oot3d_switch_guest_window_tests (TestPageFlags), oot3d_native_a32_process_tests (TestMemoryStoreCards)",
+          forbid=r'mWritten'),
+    Guard("fastmem phase 2: the inline paths changed, so the title-module ABI is 5 (rebuild every shard)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'WriteObservationAbiVersion\(\) noexcept \{ return 5U; \}'),
+    Guard("fastmem phase 2: the global exclusive monitor serves the single-core path too (value token, no write-generation token)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'bool NativeA32Memory::LoadExclusive\(uint32_t address, uint8_t size,\s*'
+          r'uint64_t\* value, uint64_t\* token,\s*uint32_t\* faultAddress\) \{\s*'
+          r'if \(token == nullptr \|\| value == nullptr\) \{',
+          test="oot3d_native_a32_second_core_tests (TestMonitorInactive), oot3d_native_a32_process_tests (TestMemoryStoreCards)",
+          forbid=r'if \(!SecondCore::Active\(\)\)|token != WriteGeneration\(\)'),
+    Guard("fastmem phase 2: every guest context switch drops the reservation, every savestate load resets the monitor",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(selectedId != mCurrentThreadId\) \{\s*SecondCore::ClearExclusive\(\);\s*\}.*?'
+          r'SecondCore::ResetExclusiveMonitor\(\);\s*if \(SecondCore::Active\(\) && secondCoreReady\)',
+          test="oot3d_native_a32_second_core_tests (TestMonitorInactive, TestSchedulerExclusion)"),
+    Guard("fastmem phase 2: the fastmem_window log line says whether the game's image takes the window (access=window|slow)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'process\.Memory\(\)\.InGuestWindow\(\) \? " access=window" : " access=slow"'),
+    Guard("fastmem phase 2: the store-sequence diff under qemu has no guarded static (its condition variable aborts there)",
+          "tools/oot3d/native_a32_runtime/memory_lean_diff/store_sequence_side.cpp",
+          r'static bool active = false;\s*if \(!active\) \{\s*SEQ_MONITOR::SetActive\(true\);',
+          test="memory_lean_diff/run_store_sequence_diff.sh (TARGET=switch)",
+          forbid=r'static const bool active = \['),
+    # --- 06/11: second guest core, config/second_core (oot3d_native_a32_second_core.h) ---
+    # With it on, STREX must go through the global exclusive monitor (the write-generation token
+    # fails under a second writer); since fastmem phase 2 the monitor serves single-core too.
+    Guard("second core: STREX is a compare-and-swap under the global exclusive monitor (reservation per host core)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(gExclusiveGranule\[processor\] != granule\) \{.*?ClearExclusiveGranule\(granule\);\s+'
+          r'if \(!AtomicCompareExchangeGuest\(bytes, size, token, value\)\)',
+          test="oot3d_native_a32_second_core_tests (TestMonitorSemantics, TestMonitorTwoThreads)"),
+    Guard("second core: the cooperative scheduler never selects a second-core thread",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'thread\.HostCore == 0U && thread\.Priority < selectedPriority',
+          test="oot3d_native_a32_second_core_tests (TestSchedulerExclusion)"),
+    Guard("second core: only config/second_core starts it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'"sdmc:/switch/oot3dre/config/second_core".*?if \(secondCore\) StartSecondCore\(\);'),
+    Guard("second core: Run() drops the kernel lock only for the dispatch",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(concurrent\) SecondCore::EnterGuest\(\);.*?const SecondCore::KernelRelease release;\s+'
+          r'guestStart = ReadThreadProfileCounter\(\);\s+'
+          r'exit = DispatchGuest\(state, dispatchBudget, false\);\s+'
+          r'guestEnd = ReadThreadProfileCounter\(\);\s+\}\s+'
+          r'ChargeDispatch\(guestStart, guestEnd,\s+concurrent \? ReadThreadProfileCounter\(\) : guestEnd\);\s+'
+          r'if \(concurrent\) SecondCore::LeaveGuest\(\);'),
+    # --- 11/07 (Profile18): the idle second core woke at every game-thread SVC (LeaveGuest
+    # notified the kernel condition), retook the kernel lock the game thread needed next and
+    # handed it back; core1_lock_ms 5 ms/frame, SVC stubs 11-27 us. config/kernel_wake ---
+    Guard("kernel_wake: a guest exit wakes the kernel waiters only while a world stop waits for it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_second_core.h",
+          r'inline void LeaveGuest\(\) \{\s+--gInGuest\[tProcessor\];\s+'
+          r'if \(!gQuietWakes \|\| gStopWaiters != 0U\) NotifyKernel\(\);.*?'
+          r'LockKernel\(\);\s+\+\+gStopWaiters;.*?WaitKernel\(\[\] \{ return !OtherCoresInGuest\(\); \}\);\s+'
+          r'--gStopWaiters;',
+          test="oot3d_native_a32_second_core_tests (TestQuietWakes, every two-core test with it off and on)"),
+    Guard("kernel_wake: only config/kernel_wake (Switch: absent = on) sets the quiet wakes",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'Oot3dNativeGame::SecondCore::gQuietWakes = kernelOptions\.Wake;'),
+    Guard("kernel_svc: a hot SVC's name is written when the history is read, never lost",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'mSnapshot\.push_back\(\(\*candidate\)->Event\);\s+MaterializeSvcEventName\(mSnapshot\.back\(\)\);.*?'
+          r'request=" << std::quoted\(NativeA32CtrSvcEventName\(\*event\)\)',
+          test="oot3d_native_a32_ctr_host_tests (TestFastSvcEquivalence; every test with it off and on)"),
+    # --- 11/08 (Perf19 #6): the game thread's kernel-lock retakes (guest_kernel: lock= of thread 0,
+    # 0.5-1.4 ms per host frame in test.11) tracked the second core's DSP frames (~72 % of
+    # dsp_core1_ms, correlation 0.96), which held the lock through the mix. config/kernel_retake ---
+    # 11/08 (logs21, test.13): dsp_released 0.00 in every window. The game's DSP interrupt event is
+    # sticky (svcCreateEvent reset type 1 at 0x002FA2C4): the wait does not take it, so the old rule
+    # "released only if the interrupt was taken" never held. A game-thread wait listing it now
+    # waits for the mix instead.
+    Guard("kernel_retake: the DSP frame signals first and mixes released unless a game-thread thread woke or waits on it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(!dspHle\.BeginFrame\(memory, frame, &mixError\)\) \{.*?'
+          r'const uint64_t core0Wakes = process\.Core0ThreadWakes\(\);.*?'
+          r'if \(!hostServices\.SignalDspAudioFrame\(\)\) deferredDspAudioFrames = 0U;.*?'
+          r'return hostServices\.SvcWaitsOnDspAudioInterrupt\(immediate, state,.*?'
+          r'process\.RunSecondCoreIdleWorkAfterEffect\(\s+'
+          r'core0Wakes, hostServices\.DspAudioInterruptHasCore0Waiter\(\), waitsOnInterrupt,\s+\[&\] \{\s+'
+          r'dspHle\.MixFrame\(memory, frame, samples\);.*?'
+          r'if \(!dspHle\.EndFrame\(memory, frame, &mixError\)\)',
+          test="oot3d_native_a32_second_core_tests (TestRetakeSchedule with the game's sticky event, "
+               "TestReleasedIdleWorkWaitGate)",
+          forbid=r'DspAudioInterruptPending'),
+    Guard("kernel_retake: released idle work is a kernel section (a world stop waits for it), else held and counted",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'woken \|\| core0Waits\) \{\s+if \(woken\) \{\s+mSecondCoreIdleHeldWoken.*?work\(\);\s+return false;.*?'
+          r'\+\+SecondCore::gInKernel\[1\];\s+Process\.mSecondCoreIdleReleased = true;.*?'
+          r'Process\.mSecondCoreIdleReleased = false;\s+Process\.mReleasedSvcFilter = nullptr;\s+'
+          r'--SecondCore::gInKernel\[1\];\s+SecondCore::NotifyKernel\(\);',
+          test="oot3d_native_a32_second_core_tests (TestReleasedIdleWork)"),
+    Guard("kernel_retake: a game-thread wait on the DSP interrupt starts only after a released mix",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(exit\.kind == oot3d::recomp::a32::ExitKind::Svc\) \{\s+'
+          r'if \(concurrent\) WaitOutReleasedIdleWorkForSvc\(exit\.detail, state\);.*?'
+          r'if \(exit\.kind == oot3d::recomp::a32::ExitKind::Svc\) \{\s+'
+          r'if \(SecondCore::Active\(\)\) WaitOutReleasedIdleWorkForSvc\(exit\.detail, state\);',
+          test="oot3d_native_a32_second_core_tests (TestReleasedIdleWorkWaitGate)"),
+    Guard("kernel_retake: no thread above the main thread's priority is dispatched during a released DSP frame",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(concurrent\) WaitOutReleasedIdleWork\(\);\s+auto& state = CurrentThreadState\(\);',
+          test="oot3d_native_a32_second_core_tests (TestReleasedIdleWork)"),
+    Guard("kernel_retake: only config/kernel_retake (Switch: absent = on) releases the DSP mix",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'dspMixReleasesKernel = kernelOptions\.Retake;'),
+    # --- 11/07 (logs18b): the guest profile's report (walk, sort, SD write) ran on the game
+    # thread every 900 host frames: 0.41-0.47 s stalls, one of 3.36 s tripped the hang watchdog ---
+    Guard("guest profile: the report is sorted and written by its writer thread, not the game thread",
+          "tools/oot3d/native_game_runtime/oot3d_native_guest_profile.cpp",
+          r'if \(QueueReport\(false\)\) \{.*?mCounts\.swap\(mSnapshot\.Counts\);\s+mTicks\.swap\(mSnapshot\.Ticks\);.*?'
+          r'const bool ok = WriteReport\(mSnapshot\);',
+          forbid=r'WriteReport\(hostFrame\)',
+          test="oot3d_native_guest_profile_tests"),
+    Guard("guest_kernel: perf.txt line splitting each guest thread's time (guest, SVC, lock, scheduler)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'FormatNativeA32GuestKernelLine\(process, previousThreads,\s+hostFrames\)',
+          test="oot3d_native_a32_process_tests (TestGuestThreadProfile)"),
+    Guard("second core: the DSP mix updates the shared regions in place only while the sound thread is parked",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(secondCore && runGuest\) \{.*?process\.WaitSecondCoreIdle\(kSecondCoreDspWait\)',
+          test="oot3d_native_a32_second_core_tests (TestEventPingPong, TestSleepTimeout)"),
+    Guard("second core: savestates hold it at a dispatch boundary",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'renderStream\.Drain\(\);.*?const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;.*?'
+          r'renderStream\.Drain\(\);.*?const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;',
+          test="oot3d_native_a32_second_core_tests (TestSavestate)"),
+    # 06/11 (logs13sc): core 0 waited 6-7 ms per frame in the Forest Temple for the sound
+    # thread to park before each DSP frame, and audio got worse; the second core now delivers
+    # the frames itself, only with its threads parked and nothing an interrupt woke still ready.
+    Guard("second core: DSP frames run on the second core only while its threads are parked and no auxiliary work is ready",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'SecondCoreIdleWorkDue\(\) const \{.*?SecondCore::gStopRequests == 0U && !mSecondCoreFault\.has_value\(\) &&\s+'
+          r'!AuxiliaryWorkPending\(\) && mSecondCoreIdleWork\.Pending\(\);.*?'
+          r'thread = SelectSecondCoreThread\(\);\s+idleWork = thread == nullptr && SecondCoreIdleWorkDue\(\);',
+          test="oot3d_native_a32_second_core_tests (TestDspOnSecondCore)"),
+    Guard("second core: with the host audio stream the game thread only adds DSP frames (no pump, no flush wait)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(deferredDspAudioFrames != 0U && !dspOnSecondCore &&.*?'
+          r'if \(deferredDspAudioFrames != 0U && !dspOnSecondCore\) \{.*?'
+          r'if \(dspOnSecondCore && dspAudioFrames != 0U\)\s+Oot3dNativeGame::SecondCore::NotifyKernel\(\);',
+          test="oot3d_native_a32_second_core_tests (TestDspOnSecondCore)"),
+    Guard("second core: the DSP frames go to the second core only with the host audio stream",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
+          r'dspOnSecondCore = hostAudioStream != nullptr;\s+if \(dspOnSecondCore\) \{\s+'
+          r'process\.SetSecondCoreIdleWork\('),
+    Guard("second core: a core-0 thread above the main thread parking wakes the second core's idle work",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'case NativeA32HostAction::Wait:\s+state\.r\[15\] = resumePc;\s+status = NativeA32ThreadStatus::Waiting;\s+'
+          r'NoteCore0ThreadParked\(\);'),
+    # --- 08/11: L3+R3 > Video > Performance mode (config/cpu_performance, gpu_performance,
+    #     memory_performance; off by default) ---
+    # GPU and memory: only the handheld (Normal) configuration, only official IDs, only when asked.
+    Guard("GPU/memory High: only the handheld apm configuration, an official ID from HandheldConfiguration",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'status\.ApmRequested = HandheldConfiguration\(gpu, memory, apm\.Standard\);.*?'
+          r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Normal, status\.ApmRequested\)',
+          test="oot3d_switch_performance_tests (Configurations, RestoreRules)",
+          forbid=r'ApmPerformanceMode_Boost'),
+    Guard("Performance mode: all Standard without a prior High opens no apm session (default unchanged)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'if \(unchanged \|\| \(!gpu && !memory && !apm\.SessionOpen\)\) \{'),
+    Guard("Performance mode: CPU Standard opens no clkrst, installs no hook, keeps the default focus handling",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'if \(choice\.Cpu\) StartCpuKeeper\(state\);.*?'
+          r'if \(!state\.Started\.load\(std::memory_order_acquire\)\) return sample;'),
+    Guard("Performance mode: the three files applied at start and from the menu",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'mPerf = ReadPerformanceChoice\(mConfig\);\s+'
+          r'if \(DerivePerformanceMode\(mPerf\) != PerformanceMode::Off\) mPerfStatus = ApplyPerformance\(mPerf\);.*?'
+          r'Write\("performance", \[config = mConfig, choice = mPerf\] \{ return SavePerformanceChoice\(config, choice\) == nullptr; \}\);\s+'
+          r'mPerfStatus = ApplyPerformance\(mPerf\);',
+          test="oot3d_switch_performance_tests (Files, Mode)"),
+    Guard("CPU High: only 1224 MHz or the earlier rate, never a GPU/memory write through clkrst",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'AccessClock\(ClockModule::Cpu, step\.Hz\)',
+          test="oot3d_switch_performance_tests (KeeperBasics: FakeClock only accepts 1224)",
+          forbid=r'AccessClock\(ClockModule::(?:Gpu|Memory), (?!0U\))'),
+    # SwitchWakerHD #33 (commit 8d9a643e): CPU 1224 through clkrst from the game, sessions kept open,
+    # restore from a focus hook that never ran before AM suspended the game -> Erista no wake from sleep.
+    Guard("SwitchWakerHD #33: every clkrst access opens and closes its session (none kept across a suspension)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'\A(?:(?!ClkrstSession\b).)*ClkrstSession session\{\};(?:(?!ClkrstSession\b).)*\Z'),
+    Guard("SwitchWakerHD #33: AccessClock closes the clkrst session and service after each read/write",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'clkrstOpenSession\(&session, ClkrstModule\(module\), 3\);.*?clkrstCloseSession\(&session\);\s+\}\s+'
+          r'clkrstExit\(\);\s+return access;'),
+    Guard("SwitchWakerHD #33: HOME/sleep reach the hook (NoSuspend while CPU High), which restores the CPU "
+          "rate before letting AM suspend the game",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'noSuspend \? AppletFocusHandlingMode_NoSuspend.*?'
+          r'void EnterBackground\(CpuState& state\) \{.*?'
+          r'Carry\(state, state\.Cpu\.Focus\(false, 0U, NowMs\(\)\), "background", 0U\);.*?'
+          r'appletSetFocusHandlingMode\(AppletFocusHandlingMode_SuspendHomeSleep\);.*?'
+          r'case AppletFocusState_Background:\s+EnterBackground\(state\);',
+          test="oot3d_switch_performance_tests (KeeperBasics: focus lost restores 1020)"),
+    Guard("CPU High: exit (atexit and ExitRequest) puts the earlier rate back",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'case AppletHookType_OnExitRequest:\s+RestoreForExit\("exit_request"\);.*?std::atexit\(RestoreAtExit\);',
+          test="oot3d_switch_performance_tests (KeeperBasics: exit restores once)"),
+    Guard("p6w: the menu and perf.txt read the performance status without waiting on clock IPC",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'PerformanceStatus CurrentPerformanceStatus\(\) \{(?:(?!state\.Mutex|AccessClock).)*?return state\.Published;'),
+    # --- test.15 logs23: TRIAEVUM_PERF_APM effective= was one request behind (read at once) ---
+    Guard("test.15: the apm configuration in effect is read back on the follow-up thread, not at once on the game thread",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'bool ApplyApm\((?:(?!appletGetCurrentPerformanceConfiguration).)*?apm\.Last = status;\s+return true;\s+\}.*?'
+          r'void PollApmReadback\(CpuState& state, uint64_t now\) \{.*?appletGetCurrentPerformanceConfiguration\(&effective\).*?'
+          r'state\.Readback\.Poll\(effective, now\).*?TRIAEVUM_PERF_APM_EFFECTIVE.*?'
+          r'void FollowUpLoop\(CpuState& state\) \{.*?PollApmReadback\(state, now\);.*?'
+          r'state\.Readback\.Start\(status\.ApmRequested, NowMs\(\)\);\s+EnsureFollowUpThread\(state\);',
+          test="oot3d_switch_performance_tests (ApmReadbackSettles)"),
+    # --- 08/11 (test.14 logs22): kernel_fast: and TRIAEVUM_GPU_PERF never reached oot3d_native_game.log ---
+    # stderr is libnx's null device and kernel_fast: was logged before InitContextForDemo made the logger.
+    Guard("test.14: Performance mode lines went to stderr (lost) — they go to the game log",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'void Log\(const char\* format, \.\.\.\) \{.*?WriteGameLog\(line\);',
+          test="oot3d_game_log_tests",
+          forbid=r'fprintf\(stderr|std::cerr|SPDLOG_'),
+    Guard("test.14: kernel_fast: was logged before the logger existed — kept, then written once it exists",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'std::string\("kernel_fast: wake="\).*?#if defined\(__SWITCH__\)\s+//[^\n]*\n\s+'
+          r'Oot3dNativeGame::WriteGameLog\(line\);.*?'
+          r'InitContextForDemo\(hostArgs\);\s+#if defined\(__SWITCH__\)\s+(?://[^\n]*\n\s+)*'
+          r'Oot3dNativeGame::GameLog\(\)\.Attach\(',
+          test="oot3d_game_log_tests (KeptUntilAttached)"),
+    Guard("Performance mode: the exit restore is logged before the host context (and its logger) goes",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'RunOot3dNativeA32Window\(launch\);.*?Oot3dNativeGame::RestorePerformanceForExit\(\);.*?'
+          r'DestroyContextForDemo\(\);'),
+    # --- 07/11: ZCULL on deko3d only with config/deko3d_zcull (decal tiles lost in Aurora's renderer) ---
+    Guard("ZCULL: off unless config/deko3d_zcull exists (decal tiles lost with it on)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'"sdmc:/switch/oot3dre/config/deko3d_zcull", "rb"\)\) \{\s+std::fclose\(file\);\s+mZcull = true;\s+\}.*?'
+          r'if \(!mZcull\) \{\s+queueMaker\.flags \|= DkQueueFlags_DisableZcull;',
+          test="oot3d_deko3d_backend_tests (TestDepthBreakdown: the depth line that measures it)"),
+    # --- 07/11: depth reset as fast clears (config/deko3d_clear_draw), off by default, only where provable ---
+    Guard("clear draw: the depth reset becomes clears only with config/deko3d_clear_draw (off by default)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'const auto action = mClearDraw \? plan\.Action : Deko3d::PicaClearDrawAction::Draw;',
+          test="oot3d_deko3d_clear_draw_tests, test_clear_draw_tev.py"),
+    Guard("clear draw: a constant colour only away from 8-bit rounding boundaries (float32 must agree)",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_clear_draw.h",
+          r'inline constexpr double kPicaTevRoundMargin = 0\.01;.*?'
+          r'if \(std::fabs\(scaled - std::floor\(scaled\) - 0\.5\) < kPicaTevRoundMargin\) \{\s+return false;',
+          test="oot3d_deko3d_clear_draw_tests (TestConstantTevAgainstFloat32), test_clear_draw_tev.py"),
+    Guard("ZCULL: draws whose program writes gl_FragDepth invalidate ZCULL around them (decal tiles)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'const bool zcullGuard =\s+mDevice\.Zcull\(\) && writesFragDepth.*?'
+          r'if \(zcullGuard\) \{\s+mDevice\.InvalidateZcull\(\);\s+\}\s+if \(draw\.Indexed\).*?'
+          r'if \(zcullGuard\) \{\s+mDevice\.InvalidateZcull\(\);'),
+    # --- 07/11: deko3d barriers. Uploads still need the Full barrier (copy engine before 3D sampling). ---
+    Guard("deko3d uploads: a Full barrier with Image|Descriptors invalidation before the next draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'DkBarrier mImageBarrierMode = DkBarrier_Full;\s+'
+          r'uint32_t mImageBarrierFlags = DkInvalidateFlags_Image \| DkInvalidateFlags_Descriptors;'),
+    Guard("deko3d: every queue submit is flushed (postSubmitFlush is what replaces the frame-top barrier)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
+    Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'Evict\(\);\s+const uint64_t evictMicros = micros\(partStart\);\s+BeginScene\(\);\s+'
+          r'partStart = std::chrono::steady_clock::now\(\);\s+UploadReadyReplacements\(\);.*?TrackPackChange\(\);',
+          forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
+    # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
+    # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
+    Guard("deko3d compression: window images compressed only when dkQueuePresentImage decompresses them",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'layoutMaker\.flags = DkImageFlags_UsageRender \| DkImageFlags_UsagePresent;\s+'
+          r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
+    Guard("deko3d compression: scene colour and display images follow config/deko3d_compression",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'DkImageFormat_RGBA8_Unorm, ColorFlags\(\*mDevice\), target\.Extent\.Width.*?'
+          r'DkImageFormat_RGBA8_Unorm, ColorFlags\(\*mDevice\), allocWidth'),
+    # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
+    # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
+    # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.
+    Guard("FPS in L3+R3 > Video applied only after restarting: the menu publishes it, the frame loop applies it at the next frame boundary",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'TakeLiveFrameRateMode\(\s*Oot3dNativeGame::LiveFrameRate\(\), liveFrameRateRevision,.*?'
+          r'launchFrameRateMode = \*live;.*?'
+          r'ResolvePresentationPacingPolicy\(EffectiveFrameRateMode\(\)\)',
+          test="triaevum_presentation_clock_tests (live frame rate choice, no catch-up across the switch)"),
+    Guard("FPS in L3+R3 > Video: the Switch launches native30_interpolated at both rates (30 FPS presents Original30)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'const_cast<char\*>\("--gameplay-timing"\),\s+const_cast<char\*>\("native30_interpolated"\),',
+          forbid=r'"native30_no_interpolation"'),
+    Guard("FPS in L3+R3 > Video: the menu publishes the choice (and still writes config/fps60)",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'if \(changed\) Write\("video", \[settings = mSettings, config = mConfig\] \{ return settings\.Save\(config\)\.empty\(\); \}\);.*?'
+          r'if \(rateChanged\) LiveFrameRate\(\)\.Publish\(mSettings\.Fps60\);'),
+    Guard("FPS switched live: every governor starts over at the new rate (no lock, estimate or interval of the old one)",
+          "tools/oot3d/native_game_runtime/oot3d_native_cadence_governor.h",
+          r'void Configure\(const Fps60ModeConfig &config, double refreshMs\) noexcept \{.*?'
+          r'mHasPresent = false;.*?mOverheadEmaMs = 0\.0;\s+\}',
+          test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart, TestLiveRateSwitchFirstPresents)"),
+    Guard("FPS switched live: the in-between governor forgets the step cost of the old rate",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'mMeasured = \{\};\s+mStepCostMs = 0\.0;',
+          test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart)"),
+    Guard("FPS switched live: the render thread reconfigures pacing, DRS and cadence through one function",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'drsRenderBusyAverageMs = 0\.0;.*?Oot3dNativeGame::ConfigureRatePacing\(rateHz, pacing, interpolationPacing,',
+          test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart)"),
+    Guard("FPS switched live: grass takes the new rate's budgets; its stream memory holds both caps",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'void Deko3dSetGrassFrameRate\(bool fps60\) \{.*?ApplyProfile\(\*state, fps60, state->Distance\);.*?'
+          r'state->SlotInstances = Oot3d::GrassSwitchStreamCapacity\(\);',
+          test="oot3d_grass_switch_tests (FrameRateSwitchesLiveAsAStartWould)"),
+    Guard("config/pacer_vsync (shipped on): the anchored pacer waited one display period whatever the target, so 30 FPS presented every vsync",
+          "tools/oot3d/native_game_runtime/oot3d_native_presentation_pacer.cpp",
+          r'std::max\(periods, 1U\) \*\s+VsyncPeriodsPerPresentation\(mTargetRateHz, vsync\.PeriodNs\);',
+          test="oot3d_frame_spike_tests (TestAnchoredPacerHonoursTargetRate)"),
+    # --- 05/11: optional deko3d lighting, config/lighting (gfx_deko3d_lighting.h) ---
+    Guard("0.1.2-test.2: Scene lights said 'needs the Modern lighting model' under deko3d per-pixel (the model lived outside the graphics settings)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'SetCapability\(Oot3d::GraphicsCapability::NativeSurfaceLighting, surfaceLighting,.*?'
+          r'graphics\.Apply\(Deko3d::WithLightingMode\(graphics\.Snapshot\(\), mode\), false\);.*?'
+          r'Deko3d::LightingModeOf\(rendering\.Value\)',
+          test="oot3d_deko3d_lighting_tests (TestModelCapabilityAndPanel)"),
+    Guard("0.1.2-test.2: Scene lights tab: one activity rule, and controls the Switch renderer cannot draw are marked, not ignored",
+          "tools/oot3d/native_game_runtime/oot3d_scene_environment_panel.cpp",
+          r'SceneEnvironmentActive\(supported, settings, graphics\.NativePresentationOverrideActive\(\)\).*?'
+          r'Unavailable on the Switch renderer: placed lights.*?Unavailable on the Switch renderer: it draws no',
+          test="oot3d_deko3d_lighting_tests (TestControlsReachTheBlock)"),
+    Guard("[decision] deko3d lighting off: native keys and shaders untouched (the variant path only runs with a mode on)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'mCounters\.Programs\.Count\(program\.Pick\);\s*'
+          r'if \(mLightingMode != Deko3d::LightingMode::Off && program\.Vertex != nullptr && program\.Fragment != nullptr\)',
+          test="oot3d_deko3d_lighting_tests (TestOffIsNative)"),
+    Guard("[decision] deko3d lighting: a variant missing from the pack is recorded and the draw keeps both native shaders (never a stall, never a mixed pair)",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_lighting.h",
+          r'const T\* shader = lookup\(ShaderTextKey\(stage, \*variant\).*?'
+          r'if \(variantVertex != nullptr && variantFragment != nullptr\).*?'
+          r'\+\+counters\.DrawsNative;\s*return \{nativeVertex, nativeFragment, false\};',
+          test="oot3d_deko3d_lighting_tests (TestLookupAndFallback)"),
+    Guard("[decision] deko3d per-pixel lighting: upstream's surface block at binding 16 is remapped to fragment slot 5 (deko3d has 0-15)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp",
+          r'layout\(binding=5, std140\) uniform PicaSurfaceLighting \{',
+          test="oot3d_deko3d_lighting_tests (TestBlockLayoutAndBinding)",
+          forbid=r'binding\s*=\s*16'),
+    Guard("deko3d per-pixel lighting: the draw binds the surface block at kSurfaceLightingBinding (5)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'dkCmdBufBindUniformBuffer\(cmd, DkStage_Fragment, Deko3d::kSurfaceLightingBinding, res\.SurfaceLighting,'),
+    # --- 0.1.2-test.7: per-pixel dots, 8x4-pixel (one warp) tiles of wrong lighting on Link and floors ---
+    Guard("per-pixel dots: the interpolants are read once at the top of the per-pixel body, never per use inside the light loops or lane-dependent branches",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp",
+          r'PicaSurfaceFragment pica_surface_fragment\(\) \{.*?fragment\.view = clamp\(pica_view, -finite, finite\);.*?'
+          r'PicaSurfaceFragment pica_surface_inputs = pica_surface_fragment\(\);',
+          test="test_perpixel_lighting.py (test_interpolants_read_once_at_the_top, test_branches_are_uniform)",
+          forbid=r'pica_surface_unit\(pica_view\)|if \(dot\(n, n\) < 0\.5'),
+    # --- 0.1.2-test.8: per-pixel is the GPU limit in Forest Temple room 8 (busy_ms 14.0 at 2.25, 305 render-late frames) ---
+    Guard("per-pixel cost: the rim's view and Fresnel terms are computed once per pixel, not per light; the light loops are written out",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp",
+          r'if \(pica_surface\.rim\.x > 0\.0\) \{\s*fragment\.view_unit = pica_surface_unit\(fragment\.view\);\s*'
+          r'fragment\.rim_fresnel = pica_surface_rim_fresnel\(fragment\.normal, fragment\.view_unit\);',
+          test="test_perpixel_lighting.py (test_valid_inputs_match_test8_exactly)",
+          forbid=r'for \((int|uint) slot = 0u?; .*?slot\)|pica_surface_rim_fresnel\(n, v\) \* back'),
+    Guard("per-pixel cost: the draw uses its block's path variant (environment, baked) when the pack has it, the generic one otherwise",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'Deko3d::BuildPerPixelSurface\(draw, mLightingEnvironment, mLightingView,.*?'
+          r'path = Deko3d::ClassifyPerPixelSurface\(mSurfaceLighting\);.*?'
+          r'ResolveLightingFragment\(Deko3d::LightingMode::PerPixel, fragmentSource,\s*fragmentIdentity, path\)\) \{\s*'
+          r'fragment = special;\s*\} else \{\s*path = Deko3d::PerPixelPath::Generic;',
+          test="test_perpixel_lighting.py (test_path_variants_match_test8_exactly), oot3d_deko3d_lighting_tests (TestPerPixelPaths)"),
+    Guard("per-pixel cost: the pack tool writes every per-pixel path variant of every fragment text",
+          "tools/oot3d/deko3d_lighting_variants.cpp",
+          r'static_cast<size_t>\(Fast::Deko3d::PerPixelPath::Count\).*?LightingFragmentVariant\(mode, text, path\)'),
+    # --- lighting3: Forest Temple room 8, 16.7 ms off / 38.4 ms per-pixel busy_ms (spilling parametric programs) ---
+    Guard("lighting3: the parametric lighting copied its 256-byte program to a local; the loop's dynamic light index put it in scratch (105 GPRs, 4096 B/warp)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_lighting_gen.cpp",
+          r'parametric \? Fast::Renderer3ds::PicaLightingUniformProgramFunctions.*?'
+          r'parametric \? UniformProgramBody\(\)',
+          test="oot3d_native_pica_program_descriptor_tests (TestParametricRegisterPressure)"),
+    Guard("lighting3: the parametric TEV copied its constants and selected sources with switches (97 GPRs unlit)",
+          "runtime/three_ds_recomp/src/fast/renderer3ds/pica_tev_program.cpp",
+          r'vec4 pica_evaluate_tev_uniform\(PicaTevInputs inputs\).*?fragment_uniforms\.tev_constants\[stage\]',
+          test="oot3d_native_pica_program_descriptor_tests (TestParametricRegisterPressure)",
+          forbid=r'case 14u: return inputs\.constants\[stage\];'),
+    Guard("lighting3: the no-LUT lit parametric base (console-recorded 08743ed174a0fce1) is dumped into the pack",
+          "tools/oot3d/deko3d_parametric_glsl_dump.cpp",
+          r'\{true, false, false\}, \{true, true, false\}'),
+    Guard("lighting3: a draw whose base fragment program spills keeps native shading (its variants spill too)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'switch \(Deko3d::RefuseLightingBase\(mLightingMode, program\.Base\)\) \{\s*'
+          r'case Deko3d::LightingBaseRefusal::SpillingBase:\s*\+\+mLightingCounters\.DrawsSpillingBase;',
+          test="oot3d_deko3d_backend_tests (TestFrameBreakdown), oot3d_deko3d_lighting_tests (TestLightingBase)"),
+    # --- logs26 (0.2.0): Phantom Ganon drew 22-28 parametric (uber) draws a frame, 23 per-pixel lit, while ten texts were missing ---
+    Guard("logs26: per-pixel keeps the parametric (uber) fallback native; toon and specialized bases are unchanged",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_lighting.h",
+          r'if \(base == PicaBaseClass::Spilling\) return LightingBaseRefusal::SpillingBase;\s*'
+          r'if \(mode == LightingMode::PerPixel && base == PicaBaseClass::Parametric\) return LightingBaseRefusal::ParametricBase;\s*'
+          r'return LightingBaseRefusal::None;',
+          test="oot3d_deko3d_lighting_tests (TestLightingBase)"),
+    Guard("logs26: the backend counts the parametric refusals and logs them in the lighting line",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'case Deko3d::LightingBaseRefusal::ParametricBase:\s*\+\+mLightingCounters\.DrawsParametricBase;\s*'
+          r'\+\+mLightingCounters\.DrawsIneligible;.*?'
+          r'\(spilling base=%llu parametric base=%llu no depth write=%llu\).*?'
+          r'static_cast<unsigned long long>\(c\.DrawsParametricBase\)',
+          test="oot3d_deko3d_lighting_tests (TestLightingBase)"),
+    Guard("lighting3: per-pixel on every draw that writes depth; the blend flag must not exclude it (logs14: 0 lit draws, 81% blended)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp",
+          r'if \(!PerPixelCostAdmits\(draw\.DepthWriteEnabled\)\) return PerPixelRefusal::NoDepthWrite;',
+          test="oot3d_deko3d_lighting_tests (TestPerPixel)",
+          forbid=r'PerPixelCostAdmits\(draw\.Blend\.Enabled'),
+    Guard("lighting by frame kind: the fps60 in-between frames' per-pixel draws are counted apart from the real ones, through the host-tested decision (0.1.2-test.7 blink)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'auto& kind = mInBetweenSample \? mInBetweenLighting : mRealLighting;.*?'
+          r'Deko3d::AdmitPerPixelDraw\(draw\).*?Deko3d::BuildPerPixelSurface\(draw, mLightingEnvironment, mLightingView,.*?'
+          r'kind\.Light\(mSurfaceLighting\);.*?"lighting in-between \(%s\): %s"',
+          test="oot3d_deko3d_inbetween_lighting_tests"),
+    Guard("lighting by frame kind: deko3d learns the frame kind from the published temporal sample",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'BeginLightingSample\(sample\.Synthetic\);'),
+    Guard("per-pixel blink (test.8): every per-pixel decision of a presented frame feeds the transient watch, "
+          "and a one-frame transient is logged with its device frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'const auto refuse = \[&\]\(Deko3d::PerPixelRefusal refusal\) \{.*?'
+          r'Deko3d::ClassifyLostWorldComposition\(draw, refusal\).*?mLightingWatch\.Refused\(draw, refusal\);.*?'
+          r'mLightingWatch\.Lit\(draw, mSurfaceLighting\);.*?mLightingWatch\.Native\(draw\);.*?'
+          r'void GfxRenderingAPIDeko3d::BeginLightingSample\(bool inBetween\) \{\s+mInBetweenSample = inBetween;.*?'
+          r'mLightingWatch\.Begin\(mDevice\.Frame\(\), inBetween\).*?"lighting transient: %s"',
+          test="oot3d_deko3d_inbetween_lighting_tests (TestLightingTransients)"),
+    Guard("per-pixel blink (test.8): a world model refused as not_scene_world is classified by its composition "
+          "(a list submitted in the HUD phase, a UI span, no span, control flow)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp",
+          r'std::optional<LostWorldComposition> ClassifyLostWorldComposition\(.*?'
+          r'refusal != PerPixelRefusal::NotSceneWorld \|\| hooks\.SurfaceProgram\(\) == nullptr \|\|.*?'
+          r'LostWorldComposition::UiList.*?LostWorldComposition::NoSpan',
+          test="oot3d_deko3d_inbetween_lighting_tests (TestLostWorldComposition)"),
+    Guard("per-pixel blink (test.8): perf.txt reports the composition spans lost per window",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'perf << " composition: spans_consumed=".*?" spans_partial=".*?" spans_overlapping=".*?'
+          r'" spans_unattributed=".*?" spans_evicted=".*?" cmb_invalid="'),
+    Guard("lighting3: logs/deko3d.txt counts each issued draw by base program class (per-frame breakdown)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'mFrameDraws\.Current\.Count\(program\.Base, program\.Lit, draw\.Blend\.Enabled, pixels\);',
+          test="oot3d_deko3d_backend_tests (TestFrameBreakdown)"),
+    # --- 05/11: a guest memory fault in the final battle said only "kind=4 pc=0x004C0A8C" ---
+    # The text parser (TextTokenUtf8_ParseNext) met 7f + a code past its table and copied argument words
+    # over the stack; the log could not tell which thread, which text or which caller.
+    Guard("guest fault: every fault carries the report (thread, registers, backtrace, memory, area)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'NativeA32ProcessRunResult NativeA32Process::Fault\(.*?'
+          r'result\.GuestReport = FormatGuestFaultReport\(mMemory, facts\);',
+          test="oot3d_native_guest_fault_report_tests, oot3d_native_a32_process_tests (TestFallbackBoundary)"),
+    Guard("guest fault: the report and the last perf windows go to the game log before the fatal error",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
+          r'if \(!result\.GuestReport\.empty\(\)\) \{\s+LogFatalErrorForDemo\(\s+'
+          r'\(result\.GuestReport \+ Oot3dNativeGame::GuestFaultPerf\(\)\.Format\(\)\)\.c_str\(\)\);\s+\}\s+'
+          r'throw std::runtime_error\("native A32 process faulted: "'),
+    Guard("guest fault: the perf windows of the report are recorded with the GPU numbers of the dkperf line",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'Oot3dNativeGame::GuestFaultPerf\(\)\.Record\(.*?PerfLineValue\(dkperf, "busy_ms"\)'),
+    Guard("guest fault: the report gives the area as numbers, never the scene's name",
+          "tools/oot3d/native_game_runtime/oot3d_native_guest_fault_report.h",
+          r'"  area: scene=0x%02X room=%d\\n"',
+          forbid=r'FormatNativeArea|NativeSceneStem'),
+    Guard("PT-BR patch: 7f0e/7f0d carry the 5 argument bytes of the game's table (6 put the next 7f in the sound code)",
+          "tools/oot3d/ptbr/msgs.py",
+          r'0x0d:5,0x0e:5,',
+          test="tools/oot3d/ptbr/test_ptbr.py",
+          forbid=r'0x0e:6'),
+    Guard("PT-BR patch: a message the game cannot parse stops the romfs build",
+          "tools/oot3d/ptbr/assemble.py",
+          r'error = grammar_error\(new_payload\).*?raise SystemExit\(f\'\{len\(unparsable\)\} PT-BR messages'),
+    # --- 05/11: PGO collection on the console (oot3d_whole_aot_pgo.cpp, from sa2-nx/nfsmw-nx) ---
+    Guard("PGO generate: value profiling read tpidr_el0 (0 on Horizon) and needs atomics; counters go in a section",
+          "CMake/oot3d/native_runtime.cmake",
+          r'-fprofile-update=single\s+-fno-profile-values\s+-fprofile-info-section=gcov_info\)',
+          test="test_whole_aot_pgo_merge"),
+    Guard("PGO use: counts taken without atomics are not flow-consistent; GCC stops without -fprofile-correction",
+          "CMake/oot3d/native_runtime.cmake",
+          r'-fprofile-partial-training\s+-fprofile-correction\s+-fno-profile-values'),
+    Guard("PGO dumps: a HOME close mid-dump must keep the last complete stream (.tmp, then remove + rename: Horizon cannot rename over a file)",
+          "tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp",
+          r'const std::string temporary = gStream \+ ".tmp";.*?std::remove\(gStream\.c_str\(\)\);\s+'
+          r'ok = std::rename\(temporary\.c_str\(\), gStream\.c_str\(\)\) == 0;',
+          test="test_whole_aot_pgo_merge (SessionStreamsTest)"),
+    Guard("PGO dumps: the focus-loss hook (game thread) only wakes the writer thread, never writes",
+          "tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp",
+          r'void OnAppletHook\(AppletHookType hook, void\*\) \{.*?gDumpRequested = true;\s+\}\s+gWake\.notify_one\(\);\s+\}',
+          forbid=r'void OnAppletHook[^}]*DumpNow'),
+    # --- 05/11: NRO code on 2 MB blocks (oot3d_switch_code_pages.cpp, from sa2-nx) ---
+    # The swap unmaps the code while it runs: it must be the first constructor
+    # (no other code or thread may run meanwhile), every later constructor that
+    # depends on the final mapping runs at 102, and once moved hbloader must
+    # never get control back (its own unmap fails and it aborts).
+    Guard("code pages: the swap must be the first constructor (101), before any other start-up code",
+          "tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp",
+          r'\[\[gnu::constructor\(101\)\]\] void RemapCodeOnBlocks\(\)',
+          test="oot3d_switch_code_pages_tests"),
+    Guard("code pages: the TLS mirror must run after the swap (102, not 101)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp",
+          r'__attribute__\(\(constructor\(102\)\)\) void MirrorMainThreadTlsPointer\(\)',
+          forbid=r'constructor\(10[01]\)'),
+    Guard("code pages: guard_alloc's early start must run after the swap (102, not 101)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'\[\[gnu::constructor\(102\)\]\] void StartEarly\(\)',
+          forbid=r'constructor\(10[01]\)'),
+    Guard("code pages: after the text moved, a return to hbloader aborts (hbl error 24): exit mode 1 for the whole process",
+          "tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp",
+          r'if \(textResult != 0\) \{.*?return Fallback\("the kernel refused the text swap", textResult\);\s+\}'
+          r'(\s+//[^\n]*)*\s+__nx_applet_exit_mode = 1;'),
+    Guard("code pages: the swap runs from a page of its own (the code cannot unmap itself)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp",
+          r'MapCodePage\(process, kStub, sizeof\(kStub\), &stub\).*?reinterpret_cast<SwapFunction>\(stub\.Va\)'),
+    Guard("code pages: config/no_code_hugepages turns it off and the game log says what happened",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'SPDLOG_WARN\("\{\}", Oot3dNativeGame::FormatCodePagesStatus\(',
+          test="oot3d_switch_code_pages_tests (TestFormat)"),
+    # --- 05/11: every whole-AOT indirect call searched 162,757 entries ---
+    # The flat dispatch table (one slot per guest code word, filled once at
+    # static initialization) replaces the page bucket and std::lower_bound;
+    # the indirect profile stays opt-in (config/indirect_profile).
+    Guard("whole-AOT indirect calls must look up the flat dispatch table, not search the entries",
+          "tools/oot3d/native_a32_runtime/whole_aot_cpp.py",
+          r'"    const uint32_t slot = std::rotr\(pc - kDispatchCodeBase, 2\);",.*?'
+          r'"    const uint32_t index = gDispatchSlots\[slot\];",',
+          test="tools/oot3d/native_a32_runtime/test_whole_aot_cpp.py (test_flat_dispatch_table_finds_exactly_the_entries)",
+          forbid=r'kDispatchPageOffsets|"        begin, end, pc,"'),
+    Guard("the indirect call profile must stay opt-in (config/indirect_profile): the dispatcher records only while it is installed",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'exists\("sdmc:/switch/oot3dre/config/indirect_profile", profileError\)\) \{\s+indirectProfile\.emplace\(\);',
+          test="oot3d_native_perf_diagnostics_tests"),
+    # --- GenRound: indirect call census for guarded direct calls (N2) ---
+    # The dispatcher records on the game thread and the second-core thread
+    # without a lock: keys claimed by CAS, counts in single-writer shards.
+    Guard("the indirect call profile is recorded from both guest cores: no plain shared increments",
+          "tools/oot3d/native_game_runtime/oot3d_native_indirect_profile.h",
+          r'void Record\(uint32_t returnPc, uint32_t target\) noexcept \{.*?'
+          r'cell\.compare_exchange_strong\(seen, key,.*?Bump\(shard\.Counts\[slot\], shared\);',
+          test="oot3d_native_perf_diagnostics_tests (TestIndirectProfileConcurrent, also under -fsanitize=thread)",
+          forbid=r'\+\+pair\.Count|\+\+mCalls|\+\+mUsed'),
+    Guard("PGO generate: the session's indirect call profile is installed at start and written beside every stream dump",
+          "tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp",
+          r'#if defined\(OOT3D_WHOLE_AOT_GCOV_GENERATE\) && defined\(__SWITCH__\).*?'
+          r'const std::string temporary = gIndirect \+ ".tmp";.*?std::remove\(gIndirect\.c_str\(\)\);\s+'
+          r'return std::rename\(temporary\.c_str\(\), gIndirect\.c_str\(\)\) == 0.*?'
+          r'void DumpNow\(const char\* why\) \{.*?const uint64_t indirectBytes = DumpIndirect\(\);.*?'
+          r'gIndirect = Oot3dWholeAotPgoIndirectPath\(directory, session\);.*?'
+          r'gOot3dIndirectProfile = gIndirectProfile;.*?#else',
+          test="oot3d_native_perf_diagnostics_tests (TestIndirectCensusText), "
+               "tools/oot3d/native_a32_runtime/test_whole_aot_indirect_census.py",
+          forbid=r'#else.*gOot3dIndirectProfile ='),
+    # VLDM/VSTM/VPUSH/VPOP walked the page table once per word; the span path
+    # walks it once when the whole range lies on one page.
+    Guard("VFP multiple transfers must take the single-page span path before the word-by-word one",
+          "tools/oot3d/native_a32_runtime/whole_aot_cpp.py",
+          r'body\.extend\(_vfp_word_span\(False, first, words, per_word\)\).*?'
+          r'body\.extend\(_vfp_word_span\(True, first, words, per_word\)\).*?'
+          r'body\.extend\(_vfp_word_span\(load, first, words, per_word\)\)',
+          test="tools/oot3d/native_a32_runtime/test_whole_aot_vfp_memory_execution.py"),
+    # Store cards replaced the per-store counter. A u8 card would alias every
+    # host value in GCC (reloads after each guest store); a crossing store
+    # must mark both pages; the write generation must still change on any write.
+    # Since fastmem phase 2: one flat two-bit card per page (bit 0 for the range
+    # certificates, bit 1 for the write generation), each taken atomically.
+    Guard("store cards must keep their own alias set (union of an enum class), not uint8_t",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'enum class GuestCardState : uint8_t \{ Clean = 0, RangeWritten = 1, Written = 2, Dirty = 3 \};\s*'
+          r'union GuestCard \{\s*GuestCardState State;',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards)",
+          forbid=r'\+\+mRangeGeneration;'),
+    Guard("a write must mark the card of every page it covers (crossing stores mark both pages)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'void NoteWrite\(uint32_t address, size_t size\) noexcept \{\s*'
+          r'const size_t last = \(uint64_t\{address\} \+ size - 1U\) >> PageShift;\s*'
+          r'for \(size_t page = address >> PageShift; page <= last; \+\+page\)',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards)"),
+    Guard("WriteGeneration must step whenever a write happened since the last observation (savestates)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(TakeWrittenCards\(\)\) \{\s*__atomic_add_fetch\(&mWriteGeneration, 1U, __ATOMIC_RELAXED\);',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards), oot3d_switch_guest_window_tests (TestPageFlags)"),
+    Guard("the two generations take their own card bit with an atomic and-fetch (a racing store's mark survives)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'__atomic_fetch_and\(&words\[word\], ~written, __ATOMIC_ACQ_REL\).*?'
+          r'TakeCardBit\(mCards\[page\], GuestCardState::RangeWritten\)',
+          test="oot3d_switch_guest_window_tests (TestPageFlags, TestTwoCores)"),
+    # --- 05/11: dsp_mix 0.45 -> 1.3-1.6 ms per frame in battles (logs8, Forest Temple Wolfos) ---
+    # The DSP frame runs on core 0 while the guest waits. The shared regions are
+    # processed in the guest's bytes (no 4 x 32 KiB of copies per frame) with the
+    # same read/write accounting; ADPCM decodes are shared between sources.
+    Guard("dsp_mix: the DSP shared regions were copied in and out whole every frame (128 KiB of memcpy on core 0)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_dsp_hle.cpp",
+          r'memory\.BeginUpdate\(kDspRegion0Address, regionBytes\).*?'
+          r'memory\.EndUpdate\(readAddress, regionBytes\) \|\|\s*!memory\.EndUpdate\(writeAddress, regionBytes\)',
+          test="oot3d_native_audio_dsp_mix_tests",
+          forbid=r'memory\.(Read|Write)\('),
+    Guard("the in-place DSP region update must account its write-back exactly as WriteBytes (store cards, observers)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'bool NativeA32Memory::EndHostUpdate\(.*?RecordTracedWrite\(address, [^;]*;\s*\}\s*'
+          r'NoteWrite\(address, size\);\s*NotifyObservedWrite\(address, size\);',
+          test="oot3d_native_audio_storage_tests"),
+    Guard("shared ADPCM decodes must compare the encoded bytes in full and stay within their memory budget",
+          "tools/oot3d/third_party/azahar_audio/audio_core/adpcm_decode_cache.h",
+          r'std::memcmp\(entry->encoded\.data\(\), encoded, bytes\) == 0.*?while \(samples_ > kBudgetSamples',
+          test="oot3d_native_audio_dsp_mix_tests"),
+    # --- 05/11: console logs could not name the slow area nor the actors' cost ---
+    # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
+    # the actor cost profile adds its block-entry hooks only with
+    # config/actor_profile, so the default game observes nothing new.
+    Guard("hitches.txt and perf.txt lines did not say which area was slow",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'frameArea = Oot3dNativeGame::ReadNativeArea\(processStorage->Memory\(\)\).*?'
+          r'hitchArea = area;.*?perf << \' \' << areaText << " scene_changes="',
+          test="oot3d_native_perf_diagnostics_tests"),
+    Guard("hitches.txt lines must end with the area of their frame",
+          "tools/oot3d/native_game_runtime/oot3d_hitch_recorder.h",
+          r'entry \+= FormatNativeArea\(sample\.Area\);',
+          test="oot3d_hitch_recorder_tests"),
+    Guard("the actor profile's hooks must stay opt-in (config/actor_profile): each hook costs a guest flush and a policy call",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'exists\("sdmc:/switch/oot3dre/config/actor_profile", profileError\)\) \{.*?'
+          r'blockEntryHookOptions\.ActorProfile = true;',
+          test="oot3d_native_perf_diagnostics_tests"),
+    Guard("the actor profile's hooks must stay opt-in: the hook list adds them only under its option",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'if \(options\.ActorProfile\) add\("actor_profile", NativeActorProfile::HookPcs\(\)\);',
+          test="oot3d_native_block_entry_hooks_tests"),
+    Guard("dungeon map: 0x00442F38 must not go back into the block-entry hook list",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'kPauseLowerScreenBlock,\s+kPauseUiNativeUpdateCall,',
+          forbid=r'kPauseDungeonMapCursorInput|0x00442F38'),
+    Guard("perf.txt guest_in_pica was the running total in seconds, not ms per frame",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'guest_in_pica="\s*<< \(\(phaseTiming\.GuestInsidePicaSubmitSeconds - windowGuestInPica\) \* 1000\.0 / hostFrames\)',
+          forbid=r'guest_in_pica=" << phaseTiming\.GuestInsidePicaSubmitSeconds'),
+    Guard("perf.txt threads: printed na for every thread in a session's first window",
+          "tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp",
+          r'record\.HasLastTicks = ReadThreadTicks\(self, &record\.LastTicks\);',
+          forbid=r'gLastSummaryTick'),
+    # --- 04/11: dungeon map (pause, TopScreen) stuck on the floor it opens on ---
+    # 0x00442F38 (PauseDungeonMap_HandleCursorInput) is the floor cursor for
+    # D-pad/analog stick (Up/Down change the floor via SetSelectedFloor); touch is
+    # 0x004435B0. The TopScreen port made 0x00442F38 return immediately.
+    Guard("dungeon map in the pause menu didn't change floors with the analog stick (TopScreen skipped 0x00442F38)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
           r'PauseDungeonMap_HandleCursorInput \(0x00442F38\) is not intercepted',
           forbid=r'kPauseDungeonMapCursorInput|0x00442F38U'),
-    Guard("mapa da dungeon: 0x00442F38 não pode voltar às listas de blocos do TopScreen",
+    Guard("dungeon map: 0x00442F38 must not go back into the TopScreen block lists",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'kPauseLowerScreenBlock,\s+kPauseUiNativeUpdateCall,',
           forbid=r'kPauseDungeonMapCursorInput|0x00442F38'),
-    # --- 04/11: "cannot replace native control config" ao salvar controle no menu de dev ---
-    # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST). Desde 08/11 a
-    # troca é a de ship/config/FileReplace.h (backup + recuperação), testada no host.
-    Guard("salvar controle no menu de dev falhava no Switch (rename por cima de oot3d_controls.json dá EEXIST)",
+    # --- 04/11: "cannot replace native control config" when saving controls in the dev menu ---
+    # The Horizon FS doesn't rename over an existing file (EEXIST). Since 08/11 through
+    # ship/config/FileReplace.h (old file aside, new into place, recovery on load).
+    Guard("saving controls in the dev menu failed on Switch (rename over oot3d_controls.json gives EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_native_control_config.cpp",
-          r'Ship::RestoreInterruptedReplace\(path\);.*?#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
+          r'Ship::RestoreInterruptedReplace\(path\);\s+std::ifstream stream\(path.*?'
+          r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
           "oot3d_config_file_replace_tests (TestControlConfig)",
           forbid=r'std::filesystem::rename\('),
-    Guard("warp de dev não salvava developer-tools.json no Switch (sobrava o .tmp)",
+    Guard("dev warp didn't save developer-tools.json on Switch (the .tmp was left behind)",
           "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
           r'Ship::WriteConfigFileAtomically\(mStorage,',
           forbid=r'std::filesystem::rename\(temporary, mStorage'),
-    Guard("preferências dos savestates não salvavam no Switch (rename por cima dá EEXIST)",
+    Guard("savestate preferences didn't save on Switch (rename over an existing file gives EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_savestate_library.cpp",
           r'Ship::WriteConfigFileAtomically\(mPreferencesPath,',
           forbid=r'std::filesystem::rename\('),
-    Guard("savestate não sobrescrevia o arquivo existente no Switch (EEXIST)",
+    Guard("savestate didn't overwrite the existing file on Switch (EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_savestate.cpp",
           r'#if defined\(__SWITCH__\).*?renameError == std::errc::file_exists.*?std::filesystem::remove\(destination'),
-    # --- 26/10: menu de dev sem botões no deko3d ---
-    Guard("menu de dev (L3+R3) abria no deko3d mas não recebia o controle (sem backend SDL do ImGui)",
+    # --- 11/12 (issue #11 and a later report): reconnecting Joy-Cons from HOME, or removing one, froze the
+    # game and the console. devkitPro's SDL (switch-sdl2 2.28.5, SWITCH_JoystickUpdate) launches the
+    # Controllers applet (hidLaShowControllerSupportForSystem, a blocking library applet launch) from
+    # SDL_PumpEvents on the game thread whenever a pad's device type or style set changes. The link wraps
+    # it so the game never launches the applet; the input poll logs each request. ---
+    Guard("reconnecting or removing a Joy-Con while the game ran froze the game and the console (issue #11): "
+          "the game NRO links with --wrap=hidLaShowControllerSupportForSystem and compiles the wrap",
+          "CMake/oot3d/game.cmake",
+          r'tools/oot3d/native_game_runtime/oot3d_switch_controller_applet\.cpp.*?'
+          r'target_link_options\(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create.*?'
+          r'-Wl,--wrap=hidLaShowControllerSupportForSystem\)'),
+    Guard("reconnecting or removing a Joy-Con while the game ran froze the game and the console (issue #11): "
+          "the wrap has libnx's signature, counts the request and launches no applet",
+          "tools/oot3d/native_game_runtime/oot3d_switch_controller_applet.cpp",
+          r'extern "C" Result __wrap_hidLaShowControllerSupportForSystem\(HidLaControllerSupportResultInfo \*result_info,'
+          r'\s+const HidLaControllerSupportArg \*arg, bool flag\) \{.*?'
+          r'gSkippedControllerApplets\.fetch_add\(1U, std::memory_order_relaxed\);.*?return 0;\s+\}',
+          forbid=r'__real_hidLaShowControllerSupportForSystem|libappletLaunch|appletCreateLibraryApplet'
+                 r'|(?<!__wrap_)hidLaShowControllerSupport\w*\('),
+    Guard("reconnecting or removing a Joy-Con while the game ran froze the game and the console (issue #11): "
+          "each skipped Controllers applet request reaches the game log from the input poll",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'const std::uint32_t skipped = Oot3dNativeGame::TakeSkippedControllerApplets\(\);.*?'
+          r'"controllers: SDL asked for the Controllers applet after a controller change \(skipped: "\s+'
+          r'"launching it from the game loop froze the game, issue #11\).*?'
+          r'Oot3dNativeGame::WriteGameLog\(text\);.*?'
+          r'#if defined\(__SWITCH__\)\s+LogSkippedControllerApplets\(\);'),
+    Guard("gyro aiming was reported not working on a 0.2.3 test build and no log said why: the input "
+          "poll writes the motion line (sensor picked and started, samples, physical aim, the game's gyro)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'switchMotion = PollSwitchMotion\(motionWanted, guestRefreshWillConsume \|\| hostGuiVisible\);.*?'
+          r'if \(auto line = MotionLog\(\)\.Observe\(\s+\{motionWanted, selectedController\.InstanceId, '
+          r'availableMotion, switchMotion\.Running,.*?WriteGameLog\(std::move\(\*line\)\);',
+          "oot3d_switch_motion_tests (TestMotionLog)"),
+    # --- 05/11: "native PICA color capture failed" on every save state with deko3d ---
+    Guard("deko3d: save states failed (\"native PICA color capture failed\"): the backend kept the "
+          "interface defaults, which refuse to capture and restore render targets",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'bool CapturePicaColorTargets\(std::vector<GfxNativePicaRenderTargetColorSnapshot>& snapshots,'
+          r'\s+std::string\* error = nullptr\) override;'
+          r'\s+bool RestorePicaColorTargets\(std::span<const GfxNativePicaRenderTargetColorSnapshot> snapshots,'
+          r'\s+std::string\* error = nullptr\) override;',
+          "oot3d_deko3d_backend_tests (TestSavestateRoundTrip)"),
+    Guard("deko3d save states: depth/stencil read back in a probed Z24S8 layout (an unrecognised one fails the "
+          "save), and Zcull forgets the creation clear after a restore writes the depth",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'dkCmdBufCopyBufferToImage\(cmd, &depth, &target\.DepthView, &rect, 0U\);.*?'
+          r'DkInvalidateFlags_Image \| DkInvalidateFlags_Zcull\);.*?'
+          r'const auto layout = IdentifyDepthStencilWordLayout\(clearedWords\.front\(\)\);',
+          "oot3d_deko3d_backend_tests (TestSavestateDepthWords)"),
+    # --- 07/11: deko3d top screen at one sample per presented line (config/deko3d_line_samples) ---
+    # GpuScout: at 3x the top target was 1440x1280 for 720 lines; the game's second sample per line
+    # was rendered at host resolution and averaged away by the display transfer.
+    Guard("[decision] deko3d top screen: one sample per presented line unless config/deko3d_line_samples is 2",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
+          r'return c == \'2\' \? TopScreenLineSamples::Two : TopScreenLineSamples::One;\s+\}\s+'
+          r'return TopScreenLineSamples::One;',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: the Vulkan policy decides the sampling, X scales by it",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
+          r'return Oot3d::NativeTopScreenStorageSamplingX\(\{width, height\}, PresentedTopScreenExtent\(allocScale\)\);.*?'
+          r'extent\.ScaleX = scale \* samplingX;\s+extent\.Width = ScaledExtent\(width, extent\.ScaleX\);.*?'
+          r'extent\.ScaleX = scale \* alloc\.SamplingX;',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: the game's 2:1 transfer filter becomes a 1:1 copy",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
+          r'const uint32_t collapsedH = drawn\.SamplingX < 1\.0F \? horizontalSamples : 1U;\s+'
+          r'plan\.Linear = horizontalSamples / collapsedH == 2U \|\| verticalSamples == 2U;',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: targets and dynamic resolution keep the allocation's sampling",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'PicaTargetSamplingX\(key\.Width, key\.Height, mScale, mLines\)\);.*?'
+          r'target\.Extent = PlanPicaDynamicExtent\(key\.Width, key\.Height, desired, target\.Alloc\);',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: viewport, scissor and widened X edges use ScaleX",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'PlanPicaViewport\(draw\.ViewportX, draw\.ViewportY, draw\.ViewportWidth, draw\.ViewportHeight, scaleX,\s+scale\);.*?'
+          r'scaleX, scale, target\.Extent\.Width, target\.Extent\.Height\);.*?'
+          r'const auto edgeX = \[&\]\(float native\) \{ return static_cast<int32_t>\(std::lround\(native \* scaleX\)\); \};',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)",
+          forbid=r'native \* scale\)\)'),
+    # --- 05/11: grass on deko3d (config/grass, SWITCH_PORT.md "Grass on deko3d") ---
+    Guard("[decision] grass off without config/grass: nothing is configured, every hook returns at once",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'const std::filesystem::path config = "sdmc:/switch/oot3dre/config";\s+'
+          r'const auto mode = Oot3d::ReadGrassSwitchMode\(config\);\s+'
+          r'if \(mode == Oot3d::GrassSwitchMode::Off\) \{\s+return;\s+\}',
+          test="oot3d_grass_switch_tests (ConfigFileMeaning)"),
+    Guard("[decision] grass: absent config/grass means Off",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'if \(!fileText\.has_value\(\)\) return GrassSwitchMode::Off;',
+          test="oot3d_grass_switch_tests (ConfigFileMeaning)"),
+    Guard("[decision] grass: the deko3d draw hooks run only with config/grass = draw (mGrassDraws)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(mGrassDraws\) \{.*?'
+          r'if \(const auto point = Oot3d::GrassDrawPointOf\(draw\.CompositionDomain, draw\.Composition\.Layer\)\) \{\s+'
+          r'DrawGrass\(key, \*target, \*point\);'),
+    Guard("grass popped (0/600 frames drawn at 60 fps): the draw point came before the ground's sources, at a sky draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'const bool sources = state->SourceFrame == frame && state->SourceNamespace == key\.Namespace &&\s+'
+          r'state->SourceColorAddress == key\.ColorAddress;\s+'
+          r'const auto reach = mGrassPoints\.Reach\(point, &target, frame, sources\);\s+if \(!reach\.Draw\) return;',
+          test="oot3d_grass_switch_tests (Oot3dGrassHandoff, Oot3dGrassDrawPoint)"),
+    # --- 08/11: the grass covered the Lost Woods title card and the minimap (test.16, logs23) ---
+    Guard("grass over the HUD, minimap and title card: a UI or screen draw into the grass target is a draw point",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_draw_point.h",
+          r'return domain == Renderer3ds::PicaCompositionDomain::Ui \|\| domain == Renderer3ds::PicaCompositionDomain::Screen \|\|\s+'
+          r'layer == Renderer3ds::PicaCompositionLayer::Ui;.*?'
+          r'if \(GrassOverlayDraw\(domain, layer\)\) return GrassDrawPoint::Overlay;',
+          test="oot3d_grass_switch_tests (Oot3dGrassDrawPoint)"),
+    Guard("[decision] grass draw points: once per target and frame, after its opaque world and sources; sky and atmosphere are no point",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_draw_point.h",
+          r'if \(mScene == here && mDrawn != here && sources\) \{\s+mDrawn = here;\s+reach\.Draw = true;\s+'
+          r'reach\.AfterOverlay = mOverlay == here;\s+\}\s+'
+          r'if \(point == GrassDrawPoint::Overlay && mScene == here\) mOverlay = here;',
+          test="oot3d_grass_switch_tests (Oot3dGrassDrawPoint)",
+          forbid=r'PicaCompositionLayer::Atmosphere\) return GrassDrawPoint'),
+    Guard("grass popped: a frame must draw the newest finished cull, a late worker never empties it",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
+          r'if \(fit != GrassCullFit::Draw\) return \{std::nullopt, fit\};\s+return \{slots\.Draw\(frame\), fit\};',
+          test="oot3d_grass_switch_tests (Oot3dGrassHandoff)"),
+    Guard("grass GPU: the PICA depth goes into clip z; gl_FragDepth (no early-Z) only for w-buffered draws",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'result\.ExplicitDepth = push\.DepthState\[3\] > 0\.5F && push\.DepthState\[2\] > 0\.5F;'),
+    Guard("[decision] grass: game thread reads colliders only when grass draws (Link and Epona, not every actor)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'\} else if \(Fast::Deko3dGrassWantsColliders\(\)\) \{\s+//[^\n]*\n\s+'
+          r'frameActors = Oot3dNativeGame::CollectNativeGrassColliders\('),
+    Guard("[decision] grass: collider flag is set only for config/grass = draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'gGrassWantsColliders = mode == Oot3d::GrassSwitchMode::Draw;'),
+    Guard("[decision] grass: culling runs on the grass worker thread, never in the render or game thread's draw path",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'GrassCullWorker\(\) : mThread\(\[this\] \{ Run\(\); \}\) \{\}.*?result\.Stats = builder\.Build\(',
+          forbid=r'GrassInstanceStreamBuilder builder;(?![^\n]*\n\s+for \(;;\))'),
+    Guard("grass: a placement cap must thin evenly, not cut the index buffer short (bald patches)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_surface_extractor.cpp",
+          r'if \(kept\[index\]\) anchors\.push_back\(pending\[index\]\.Anchor\);\s+'
+          r'ThinGrassAnchorsToLimit\(anchors, limit\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassThinning)",
+          forbid=r'index < pending\.size\(\) && anchors\.size\(\) < limit'),
+    Guard("grass: the display copy must see the grass draw's Version (else a lean repeat skips the copy)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'DrawGrass\(\*key, \*source, Oot3d::GrassDrawPoint::Transfer\);\s+\}\s+'
+          r'const PicaDisplayCopy copy\{source->Id, source->Version'),
+    Guard("grass of the title demo drawn in the temple entrance: a cull of another scene is dropped, never drawn",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'const auto pick = Oot3d::GrassCullForDrawPoint\(state->Slots, frame, state->Current\.Area, state->Area,.*?'
+          r'if \(pick\.Fit == Oot3d::GrassCullFit::OtherScene\) \{\s+\+\+state->ForeignOtherScene;\s+'
+          r'state->Current = \{\};.*?const auto drawnSlot = pick\.Slot;',
+          test="oot3d_grass_switch_tests (Oot3dGrassAreaChange, Oot3dGrassForeignCull)"),
+    Guard("grass: a scene change drops the drawn cull, the sources' memo and the placements",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(change == Oot3d::GrassAreaChange::Room\) return;\s+\+\+state\.SceneChanges;\s+'
+          r'state\.Slots\.Reset\(\);\s+state\.Current = \{\};\s+state\.Sources = std::make_unique'),
+    # --- 07/11: the grass flickered once entering the Forest Temple (log16, test.8) ---
+    Guard("grass flickered at a room change: a room change within a scene must keep the drawn cull (the old room's ground stays drawn)",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
+          r'return GrassSameScene\(before, now\) \? GrassAreaChange::Room : GrassAreaChange::Scene;',
+          test="oot3d_grass_switch_tests (EnteringTheForestTempleDrawsItsGrassOnceAndKeepsIt)"),
+    Guard("grass flickered: a cull without a shared placement is left out of one frame, never forgotten",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
+          r'if \(fit == GrassCullFit::OtherScene\) slots\.Reset\(\);\s+'
+          r'if \(fit != GrassCullFit::Draw\) return \{std::nullopt, fit\};',
+          test="oot3d_grass_switch_tests (ACullOfAnotherSceneIsNeverDrawnEvenWithASharedPlacement)"),
+    Guard("grass flickered at 60 fps: in-between frames must keep their sources (model-to-clip of the frame, world kept)",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'RefreshGrassMemoDraw\(mesh, draw, state\.Memo\.CameraInverse\(draw\)\) \|\| RefreshMemoClip\(mesh, draw\)',
+          test="oot3d_grass_switch_tests (Oot3dGrassInterpolatedFrames)"),
+    # --- 07/11: less grass around Link than further out in Hyrule Field (test.8 videos) ---
+    Guard("grass thinner around Link: tufts near the camera bring fill tufts (FillDistance / distance in all)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'const float fillReach = std::min\(settings\.FillDistance, fullDistance\);.*?'
+          r'fillReach / \(static_cast<float>\(child\) \+ GrassFillStableValue\(tuft\.StableId, child\)\);',
+          test="oot3d_grass_switch_tests (AroundLinkTheGrassCoversAsMuchAsFurtherOut)"),
+    Guard("grass changed as Link walked: a thinned tuft grows in, never appears at full height",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'const float grown = std::min\(fade, GrassGrowth\(kept, distance, kGrassThinGrowth\)\);',
+          test="oot3d_grass_switch_tests (WalkingChangesNoTuftAtOnce)"),
+    Guard("grass changed as Link walked: single blades turn into tufts over a distance, not at once",
+          "tools/oot3d/deko3d_grass/grass_vsh.glsl",
+          r'float tuftShare = smoothstep\(grass_distance\.z, grass_distance\.w, distanceToEye\);',
+          forbid=r'bool blades = grass_distance\.w > 0\.5;'),
+    # --- grass round 4 (SWITCH_PORT.md "Grass on deko3d", Round 4) ---
+    Guard("grass at 60 fps: an in-between frame publishes no sources; it draws the last real frame's placements with its own camera",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(state->InBetweenFrame == frame\) \{.*?state->InBetween\.InBetweenDraw\(.*?\} else \{\s+try \{\s+'
+          r'if \(Oot3d::PublishPicaGrassSource\(',
+          test="oot3d_grass_switch_tests (AnInBetweenFrameDrawsTheRealFramesPlacementsWithItsCamera)"),
+    Guard("grass at 60 fps: only a real frame's placements become the ones the in-between frames draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(state->InBetweenFrame != frame\) \{.*?state->RealFrame = std::move\(state->Frame\);.*?'
+          r'state->InBetween\.EndRealFrame\(frame\);',
+          test="oot3d_grass_switch_tests (AnInBetweenFrameDrawsTheRealFramesPlacementsWithItsCamera)"),
+    Guard("grass at 60 fps: the deko3d backend learns which frames are in-between from the temporal sample",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'GfxRenderingAPIDeko3d::PublishPicaFrameTemporalSample\(.*?Deko3d::GrassNoteSample\(sample\.Synthetic, mDevice\.Frame\(\)\);'),
+    Guard("Grass distance (L3+R3 > Video) applies at once: the renderer takes a published distance at its next frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'const auto distance = Oot3d::PublishedGrassSwitchDistance\(\); distance && \*distance != state->Distance\) \{\s+'
+          r'ApplyProfile\(\*state, state->Fps60, \*distance\);'),
+    Guard("Grass distance: the menu saves and publishes the choice",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'return Fast::Oot3d::SaveGrassSwitchDistance\(config, distance\);\s+\}\);\s+Fast::Oot3d::PublishGrassSwitchDistance\(mGrassDistance\);'),
+    Guard("Grass distance Whole area: every tuft, capped only by the stream memory (no distance thinning)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'case GrassSwitchDistance::Area:\s+profile\.FullDensityDistance = kGrassWholeAreaDistance;.*?'
+          r'profile\.MaxVisibleInstances = kGrassWholeAreaInstances;',
+          test="oot3d_grass_switch_tests (WholeAreaDrawsEveryTuftAndTheCapKeepsTheNearest)"),
+    # --- test.16: "Near and Whole area look the same for grass": Far removed
+    # (Kokiri Forest: Far 1.43 ms at its 16k cap, the most of the three). ---
+    Guard("Grass distance has two options, Near and Whole area; a saved \"far\" reads as Whole area",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'if \(word == "far"\) \{.*?\*retiredFar = true;\s+return GrassSwitchDistance::Area;',
+          test="oot3d_grass_switch_tests (GrassDistanceConfigFile)",
+          forbid=r'GrassSwitchDistance::Far'),
+    Guard("the Grass distance menu lists Near and Whole area only",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'distances\[\] = \{"Near \(default\)", "Whole area"\};.*?ImGui::Combo\("Grass distance", &distance, distances, 2\)'),
+    # --- 06/11: a save that starts in the Forest Temple drew no grass at its entrance (logs15) ---
+    Guard("grass (deko3d): rule textures' signatures are kept across sessions, so a twin in an area entered first finds its rule",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'SetSignatureStore\(\s+"sdmc:/switch/oot3dre/shadercache/grass_texture_signatures\.bin"\);',
+          test="oot3d_graphics_foundation_tests (Oot3dGrassTextureTwins.RuleSignatureKeptByAnEarlierSessionServesItsTwin)"),
+    Guard("grass (deko3d): a kept signature never skips the session's decode (the placement samples its pixels)",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'texture->Height >= 16 && !sources\.Contains\(\*textureHash\)\) \{.*?'
+          r'sources\.ObserveDecoded\(\*textureHash, texture->Width, texture->Height, rgba\);\s+\}\s+\}'),
+    # --- 07/11: still no grass at the Forest Temple entrance on a first load-in (test.7): the kept
+    # signature needs one visit to Sacred Forest Meadow. The preset's twins are built in. ---
+    Guard("grass: a twin ground takes its rule from the built-in twins while the rule texture's signature is missing",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twins.cpp",
+          r'const auto known = std::equal_range\(\s+GrassKnownTwins\(\)\.begin\(\), GrassKnownTwins\(\)\.end\(\).*?'
+          r'if \(original != nullptr\) \{.*?\} else if \(offline != known\.second\) \{\s+score = offline->Score;',
+          test="oot3d_grass_switch_tests (Oot3dGrassTwinsAtLoad)"),
+    Guard("grass: the built-in twins hold the Forest Temple entrance's ground (rule 10, Sacred Forest Meadow)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twin_table.cpp",
+          r'\{0xd885db352c997c7bULL, 256, 256, 0x7a41e65008d2ea50ULL, 256, 256, GrassSampleChannel::Luminance,',
+          test="oot3d_grass_switch_tests (TheFirstFrameOfAFreshSessionGivesTheForestTempleEntranceItsRule)"),
+    # --- 07/11: grass cost per tuft, config/grass_lod (SWITCH_PORT.md "Grass on deko3d: cost per tuft") ---
+    Guard("[decision] grass_lod: absent config/grass_lod means on; 0/off/false restore test.9's grass",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'bool ParseOnUnlessOff\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'if \(!fileText\.has_value\(\)\) return true;.*?'
+          r'return !\(word == "0" \|\| word == "off" \|\| word == "false"\);.*?'
+          r'bool ParseGrassSwitchLod\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'return ParseOnUnlessOff\(fileText\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassLod.ConfigFileMeaning)"),
+    Guard("[decision] grass_lod off: a cull culled without levels is drawn by grass_vsh.glsl, instanced, as test.9",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'bool lod = drawnSlot && current\.Valid && current\.Lod && !state->LodFailed;.*?'
+          r'const DkShader\* shaders\[\] = \{state->Vertex,.*?'
+          r'dkCmdBufDraw\(cmd, DkPrimitive_Triangles, 3U \* state->Profile\.BladesPerTuft, range\.Count, 0, 0\);'),
+    Guard("grass_lod: no pop at a level change: the cull picks a tuft's draw at its distance less the cull margin",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'if \(own < nearEnd \+ margin\) \{\s+kind = GrassStreamKind::Blades;.*?'
+          r'kind = GrassLodKind\(GrassLodCoordinate\(lod, own - margin, halfWidth\)\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassLod.LevelsRegroupTheSameInstancesByDistance), "
+               "tests/switch/test_grass_lod.py (GrassLodLayout)"),
+    Guard("grass_lod: the tuft pass's writes land before a blade program reads them",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'dkCmdBufDraw\(cmd, DkPrimitive_Points, count, 1, 0, 0\);.*?'
+          r'dkCmdBufBarrier\(cmd, DkBarrier_Primitives, DkInvalidateFlags_Image\);'),
+    Guard("grass_lod: the blade programs read the tuft buffer past the L1 (coherent)",
+          "tools/oot3d/deko3d_grass/grass_lod_vsh.glsl",
+          r'layout\(std430, binding = 0\) coherent readonly buffer GrassTufts'),
+    # --- 07/11: test.9's grass grew around Link; still flickered entering the Forest Temple (logs17) ---
+    Guard("[decision] grass_fill: absent config/grass_fill means fixed; 0/off/false restore test.9's fill",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'bool ParseGrassSwitchFill\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'return ParseOnUnlessOff\(fileText\);.*?'
+          r'bool ReadGrassSwitchFill\(const std::filesystem::path& configDirectory\) \{\s+'
+          r'return ReadOnUnlessOff\(configDirectory / "grass_fill"\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassNearLink.FillConfigFileMeaning)"),
+    Guard("grass grew around Link as he walked (test.9): fixed fill tufts keep their full height and narrow, "
+          "far away, instead of growing; thinned tufts widen in",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'if \(settings\.FillFixed\) \{.*?'
+          r'static_cast<uint8_t>\(std::lround\(fade \* 255\.0F\)\),\s+'
+          r'static_cast<uint8_t>\(std::lround\(widest \* thinGrowth \* 64\.0F\)\), 0U\);.*?'
+          r'const float rank = GrassFixedFillRank\(settings, distance\);.*?'
+          r'GrassFixedFillWidth\(rank, child, GrassFillStableValue\(tuft\.StableId, child\)\)',
+          test="oot3d_grass_switch_tests (Oot3dGrassNearLink.NothingGrowsNearLinkAsHeWalks)"),
+    Guard("grass grew around Link: the fixed fill is constant within kGrassFixedFillNear of the camera",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'const float count = GrassFixedFillCount\(settings\);\s+'
+          r'if \(!\(distance > kGrassFixedFillNear\)\) return count;',
+          test="oot3d_grass_switch_tests (Oot3dGrassNearLink.FixedFillMultiplierAndWidths)"),
+    Guard("[decision] grass_fill is applied live: the renderer takes the menu's published choice at its next frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(const auto fill = Oot3d::PublishedGrassSwitchFill\(\); fill && \*fill != state->Fill\) \{.*?'
+          r'state->Stream\.FillFixed = \*fill;'),
+    Guard("grass flickered in the Forest Temple entrance: new signatures must not erase a twin's rule "
+          "(it stays until the texture is resolved again)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twins.cpp",
+          r'for \(auto& \[key, entry\] : mEntries\) entry\.Stale \|= !entry\.Complete;.*?'
+          r'if \(found != mEntries\.end\(\) && !found->second\.Stale\) return found->second;',
+          test="oot3d_grass_switch_tests (Oot3dGrassTempleEntry.ATextureSeenAfterTheGroundKeepsTheEntrancesRule)",
+          forbid=r'std::erase_if\(mEntries, \[\]\(const auto& entry\) \{ return !entry\.second\.Complete; \}\);'),
+    # --- 06/11: floors shimmered in "square pixels" on deko3d (Forest Temple, since test.3; logs15) ---
+    # The shaders add the PICA LOD bias to their explicit LOD; a sampler bias adds to it again
+    # (-1.7 became -3.4: level 0 far away). SWITCH_PORT.md "Floor shimmer on deko3d".
+    Guard("deko3d: the PICA LOD bias is applied once, in the shader: the sampler keeps lodBias 0",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'dkSamplerDefaults\(&sampler\);.*?sampler\.lodClampMax = .*?dkSamplerDescriptorInitialize\(&descriptor, &sampler\);',
+          test="oot3d_deko3d_backend_tests (TestSamplerAndTextureKeys)",
+          forbid=r'\.lodBias\s*='),
+    Guard("deko3d: the shader is where the PICA LOD bias is applied (the sampler has none)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_shader_gen.cpp",
+          r'return textureLod\(pica_texture0, coord, lod \+ fragment_uniforms\.texture_lod_bias\[0\]\);.*?'
+          r'return textureLod\(pica_texture1, coord, lod \+ fragment_uniforms\.texture_lod_bias\[1\]\);.*?'
+          r'return textureLod\(pica_texture2, coord, lod \+ fragment_uniforms\.texture_lod_bias\[2\]\);'),
+    # --- 26/10: dev menu without buttons on deko3d ---
+    Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'void Fast3dGui::ImGuiWMNewFrame\(\) \{\s+if \(Deko3dRendererSelected\(\)\) \{.*?FeedDeko3dGamepad\(io\);.*?return;'),
-    # --- 24/10: backend deko3d (branch deko3d, docs/DEKO3D_PROGRESSO.md) ---
-    Guard("[decisão] deko3d só com config/renderer = deko3d; sem o arquivo o GL de sempre",
+    # --- 24/10: deko3d backend (branch deko3d, docs/DEKO3D_PROGRESS.md) ---
+    Guard("[decision] deko3d by default (11/11): GL only when config/renderer's first line is gl or opengl, "
+          "and as the fallback when deko3d cannot start (a missing file used to mean GL, slower and without "
+          "the deko3d-only options)",
           "runtime/three_ds_recomp/src/fast/Fast3dWindow.cpp",
           r'if \(Deko3dRendererSelected\(\)\) \{\s+mRenderingApi = CreateDeko3dRenderingApi\(\);\s+\}\s+'
           r'if \(mRenderingApi == nullptr\) \{\s+mRenderingApi = new GfxRenderingAPIOGL\(\);',
           "oot3d_deko3d_backend_tests (TestRendererConfigSelection)"),
-    Guard("[decisão] deko3d: sem janela SDL (o SDL do Switch põe uma superfície EGL na janela nativa do swapchain)",
+    Guard("[decision] deko3d by default: no config/renderer selects deko3d, and only gl/opengl choose GL",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_selection.cpp",
+          r'std::ifstream file\("sdmc:/switch/oot3dre/config/renderer"\);\s+if \(!file\) \{\s+return true;\s+\}',
+          "oot3d_deko3d_backend_tests (TestRendererConfigSelection)"),
+    Guard("[decision] deko3d: no SDL window (Switch SDL puts an EGL surface on the swapchain's native window)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_sdl2.cpp",
           r'if \(Deko3dRendererSelected\(\)\) \{.*?mNoWindow = true;.*?return;'),
-    Guard("deko3d: glFlush (config/gl_pacing_flush) sem contexto GL chamaria ponteiro nulo",
+    Guard("deko3d: glFlush (config/gl_pacing_flush) without a GL context would call a null pointer",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'if \(gFlushBeforePacing && !Fast::Deko3dRendererSelected\(\)\)\s+glFlush\(\);'),
-    Guard("deko3d: contexto GL não é movido para a render thread (não existe)",
+    Guard("deko3d: GL context is not moved to the render thread (it doesn't exist)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'if \(openGlWorker && !Fast::Deko3dRendererSelected\(\)\) \{'),
-    Guard("deko3d: ImGui sem backend SDL/OpenGL3 (ponteiros GL nulos, ImplSDL2 sem janela)",
+    Guard("deko3d: ImGui without SDL/OpenGL3 backend (null GL pointers, ImplSDL2 without a window)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'void Fast3dGui::ImGuiRenderDrawData\(ImDrawData\* data\) \{\s+if \(Deko3dRendererSelected\(\)\) \{\s+return;'
           r'.*?void Fast3dGui::ImGuiWMNewFrame|void Fast3dGui::ImGuiWMNewFrame\(\) \{\s+if \(Deko3dRendererSelected\(\)\)'),
-    Guard("deko3d: profiler GL (config/gpu_timing) chamaria glGenQueries nulo",
+    Guard("deko3d: GL profiler (config/gpu_timing) would call a null glGenQueries",
           "runtime/three_ds_recomp/src/fast/backends/gl_frame_profiler.cpp",
           r'if \(Deko3dRendererSelected\(\)\) return;\s+const auto config = ReadConfig\(\);'),
-    Guard("deko3d: dkCmdBufClear volta à memória do quadro anterior: o slot alimenta o próprio pedaço",
+    Guard("deko3d: dkCmdBufClear goes back to the previous frame's memory: the slot feeds its own slice",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'dkCmdBufClear\(mCmd\);\s+dkCmdBufAddMemory\(mCmd, mCommandMemory, mSlot \* kCommandSliceBytes'),
-    Guard("[decisão] deko3d: draws levam o programa paramétrico (uber) e nada compila na thread de render",
+    Guard("[decision] deko3d: draws use the parametric (uber) program and nothing compiles on the render thread",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
           r'bool UsesAlwaysAvailablePrograms\(\) const override \{\s+return true;'),
-    Guard("deko3d: estágio sem DKSH no pacote é lembrado (sem retraduzir a cada draw)",
+    Guard("deko3d: stage without DKSH in the pack is remembered (no retranslation on every draw)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
           r'return cache\.Get\(identity, \[&\]\(\) -> const DkShader\* \{.*?TranslatePicaShaderToOpenGl43',
           "oot3d_deko3d_backend_tests (TestStageCacheResolvesOnce)"),
-    Guard("deko3d: especializado ausente cai no uber antes de pular o draw",
+    Guard("deko3d: missing specialized program falls back to the uber one before skipping the draw",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
           r'if \(specialized == nullptr\) \{\s+uber = ResolvePicaStage\(Deko3d::ShaderStage::Fragment, draw\.UberFragmentShaderSource',
           "oot3d_deko3d_backend_tests (TestProgramPick)"),
-    Guard("deko3d: textura liberada com o GPU ainda lendo (despejo só depois da espera do fence do slot)",
+    Guard("deko3d: texture freed while the GPU was still reading it (eviction only after waiting for the slot's fence)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
           r'void GfxRenderingAPIDeko3d::EnsureFrame\(\) \{\s+mDevice\.BeginFrame\(\);.*?mResources\.BeginFrame\(mResourcesFrame\);'),
-    Guard("deko3d: textura que não decodifica não é decodificada de novo a cada draw",
+    Guard("deko3d: a texture that fails to decode is not decoded again on every draw",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
           r'did not decode".*?return rememberFallback\(\);'),
-    Guard("deko3d: atributo de vértice ausente lê (0,0,0,1) do buffer constante, como array GL desligado",
+    Guard("deko3d: missing vertex attribute reads (0,0,0,1) from the constant buffer, like a disabled GL array",
           "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_plan.h",
           r'PicaAttributeKind Kind = PicaAttributeKind::Constant;.*?uint8_t Binding = kPicaConstantVertexBinding;',
           "oot3d_deko3d_backend_tests (TestVertexPlan)"),
-    # --- 24/10: deko3d pacote 5 (alvos, estado, draw, transfer, scanout) ---
-    Guard("deko3d: atributo constante (0,0,0,1) nunca era alocado (endereço inválido em todo atributo ausente)",
+    # --- 24/10: deko3d pack 5 (targets, state, draw, transfer, scanout) ---
+    Guard("deko3d: constant attribute (0,0,0,1) was never allocated (invalid address on every missing attribute)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
           r'mConstantGpu = dkMemBlockGetGpuAddr\(mConstant\);'),
-    Guard("deko3d: projeção alargada como no GL (senão o frustum vira 16:9 e o alvo fica 5:3 esticado)",
+    Guard("deko3d: widened projection as in GL (otherwise the frustum becomes 16:9 and the target ends up stretched 5:3)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'GetName\(\)\) == "OpenGL" \|\|\s*std::string_view\(apiPointer->GetName\(\)\) == "deko3d"'),
-    Guard("deko3d: display transfer com barreira antes (fragmentos na memória) e depois (cache de textura) do blit",
+    Guard("deko3d: display transfer with a barrier before (fragments in memory) and after (texture cache) the blit",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'dkCmdBufBarrier\(cmd, DkBarrier_Full, 0\);.*?dkCmdBufBlitImage.*?dkCmdBufBarrier\(cmd, DkBarrier_Full, DkInvalidateFlags_Image\);'),
-    Guard("[decisão] deko3d: sentido de face invertido em relação ao GL (origem em cima, como o Vulkan); config/deko3d_cull_invert desfaz",
+    Guard("[decision] deko3d: face winding inverted relative to GL (origin at the top, like Vulkan); config/deko3d_cull_invert undoes it",
           "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
           r'plan\.FrontCcw = invertWinding \? glCcw : !glCcw;',
           "oot3d_deko3d_backend_tests (TestCullPlan)"),
-    Guard("deko3d: operação lógica PICA tem outra ordem que a do deko3d (Set=4 no PICA, 15 no deko3d)",
+    Guard("deko3d: PICA logic ops are ordered differently from deko3d's (Set=4 on PICA, 15 on deko3d)",
           "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
           r'case L::Set: return 15U;',
           "oot3d_deko3d_backend_tests (TestPipelineEnums)"),
-    Guard("deko3d: scanout inverte v (origem em cima) para a tela não sair de cabeça para baixo",
+    Guard("deko3d: scanout flips v (origin at the top) so the screen doesn't come out upside down",
           "tools/oot3d/deko3d_scanout/scanout_vsh.glsl",
           r'pica_uv = vec2\(position\.x \* 0\.5 \+ 0\.5, 0\.5 - position\.y \* 0\.5\);'),
-    Guard("boot-status ficava em host_frames=1/guest_frames=1 sem cache de geometria (deko3d): parecia guest travado",
+    Guard("boot-status stayed at host_frames=1/guest_frames=1 without geometry cache (deko3d): looked like a hung guest",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'runFrameCount == 1U \|\| gSwitchPicaGeometryCacheObserved \|\|\s*runFrameCount % 600U == 0U'),
-    # --- 08/11: travada de 30-100 ms na thread do jogo a cada 600 quadros (hitches.txt: presents
-    # 600k-3, game_ms bem acima de guest_ms): o heartbeat do boot-status.txt reescrevia o arquivo no SD
-    # dentro do quadro. Vai por uma thread de serviço (config/async_status_writes, 0 = a escrita aqui).
-    Guard("heartbeat do boot-status: postado à thread de serviço, não escrito na thread do jogo (chave ligada)",
+    # --- 11/08: a 30-100 ms game-thread stall every 600 frames since test.11 (hitches.txt presents
+    # 600k-3, game_ms far above guest_ms): the boot-status.txt heartbeat rewrote the SD file inside the
+    # frame. It goes through a service thread (config/async_status_writes, 0 = the old write here).
+    Guard("boot-status heartbeat: posted to the service thread, not written on the game thread (switch on)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'runFrameCount % 600U == 0U\) \{.*?if \(asyncStatusWrites\) \{\s+'
           r'PostSwitchBootStage\("runtime_running"\);\s+\} else \{\s+WriteSwitchBootStage\("runtime_running"\);',
           test="oot3d_native_status_file_tests (TestPostNeverWaits)"),
-    Guard("boot-status: config/async_status_writes fica ligada quando o arquivo não existe",
+    Guard("boot-status: config/async_status_writes is on when the file is absent",
           "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
           r'"sdmc:/switch/oot3dre/config/async_status_writes"\);\s+if \(!input\) return true;',
           test="oot3d_native_status_file_tests (TestSwitch)"),
-    Guard("boot-status: toda escrita passa pelo escritor único, então um heartbeat na fila nunca "
-          "sobrescreve uma etapa do boot nem completed/failed",
+    Guard("boot-status: every write goes through the one writer, so a queued heartbeat never overwrites "
+          "a boot stage or completed/failed",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
           r'void WriteSwitchBootStage\(const char\* stage\) \{\s+'
           r'\(void\)Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(FormatSwitchBootStage\(stage\)\);',
           test="oot3d_native_status_file_tests (TestWriteNowWins)",
           forbid=r'std::ofstream stream\("sdmc:/switch/oot3dre/boot-status\.txt"'),
-    Guard("boot-status: completed/failed passam pelo mesmo escritor do heartbeat",
+    Guard("boot-status: completed/failed go through the same writer as the heartbeat",
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
           r'void WriteSwitchBootStatus\(.*?Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(text\);',
           forbid=r'std::ofstream stream\(kSwitchBootStatusPath'),
-    Guard("escritor do boot-status: o texto só sai da fila com o lock do arquivo (um WriteNow posterior sempre vence)",
+    Guard("boot-status writer: the text is taken only under the file lock (a later WriteNow always wins)",
           "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
           r'std::lock_guard file\(mFileMutex\);\s+std::optional<std::string> text;\s+\{\s+'
           r'std::lock_guard again\(mMutex\);\s+text\.swap\(mPending\);',
           test="oot3d_native_status_file_tests (TestWriteNowWins)"),
-    Guard("deko3d.txt não dizia de qual NRO vinha nem se o PICA chegava ao backend (log do p5 parecia o do p3)",
+    Guard("deko3d.txt didn't say which NRO it came from or whether PICA reached the backend (p5 log looked like p3's)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'pica: first draw.*?pica: first %s.*?pica: first render-target clear.*?pica: first memory fill',
           "oot3d_deko3d_backend_tests (TestLogSchedule)"),
-    Guard("deko3d p5/p5b: crash (Data Abort) no 1º draw — views do alvo apontavam para o DkImage da cópia local na pilha",
+    Guard("deko3d p5/p5b: crash (Data Abort) on the 1st draw — target views pointed to the DkImage of the local copy on the stack",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
           r'auto& stored = mTargets\.emplace\(key, target\)\.first->second;.*?'
           r'dkImageViewDefaults\(&stored\.ColorView, &stored\.Color\);\s+'
           r'dkImageViewDefaults\(&stored\.DepthView, &stored\.DepthStencil\);',
           forbid=r'dkImageViewDefaults\(&target\.(ColorView|DepthView)'),
-    Guard("deko3d p5c: jogo fechava ao entrar no gameplay ('renderer does not support the native UI sampler contract')",
+    Guard("deko3d p5c: game closed when entering gameplay ('renderer does not support the native UI sampler contract')",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_ui.cpp",
           r'bool GfxRenderingAPIDeko3d::SetNativeSamplerParameters\(int sampler, const GfxNativeSamplerState& state\) \{'
           r'.*?found->second\.Sampler = UiSamplerKey\(state\);\s+\}\s+return true;',
           "oot3d_deko3d_backend_tests (TestUiPlan)"),
-    Guard("deko3d: sem ImGui na janela não havia medidor de FPS (config/fps_counter) — cópia desenhada na thread de render",
+    Guard("deko3d: without ImGui on the window there was no FPS meter (config/fps_counter) — copy drawn on the render thread",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'if \(Deko3dRendererSelected\(\)\) \{.*?mRendererRouting\.Deferred\(\s*'
           r'\[copy = CloneImGuiDrawData\(data\)\] \{ Deko3dRenderImGuiDrawData\(copy\.get\(\)\); \}\);',
           forbid=r'ImGui is not drawn on deko3d yet'),
-    Guard("deko3d p6: UI de cabeça para baixo e cena girada 180° (NDC -1 na última linha); céu sumia e a cena arrastava",
+    Guard("deko3d p6: UI upside down and scene rotated 180° (NDC -1 on the last row); sky vanished and the scene smeared",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'ApplyDkViewport\(cmd, static_cast<float>\(viewport\.X\).*?'
           r'ApplyDkViewport\(cmd, static_cast<float>\(placement\.Viewport\.X\)',
           "oot3d_deko3d_backend_tests (TestUiPlan: ClipYSwizzleNegates)",
           forbid=r'const DkViewport \w+ = \{'),
-    Guard("deko3d p6b: tela preta — viewport de altura negativa vira retângulo de recorte inválido no deko3d 0.5.0",
+    Guard("deko3d p6b: black screen — negative-height viewport becomes an invalid scissor rectangle in deko3d 0.5.0",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
           r'void ApplyDkViewport\(.*?dkCmdBufSetViewports\(cmd, 0, &viewport, 1\);.*?DkSwizzle_NegativeY.*?'
           r'dkCmdBufSetViewportSwizzles\(cmd, 0, &swizzle, 1\);',
           forbid=r'FlipViewportRows|\{x, y \+ height'),
-    Guard("deko3d p6f: GPU rejeitava a lista ao sair da casa do Link — shaders com 4 KiB de scratch, fila com 2 KiB",
+    Guard("deko3d p6f: GPU rejected the command list when leaving Link's house — shaders with 4 KiB of scratch, queue with 2 KiB",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'queueMaker\.perWarpScratchMemorySize = kPerWarpScratchBytes;',
           "oot3d_deko3d_backend_tests (TestDkshScratch)"),
-    Guard("deko3d p6k: crash ao sair da casa do Link — BindVtxBuffers do deko3d escreve além do bloco de comandos",
+    Guard("deko3d p6k: crash when leaving Link's house — deko3d's BindVtxBuffers writes past the command block",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'slot\.CommandUsed \+ want \+ kCommandGuardBytes <= kCommandSliceBytes\).*?'
           r'slot\.CommandUsed \+= want \+ kCommandGuardBytes;.*?size - kCommandGuardBytes\);.*?'
           r'slot\.CommandUsed = kCommandChunkBytes \+ kCommandGuardBytes;',
           "oot3d_deko3d_backend_tests (TestCommandGuard)"),
-    Guard("deko3d p6f: shader com mais scratch que a fila é recusado, não derruba a GPU",
+    Guard("deko3d p6f: a shader with more scratch than the queue is rejected, it doesn't bring down the GPU",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'DkshPerWarpScratchBytes\(dksh\);\s+if \(!scratch\.has_value\(\) \|\| \*scratch > kPerWarpScratchBytes\)'),
-    Guard("deko3d p6m: GPU ms incluía a espera do acquire (14,5 ms × 8,5 do GL) — carimbos em volta do acquire",
+    Guard("deko3d p6m: GPU ms included the acquire wait (14.5 ms × 8.5 on GL) — timestamps around the acquire",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'kTimestampSlotBytes \+ kTimestampBytes\);\s+\}\s+Submit\(\);.*?'
           r'dkQueueAcquireImage\(mQueue, mSwapchain\);.*?TimestampPipelineTop.*?2U \* kTimestampBytes\);'),
-    Guard("deko3d p6m: governador e DRS sem tempo de GPU no deko3d (só CPU) — Deko3dTagFrame/TakeGpuFrame",
+    Guard("deko3d p6m: governor and DRS without GPU time on deko3d (CPU only) — Deko3dTagFrame/TakeGpuFrame",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'Fast::Deko3dTagFrame\(kind, costCpuMs\);.*?timer\.Poll\(onGpuResult\);.*?Fast::Deko3dTakeGpuFrame\(frame\)'),
-    Guard("deko3d p6m: DRS — imagem de exibição na escala da alocação, conteúdo na escala desenhada (sem realocar)",
+    Guard("deko3d p6m: DRS — display image at the allocation scale, content at the drawn scale (no reallocation)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
-          r'source->Extent\.Height, source->Alloc\.Scale,\s+source->Alloc\.ScaleY\);',
-          "oot3d_deko3d_backend_tests (DRS: conteúdo menor que a alocação)"),
-    Guard("deko3d p6p: present no fio próprio sem esperar o anterior → nwindow perde o slot atual (dequeue antes do queue)",
+          r'PlanPicaTransfer\(transfer, key->Width, key->Height, source->Extent, source->Alloc\);',
+          "oot3d_deko3d_backend_tests (DRS: content smaller than the allocation)"),
+    Guard("deko3d p6p: present on its own thread without waiting for the previous one → nwindow loses the current slot (dequeue before queue)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'WaitPresent\(\);(?:(?!dkQueueAcquireImage|QueuePresent).){0,800}?'
           r'mWindowSlot = dkQueueAcquireImage\(mQueue, mSwapchain\);'),
-    Guard("deko3d p6p: janela comprimida com present no fio próprio (só dkQueuePresentImage descomprime)",
+    Guard("deko3d p6p: compressed window with present on its own thread (only dkQueuePresentImage decompresses)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
-    Guard("p6w: IPC do sys-clk na thread do jogo travou 4,4 s — SwitchClockPerfSummary só lê o cache",
+    Guard("p6w: sys-clk IPC on the game thread hung for 4.4 s — SwitchClockPerfSummary only reads the cache",
           "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
           r'std::string SwitchClockPerfSummary\(\) \{(?:(?!serviceDispatch|ReadClocks\(\)).)*?return text \+'),
-    Guard("p6x: std::thread::detach() lança 'Function not implemented' no Switch (crash no primeiro perf)",
+    Guard("p6x: std::thread::detach() throws 'Function not implemented' on Switch (crash on the first perf)",
           "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
           r'\A(?:(?!\.detach\(\)).)*\Z'),
-    Guard("p6x: std::thread::detach() lança no Switch — gravação de áudio de depuração",
+    Guard("p6w: sys-clk IPC on the game thread hung for 4.4 s — the overlay's SwitchClockLatest only reads the cache",
+          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
+          r'SwitchClockReading SwitchClockLatest\(\) \{'
+          r'(?:(?!serviceDispatch|ReadClocks\(\)|appletGetCurrentPerformanceConfiguration).)*?return reading;'),
+    Guard("SwitchWakerHD #33: clkrst in the app froze the console on wake from sleep — the clock reader opens no "
+          "clkrst/pcv itself (only oot3d_switch_performance.cpp, with CPU High)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
+          r'appletGetCurrentPerformanceConfiguration\(',
+          forbid=r'\b(?:clkrst|pcv)[A-Z]\w*\('),
+    Guard("p6x: std::thread::detach() throws on Switch — debug audio recording",
           "runtime/three_ds_recomp/src/ship/audio/SDLAudioPlayer.cpp",
           r'\A(?:(?!\.detach\(\)).)*\Z'),
-    Guard("deko3d p6w: mailbox — o render não pode reusar a imagem que espera cópia ou está sendo copiada",
+    Guard("deko3d p6w: mailbox — the renderer must not reuse the image that is waiting to be copied or being copied",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'while \(image == mMailboxPending \|\| image == mMailboxCopying\)'),
-    Guard("deko3d p6w: mailbox — dequeue e queue da janela só na thread de present (nwindow empresta 1 imagem por vez)",
+    Guard("deko3d p6w: mailbox — window dequeue and queue only on the present thread (nwindow lends 1 image at a time)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'void Device::MailboxLoop\(\).*?dkSwapchainAcquireImage\(mSwapchain, &slot, &dequeued\);'
           r'.*?dkQueueWaitFence\(mPresentQueue, &dequeued\);.*?dkQueueWaitFence\(mPresentQueue, &drawn\);'
           r'.*?dkQueuePresentImage\(mPresentQueue, mSwapchain, slot\);'),
-    Guard("deko3d p6w: mailbox — a GPU do render espera a cópia anterior sair da imagem antes de desenhar",
+    Guard("deko3d p6w: mailbox — the render GPU waits for the previous copy to leave the image before drawing",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'if \(wait\) \{\s+dkQueueWaitFence\(mQueue, &copied\);'),
-    Guard("deko3d p6q: deko3d_swapchain_images fora de 2-4 estouraria os arrays de imagens da janela",
+    Guard("deko3d p6q: deko3d_swapchain_images outside 2-4 would overflow the window image arrays",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'count >= 2U && count <= kMaxSwapchainImages\)'),
-    # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
-    Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
-          "docs/GUIA_PORT_3DS_SWITCH.md",
-          r'resolveria \*\*3 de 95\*\* picos de guest — \*\*descartado\*\*'),
-    Guard("spikes.txt acumula sessões: análise de picos só da última (tour20 tinha 428 linhas do tour19)",
+    # --- 24/10: spikes outside loading (worktree picos-logica) ---
+    Guard("[decision] sound/DSP on another core discarded: would fix 3 of 95 guest spikes (tour20+22)",
+          "docs/PORTING_GUIDE_3DS_SWITCH.md",
+          r'would solve \*\*3 of 95\*\* guest spikes — \*\*discarded\*\*'),
+    Guard("spikes.txt accumulates sessions: spike analysis only of the last one (tour20 had 428 lines from tour19)",
           "tools/oot3d/spike_report.py",
           r'if line\.startswith\("session_start"\):\s+rows = \[\]',
-          "test_perf_tools.py (picos: só a última sessão)"),
-    Guard("[decisão] early_frame_slot é opt-in (arquivo; conteúdo 0 desliga)",
+          "test_perf_tools.py (spikes: only the last session)"),
+    Guard("[decision] early_frame_slot is opt-in (file; content 0 turns it off)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r"earlyFrameSlot = value\.empty\(\) \|\| value\[0\] != '0';"),
-    Guard("early_frame_slot: slot devolvido quando o pacer começa a esperar (anúncio do prazo)",
+    Guard("early_frame_slot: slot returned when the pacer starts waiting (deadline announcement)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'PublishPresentationDeadline\(slot\.Serial, deadline\);\s+slot\.Session->renderStream\.ReleaseFrameSlot\(\);',
           "oot3d_native_render_command_stream_tests (TestEarlyFrameSlotRelease), oot3d_frame_spike_tests"),
-    Guard("[decisão] early_frame_slot sem relógio pelo prazo do pacer piora imagens/s (refresh 0/2 alternado)",
+    Guard("[decision] early_frame_slot without a clock driven by the pacer deadline worsens images/s (alternating refresh 0/2)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'PublishedPresentationDeadline\(presentationFrameCount - 2U\)',
           "oot3d_native_cadence_governor_tests (TestEarlyFrameSlotAbsorbsLongSteps)"),
-    Guard("[decisão] frames_in_flight=2 segue ignorado (heap corrompido em 21 s, tour3b)",
+    Guard("[decision] frames_in_flight=2 remains ignored (heap corrupted in 21 s, tour3b)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
-          r'frames_in_flight ignorado.*?SetMaxFramesInFlight\(1U\);'),
-    Guard("Pacer anuncia o prazo também atrasado/desligado (senão o slot só volta depois do swap)",
+          r'frames_in_flight ignored.*?SetMaxFramesInFlight\(1U\);'),
+    Guard("Pacer announces the deadline also when late/disabled (otherwise the slot only comes back after the swap)",
           "tools/oot3d/native_game_runtime/oot3d_native_presentation_pacer.cpp",
           r'if \(!mEnabled\) \{\s+announce\(std::chrono::steady_clock::now\(\)\);',
           "oot3d_frame_spike_tests (TestPacerAnnouncesDeadlineBeforeWait)"),
-    Guard("[decisão] varredura do heap com gpu_timing = pico de 16-21 ms a cada 20 janelas (artefato, documentado)",
-          "docs/GUIA_PORT_3DS_SWITCH.md",
-          r'varredura do heap \(a cada 20 janelas\) custa 16-21 ms'),
-    # --- 24/10: "piscada" de textura/objeto ao girar a câmera rápido (só com fps60) ---
-    Guard("Piscada ao girar a câmera (fps60): quadro de passo (alpha 0) desenhava o conjunto de draws do quadro novo",
+    Guard("[decision] heap scan with gpu_timing = 16-21 ms spike every 20 windows (artifact, documented)",
+          "docs/PORTING_GUIDE_3DS_SWITCH.md",
+          r'heap scan \(every 20 windows\) costs 16-21 ms'),
+    # --- 24/10: texture/object "flicker" when turning the camera fast (only with fps60) ---
+    Guard("Flicker when turning the camera (fps60): step frame (alpha 0) drew the draw set of the new frame",
           "tools/oot3d/native_game_runtime/oot3d_native_pica_visual_frame.cpp",
           r'if \(mImpl->Options\.ExactStep && alpha <= 0\.0F\) \{.*?return ViewOot3dPicaVisualFrame\(previous, output\);',
           test="oot3d_native_pica_visual_cull_tests"),
-    Guard("Piscada ao girar a câmera (fps60): intermediário sem os draws que o jogo cortou / com os novos na câmera errada",
+    Guard("Flicker when turning the camera (fps60): intermediate frame without the draws the game culled / with the new ones in the wrong camera",
           "tools/oot3d/native_game_runtime/oot3d_native_pica_visual_frame.cpp",
           r'ApplyVisualUnmatchedCarry\(previous, current, mImpl->Carry, alpha, output\);',
           test="oot3d_native_pica_visual_cull_tests"),
-    Guard("Correção da piscada ligada por padrão (config/interp_exact_step e interp_carry_unmatched = 0 desligam)",
+    Guard("Flicker fix on by default (config/interp_exact_step and interp_carry_unmatched = 0 turn it off)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'transitionOptions\.ExactStep = true;\s*transitionOptions\.CarryUnmatched = true;.*?preparedVisualTransition\.SetOptions'),
-    Guard("[decisão] piscada não é o DRS: o fill de profundidade limpa o anexo inteiro (sem scissor) e a escala só muda 1x por FrameSerial",
+    Guard("[decision] flicker is not DRS: the depth fill clears the whole attachment (no scissor) and the scale only changes 1x per FrameSerial",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'glBindFramebuffer\(GL_FRAMEBUFFER, target\.Framebuffer\);\s*glDisable\(GL_SCISSOR_TEST\);\s*GLbitfield mask = 0U;'),
-    Guard("[decisão] piscada não é o cache de texturas: chave por conteúdo (hash), entrada descartada é decodificada de novo dos bytes do plano",
+    Guard("[decision] flicker is not the texture cache: key by content (hash), an evicted entry is decoded again from the plan's bytes",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'struct PicaGlTextureKey \{\s*uint64_t ContentHash = 0U;'),
-    Guard("[decisão] piscada não é o hold: intermediário descartado reapresenta o último quadro apresentado inteiro",
+    Guard("[decision] flicker is not the hold: a discarded intermediate re-presents the whole last presented frame",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'if \(present\) \{\s*capturedTemporalSample = temporalSample;\s*lastPresentedVisual\.emplace\(sample\.TopTransfer, renderTargetNamespace\);'),
-    # --- 23/10: decisões medidas no console (não refazer) e bugs de análise ---
-    Guard("[decisão] pacer_vsync só com o arquivo config/pacer_vsync (tour22: refresh perdido 3,7→4,1, interp 75→69)",
+    # --- 23/10: decisions measured on the console (don't redo) and analysis bugs ---
+    Guard("[decision] pacer_vsync only with the config/pacer_vsync file (tour22: missed refresh 3.7→4.1, interp 75→69)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'pacerVsyncConfigured = pacerVsyncFile\.good\(\);'),
-    Guard("[decisão] ETC2 desligado sem config/gl_etc2=1 (nvc0/Mesa 20.1 sem ETC2 no GM20B: decodifica na CPU)",
+    Guard("[decision] ETC2 off without config/gl_etc2=1 (nvc0/Mesa 20.1 has no ETC2 on GM20B: decodes on the CPU)",
           "runtime/three_ds_recomp/include/fast/oot3d/pica_etc1_transcode.h",
           r'config/gl_etc2.*?return false;\s*\}\s*return !text\.empty\(\) && text\[0\] == \'1\';'),
-    Guard("[decisão] governador conta a espera do acquire (pgo5j sem ela: 58,52 fps, otimista demais)",
+    Guard("[decision] governor counts the acquire wait (pgo5j without it: 58.52 fps, too optimistic)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'bool gCountRenderWait = true;'),
-    Guard("[decisão] junção de draws do aurora/Dusklight descartada (~1% dos draws juntáveis; a medição inflava o render 3-4 ms)",
+    Guard("[decision] aurora/Dusklight draw merging discarded (~1% of draws mergeable; the measurement inflated render by 3-4 ms)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'kGlCompressedRgb8Etc2', forbid=r'step_mergeable|merge_stats'),
-    Guard("[decisão] registro da junção de draws descartada no guia",
-          "docs/GUIA_PORT_3DS_SWITCH.md",
-          r'Junção de draws \(técnica do aurora/Dusklight\): \*\*medida e descartada'),
-    Guard("DRS decidia e nunca aplicava (pgo5n, drs_applied=0): aplica também no primeiro draw do quadro",
+    Guard("[decision] record of the discarded draw merging in the guide",
+          "docs/PORTING_GUIDE_3DS_SWITCH.md",
+          r'Draw merging \(aurora/Dusklight technique\): \*\*measured and discarded'),
+    Guard("DRS decided but never applied (pgo5n, drs_applied=0): also applies at the frame's first draw",
           "runtime/three_ds_recomp/include/fast/backends/gl_pica_dynamic_scale.h",
           r'drs_applied stayed 0.*?first draw'),
-    Guard("Evento de vsync falha com 0x1272 (vi desc 9): relógio cai na reserva do acquire",
+    Guard("Vsync event fails with 0x1272 (vi desc 9): clock falls back to the acquire",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'!vsyncStarted && vsyncClock\.StartAcquireFallback\(\)', test="oot3d_frame_spike_tests"),
-    Guard("perf.txt acumula execuções: relatório por área usa só a última sessão",
+    Guard("perf.txt accumulates runs: per-area report uses only the last session",
           "tools/oot3d/lab_tour_report.py",
           r'if h < prev: wins = \[\]'),
-    Guard("lab_tour_report quebrava com acks sem quadro",
+    Guard("lab_tour_report broke on acks without a frame",
           "tools/oot3d/lab_tour_report.py",
           r'if "frame" in a'),
-    Guard("Médias de perf.txt misturando sessões (tour22 contado com o tour21: 48 em vez de 4,1)",
+    Guard("perf.txt averages mixing sessions (tour22 counted with tour21: 48 instead of 4.1)",
           "tools/oot3d/perf_window_summary.py",
           r'if previous is not None and frames < previous:\s*windows = \[\]',
           test="tests/switch/test_perf_tools.py"),
-    Guard("Perfil de picos saturado lido como perfil de picos (tour21: 97% dos quadros acima de 14 ms)",
+    Guard("Saturated spike profile read as a spike profile (tour21: 97% of frames above 14 ms)",
           "tools/oot3d/perf_window_summary.py",
           r'def guest_spike_saturation', test="tests/switch/test_perf_tools.py"),
-    Guard("[decisão] perfil de picos do guest só com config/guest_spike_ms (deixa o jogo lento)",
+    Guard("[decision] guest spike profile only with config/guest_spike_ms (makes the game slow)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
-          r'config/guest_spike_ms; desligado por padrão'),
-    Guard("[decisão] efeitos de áudio 0x4A0338/0x4A022C já são nativos (não reescrever de novo)",
+          r'config/guest_spike_ms; off by default'),
+    Guard("[decision] audio effects 0x4A0338/0x4A022C are already native (don't rewrite again)",
           "tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp",
           r'\{0x004A0338U, "AudioEffect_ProcessStereoReverb"\}'),
-    Guard("Tempo por thread guest só com gpu_timing/thread_timing (mediu o som: ~1,2 ms/quadro, tour23)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
-          r'SetThreadTimingEnabled\(\s*std::ifstream\("sdmc:/switch/oot3dre/config/gpu_timing"\)'),
-    Guard("config/audio_deferred \"0\" sem quebra de linha era lido como ligado (good() falso no EOF)",
+    Guard("[decision] Per-guest-thread time always on: one counter read per thread switch, "
+          "not two clock reads per dispatch and per SVC behind config/gpu_timing",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'mThreadProfileRunning && selectedId != mCurrentThreadId\) \{\s*'
+          r'ChargeThreadProfile\(mCurrentThreadId, ReadThreadProfileCounter\(\)\);',
+          forbid=r'AddThreadTime\(', test="oot3d_native_a32_process_tests"),
+    Guard("guest_threads: perf.txt line per window (which guest thread holds the game thread)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'FormatNativeA32GuestThreadsLine\(\s*process, previousThreads, runFrameCount, hostFrames\)',
+          test="oot3d_native_a32_process_tests"),
+    Guard("CreateThread logs guest_thread: with the requested processor at warning level (release drops info)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'FormatNativeA32GuestThreadCreated\(\s*\*threadId, state\.r\[1\], priority, processorId, state\.r\[3\]\);'
+          r'.*?SPDLOG_WARN\("\{\}", line\);',
+          test="oot3d_native_a32_process_tests"),
+    Guard("config/audio_deferred \"0\" without a newline was read as on (good() false at EOF)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'const bool present = audioDeferredFile\.good\(\);.*?deferDspAudio = !present',
           forbid=r'deferDspAudio = !audioDeferredFile\.good\(\)'),
-    Guard("Áudio adiado: quadros DSP pendentes entregues no fim do RunFrame (nada fica para trás)",
+    Guard("Deferred audio: pending DSP frames delivered at the end of RunFrame (nothing is left behind)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'frameCount \+= advanceGuest \? 1U : 0U;\s*\}\s*if \(deferredDspAudioFrames != 0U\)'),
-    Guard("Áudio adiado depois da apresentação atrasava o quadro seguinte (tour24): vai na espera do render",
+          r'frameCount \+= advanceGuest \? 1U : 0U;\s*\}\s*if \(deferredDspAudioFrames != 0U && !dspOnSecondCore\)'),
+    Guard("Deferred audio after presentation delayed the next frame (tour24): it goes into the render wait",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'deferredDspAudioFrames != 0U && renderStream\.FrameSlotsFull\(\)',
+          r'deferredDspAudioFrames != 0U && !dspOnSecondCore &&\s+renderStream\.FrameSlotsFull\(\)',
           test="oot3d_native_render_command_stream_tests"),
-    Guard("Crash na abertura com config/gpu_timing (pgo5e): cntvct_el0 dá Data Abort no EL0 do Horizon",
+    Guard("Crash at startup with config/gpu_timing (pgo5e): cntvct_el0 gives Data Abort at Horizon's EL0",
           "runtime/three_ds_recomp/include/fast/backends/gl_pica_draw_phases.h",
           r'mrs %0, cntpct_el0',
           forbid=r'mrs %0, cntvct_el0'),
-    Guard("Código gerado com -ffast-math diverge da emulação VFP exata",
+    Guard("Code generated with -ffast-math diverges from exact VFP emulation",
           "CMake/oot3d/native_runtime.cmake",
           r'NintendoSwitch.*?oot3d_native_whole_aot PRIVATE\s+-fno-fast-math -ffp-contract=off'),
-    Guard("std::thread::detach() lança no Horizon (pthread_detach = ENOSYS)",
+    Guard("std::thread::detach() throws on Horizon (pthread_detach = ENOSYS)",
           "tools/oot3d/native_demo_host/oot3d_demo_host_context.cpp",
           r'pthread_detach, so\s+// std::thread::detach\(\) always throws'),
-    Guard("Polígono gigante na mira em 1ª pessoa (GL_DEPTH_CLAMP nos draws PICA)",
+    Guard("Giant polygon in 1st-person aiming (GL_DEPTH_CLAMP on PICA draws)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica_state_cache.h",
           r'Before a PICA draw: true means glDisable\(GL_DEPTH_CLAMP\)',
           "gfx_opengl_pica_near_clip_tests (EGL)"),
-    Guard("HUD sumia: VAO do PICA vazava para a UI legada (divisor dos atributos)",
+    Guard("HUD vanished: PICA VAO leaked into the legacy UI (attribute divisor)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'glVertexAttribDivisor\('),
-    Guard("Game Over sem o prompt de continuar (dispatch 0x00300544 duplicado)",
+    Guard("Game Over without the continue prompt (duplicated 0x00300544 dispatch)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
           r'TopScreenRendererVisibilityCallDefersToGameOverDraw\(',
-          "config/debug_force_game_over no console"),
-    Guard("Congelamento: mallinfo() segura o lock do malloc e varre heap corrompido",
+          "config/debug_force_game_over on the console"),
+    Guard("Freeze: mallinfo() holds the malloc lock and walks a corrupted heap",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'__malloc_current_mallinfo.*?config/heap_stats',
           "oot3d_hang_watchdog_tests"),
-    Guard("Config.cpp 'unable to atomically save' (rename sobre arquivo existente)",
+    Guard("Config.cpp 'unable to atomically save' (rename over an existing file)",
           "runtime/three_ds_recomp/src/ship/config/ConfigPersistence.cpp",
           r'#else\s+.*?ReplaceFileWithTemporary\(temporary, target\);',
           "config_atomic_save_tests, oot3d_config_file_replace_tests (TestShipConfigWriter)",
           forbid=r'std::filesystem::rename\('),
-    Guard("Pacing adaptive travava em 30 FPS (padrão precisa ser legacy)",
+    Guard("Adaptive pacing got stuck at 30 FPS (default must be legacy)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'config/fps60_mode: legacy \(default\)',
           "oot3d_native_cadence_governor_tests"),
-    Guard("Log rotacionado ao abrir (upstream #72) estragou leitura do .o3tu no SD",
+    Guard("Log rotated on open (upstream #72) broke reading the .o3tu on the SD",
           "runtime/three_ds_recomp/src/ship/Context.cpp",
           r'__SWITCH__.*?kRotateOnOpen = false',
-          "tests/switch/eden_smoke.sh (status=failed + md5 do SD)"),
-    Guard("Contador de FPS (e todo ImGui) invisível no Switch: ImGui sem contexto GL na thread do jogo",
+          "tests/switch/eden_smoke.sh (status=failed + SD md5)"),
+    Guard("FPS counter (and all ImGui) invisible on Switch: ImGui without a GL context on the game thread",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'OpenGlContextCurrent\(\)\) \{\s+(?:FlushDeferredWindowClear\(\);\s+)?ImGui_ImplOpenGL3_RenderDrawData\(data\);\s+\} else if \(mRendererRouting\.Deferred',
-          "Eden com config/fps_counter (ver o canto superior esquerdo)"),
-    Guard("Engasgos ao entrar em área nova: texturas decodificadas na render thread",
+          "Eden with config/fps_counter (check the top-left corner)"),
+    Guard("Hitches when entering a new area: textures decoded on the render thread",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'SharedPicaPredecodeCache\(\)\.Take\(',
-          "oot3d_pica_texture_predecode_tests + logs/hitches.txt (cause=texturas)"),
-    Guard("Pré-decodificação de texturas desligada no worker de planos",
+          "oot3d_pica_texture_predecode_tests + logs/hitches.txt (cause=textures)"),
+    Guard("Texture predecoding turned off in the plan worker",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'picaPlanBuilder\.SetPredecodeTextures\(predecodeTextures\)',
           "oot3d_pica_texture_predecode_tests"),
-    Guard("Menu de debug (L3+R3) inacessível no Switch: janela de ajustes só existe no Vulkan",
+    Guard("Debug menu (L3+R3) unreachable on Switch: the settings window only exists on Vulkan",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'__SWITCH__.*?AddGuiWindow\(std::make_shared<Oot3dDebugMenuWindow>\(\)\)',
           "oot3d_debug_menu_tests"),
-    Guard("L3+R3 não abria o menu no Switch: atalho estava só no module_host (fora do .nro)",
+    Guard("L3+R3 didn't open the menu on Switch: the shortcut was only in module_host (outside the .nro)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
           r'__SWITCH__.*?pollingState\.DebugMenuCombo\.Update\(debugCombo\)\) Fast::Oot3d::ToggleDebugMenu\(\);\s+\}\s+if \(Fast::Oot3d::DebugMenuOpen\(\)\) \{\s+hostGuiVisible = true;',
-          "Eden: F+G (L3+R3) abre o menu de debug"),
-    Guard("Jogo recebia os botões com o menu de debug aberto",
+          "Eden: F+G (L3+R3) opens the debug menu"),
+    Guard("Game received button presses with the debug menu open",
           "tools/oot3d/native_game_runtime/triaevum_oot3d_input_backend.cpp",
           r'if \(Fast::Oot3d::DebugMenuOpen\(\)\) \{\s+const auto sequence = mState\.sampleSequence;\s+mState = \{\};',
           "oot3d_debug_menu_tests"),
-    Guard("Atalhos de teclado (F5/F8, F11, F2, teclas do jogo) ativos no Switch: console é só controle",
+    Guard("Keyboard shortcuts (F5/F8, F11, F2, game keys) active on Switch: the console is controller-only",
           "runtime/three_ds_recomp/src/fast/Fast3dWindow.cpp",
           r'IsKeyDown\(int32_t scancode\) const \{\s+#if defined\(__SWITCH__\)\s+\(void\)scancode;\s+return false;'
           r'.*?KeyUp\(int32_t scancode\) \{\s+#if defined\(__SWITCH__\).*?return true;'
           r'.*?KeyDown\(int32_t scancode\) \{\s+#if defined\(__SWITCH__\).*?return true;',
-          "Eden: F5/F8 não fazem nada; menu L3+R3 continua abrindo"),
-    Guard("Menu de debug do Switch mostrava atalhos de PC (F5/F8, F6, F2, teclado/mouse)",
+          "Eden: F5/F8 do nothing; L3+R3 menu still opens"),
+    Guard("Switch debug menu showed PC shortcuts (F5/F8, F6, F2, keyboard/mouse)",
           "tools/oot3d/native_game_runtime/oot3d_savestate_panel.cpp",
           r'TRIAEVUM_KEY_HINT\("Save state", "Save state \(F5\)"\)',
-          "grep de F[0-9] nas abas: só dentro de TRIAEVUM_KEY_HINT ou #else de __SWITCH__"),
-    Guard("Ring de vértices sem UNSYNCHRONIZED: nouveau (Mesa 20.1) cria staging a cada map (nfsu2-sw PERF_NOTES)",
+          "grep for F[0-9] in the tabs: only inside TRIAEVUM_KEY_HINT or the #else of __SWITCH__"),
+    Guard("Vertex ring without UNSYNCHRONIZED: nouveau (Mesa 20.1) creates staging on every map (nfsu2-sw PERF_NOTES)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'WritePicaGlStream.*?glMapBufferRange\(.*?GL_MAP_UNSYNCHRONIZED_BIT',
-          "nouveau_buffer_transfer_map: GART + UNSYNCHRONIZED devolve o map direto"),
-    Guard("tour14: carimbo GPU 'antes do acquire' emitido depois do glFlush (buraco descontado ~0)",
+          "nouveau_buffer_transfer_map: GART + UNSYNCHRONIZED returns the direct map"),
+    Guard("tour14: GPU 'before acquire' timestamp emitted after glFlush (subtracted gap ~0)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl.cpp",
           r'void GfxRenderingAPIOGL::FlushDeferredWindowClear\(\).*?gWindowAcquireHook\(false\);.*?glFlush\(\);.*?ClearFramebufferNow',
           "oot3d_native_gpu_frame_timer_tests"),
-    Guard("tour14: espera do acquire contada como custo da render thread (intermediários descartados)",
+    Guard("tour14: acquire wait counted as render thread cost (intermediate frames discarded)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'NativeRenderThreadBusyMs\(cpuMs, waitMs\).*?timer\.EndFrame\(kind, costCpuMs\)',
           "oot3d_native_cadence_governor_tests (TestRenderWaitIsNotCost)"),
-    Guard("tour15: par medido de 29-33 ms mantido (margem 0) e a área perdeu 3-5 FPS (custo sem a espera)",
+    Guard("tour15: measured 29-33 ms pair kept (margin 0) and the area lost 3-5 FPS (cost without the wait)",
           "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
           r'kExcludedWaitMarginMs = 5\.0',
           "oot3d_native_cadence_governor_tests (TestMarginKeepsTheRefresh)"),
-    Guard("tour16 (pgo5k): padrões do pacing voltam aos do pgo5i (espera contada, margem 0, sem glFlush antes do pacer)",
+    Guard("tour16 (pgo5k): pacing defaults go back to pgo5i's (wait counted, margin 0, no glFlush before the pacer)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'bool gCountRenderWait = true;.*?bool gFlushBeforePacing = false;'
           r'.*?!std::ifstream\("sdmc:/switch/oot3dre/config/interp_cpu_exclude_wait"\)'
           r'.*?std::ifstream\("sdmc:/switch/oot3dre/config/gl_pacing_flush"\)\.good\(\)',
-          "oot3d_native_interpolation_pacing_tests (margem padrão 0)"),
-    Guard("tour16 (pgo5k): carimbo do acquire na ordem do pgo5i salvo config/gl_acquire_stamp_before_flush",
+          "oot3d_native_interpolation_pacing_tests (default margin 0)"),
+    Guard("tour16 (pgo5k): acquire timestamp in pgo5i's order unless config/gl_acquire_stamp_before_flush",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl.cpp",
           r'bool gAcquireStampBeforeFlush = false;.*?if \(!gAcquireStampBeforeFlush && gWindowAcquireHook != nullptr\)'),
-    Guard("ETC2 no GM20B passa pelo fallback do st/mesa (malloc por mip + decodificação na render thread): desligado por padrão",
+    Guard("ETC2 on GM20B goes through the st/mesa fallback (malloc per mip + decoding on the render thread): off by default",
           "runtime/three_ds_recomp/include/fast/oot3d/pica_etc1_transcode.h",
           r'if \(!file \|\| !std::getline\(file, text\)\) \{\s+return false;\s+\}\s+return !text\.empty\(\) && text\[0\] == \'1\';',
-          "nvc0_screen_is_format_supported: ETC/ASTC só na classe 0xA297 (GK20A)"),
-    Guard("tour16: Data Abort em st_FreeTextureImageBuffer sob TrimPicaGlResidency (heap corrompido)",
+          "nvc0_screen_is_format_supported: ETC/ASTC only on class 0xA297 (GK20A)"),
+    Guard("tour16: Data Abort in st_FreeTextureImageBuffer under TrimPicaGlResidency (corrupted heap)",
           "runtime/three_ds_recomp/tests/gfx_opengl_pica_residency_tests.cpp",
           r'TEST\(PicaGlResidency, ReleasesEachNameOnceAndNeverAPinnedOne\)',
           "gfx_opengl_pica_residency_tests (ASan)"),
-    Guard("tour19 (pgo5n): DRS desceu até 2,25 mas drs_applied=0 (o alvo da cena nunca recebe clear de cor)",
+    Guard("tour19 (pgo5n): DRS went down to 2.25 but drs_applied=0 (the scene target never gets a color clear)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica.cpp",
           r'if \(ApplyPicaGlTargetScaleAtDraw\(target, targetKey\)\)',
           "oot3d_native_dynamic_resolution_tests (TestBackendAppliesAtFirstDraw)"),
-    Guard("tour19 (pgo5n): FrameSerial avança a cada passo (sem ele a escala nunca muda no primeiro draw)",
+    Guard("tour19 (pgo5n): FrameSerial advances on every step (without it the scale never changes at the first draw)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'\+\+Fast::PicaGlDynamicScale::gState\.FrameSerial;'),
-    Guard("tour19 (pgo5n): DRS cego à GPU oculta (par 26 ms < 28,3 com o governador descartando)",
+    Guard("tour19 (pgo5n): DRS blind to hidden GPU time (pair 26 ms < 28.3 with the governor discarding)",
           "tools/oot3d/native_game_runtime/oot3d_native_dynamic_resolution.h",
           r'double HiddenGpuMs = 3\.0;.*?pairMs \+= std::max\(0\.0, mConfig\.HiddenGpuMs\);',
           "oot3d_native_dynamic_resolution_tests (TestTour19WaterTempleHiddenGpu)"),
-    Guard("tour19 (pgo5n): relógio de vsync falhou (vsync_rc=0x1272) e o pacer_vsync ficou sem fonte",
+    Guard("log16 (test.8): deko3d DRS sat at 2.25 at 60 FPS everywhere (GL calibration: 3 ms hidden, down 85%, up 80%)",
+          "tools/oot3d/native_game_runtime/oot3d_native_dynamic_resolution.h",
+          r'UseDeko3dDynamicResolutionTiming\(\s*DynamicResolutionConfig &config\) noexcept \{\s+'
+          r'config\.HiddenGpuMs = 0\.0;\s+config\.DownFraction = 0\.92;\s+config\.UpFraction = 0\.82;',
+          "oot3d_native_dynamic_resolution_tests (TestLog16Deko3dReplay, TestDeko3dSteadyAreasHoldOneLevel)"),
+    Guard("log16 (test.8): the session gives deko3d its own DRS calibration",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'drsDeko3dTiming = Fast::Deko3dRendererSelected\(\);.*?'
+          r'if \(drsDeko3dTiming\)\s+Oot3dNativeGame::UseDeko3dDynamicResolutionTiming\(pacing\.Resolution\);'),
+    Guard("log16 (test.8): a 30 -> 60 switch restarted DRS at 3.00 (room 8: 16 and 23 in-between frames dropped)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'dynamicResolutionMemory\.Leave\(interpolationPacingRateHz, dynamicResolution\);.*?'
+          r'pacing\.ResolutionStartScale = dynamicResolutionMemory\.StartScale\(\s*rateHz, !firstConfiguration, pacing\.Resolution\);',
+          "oot3d_native_cadence_governor_tests (TestLiveRateSwitchKeepsSixtyScale)"),
+    Guard("tour19 (pgo5n): vsync clock failed (vsync_rc=0x1272) and pacer_vsync was left without a source",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'if \(!vsyncStarted && vsyncClock\.StartAcquireFallback\(\)\)',
           "oot3d_frame_spike_tests (TestAcquireFallbackFindsVsync)"),
-    Guard("tour19 (pgo5n): o acquire que bloqueou alimenta o relógio reserva",
+    Guard("tour19 (pgo5n): the acquire that blocked feeds the fallback clock",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'clock->ObserveAcquire\(nowNs, waitMs\);'),
-    Guard("SELECT parou de abrir Salvar/Sair (upstream #80)",
+    Guard("SELECT stopped opening Save/Quit (upstream #80)",
           "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
           r'.',
           "oot3d_top_screen_pause_transaction_tests"),
-    # --- 26/10: picos de 14-18 ms a cada 1800 quadros (log do deko3d no render thread) ---
-    Guard("deko3d: Log() gravava logs/deko3d.txt (fopen/fclose no SD) no render thread a cada 1800 quadros",
+    # --- 26/10: 14-18 ms spikes every 1800 frames (deko3d log on the render thread) ---
+    Guard("deko3d: Log() wrote logs/deko3d.txt (fopen/fclose on the SD) on the render thread every 1800 frames",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
-          r'void Log\(const char\* format, \.\.\.\) \{.*?gLogQueue\.emplace_back\(line\);',
+          r'void Log\(const char\* format, \.\.\.\) \{.*?std::string line = FormatLogLine\(format, args\);.*?'
+          r'gLogQueue\.push_back\(std::move\(line\)\);',
           "oot3d_frame_spike_tests (TestDeko3dPresentFieldsAtTheEnd)",
           forbid=r'void Log\(const char\* format, \.\.\.\) \{\s+std::lock_guard lock\(gLogMutex\);\s+FILE\*'),
-    # --- 26/10: heap corrompido (tours 16-20: chunk 0x50 com bk trocado = uso após free) ---
-    Guard("heap corrompido: alocador com páginas de guarda precisa embrulhar todo o malloc do newlib",
+    # --- 26/10: corrupted heap (tours 16-20: chunk 0x50 with swapped bk = use after free) ---
+    Guard("corrupted heap: the guard-page allocator must wrap all of newlib's malloc",
           "CMake/oot3d/game.cmake",
           r'oot3d_switch_guard_alloc\.cpp.*?-Wl,--wrap=_malloc_r -Wl,--wrap=_memalign_r -Wl,--wrap=_free_r '
           r'-Wl,--wrap=_realloc_r\s+-Wl,--wrap=_calloc_r -Wl,--wrap=_malloc_usable_size_r',
           "oot3d_switch_guard_alloc_tests"),
-    Guard("guard_alloc: calloc/realloc reais leem o cabeçalho do chunk; com bloco de guarda seria lixo",
+    Guard("guard_alloc: real calloc/realloc read the chunk header; with a guard block it would be garbage",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'tBypass = true;\s+void\* const pointer = __real__calloc_r.*?'
           r'tBypass = true;\s+void\* const moved = __real__realloc_r'),
-    Guard("guard_alloc: TLS só depois de ligado (a libnx chama o malloc antes de tudo)",
+    Guard("guard_alloc: TLS only after it is enabled (libnx calls malloc before anything else)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'if \(gEnabled\.load\(std::memory_order_relaxed\) && InRange\(gConfig, size\) && !tBypass\)'),
-    Guard("guard_alloc: malloc() do devkitA64 manda n >= 32 para _memalign_r(32, n); sem ele nada ganha guarda",
+    Guard("guard_alloc: devkitA64's malloc() sends n >= 32 to _memalign_r(32, n); without it nothing gets a guard",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'void\* __wrap__memalign_r\(struct _reent\* reent, size_t alignment, size_t size\) \{\s+'
+          r'(?:if \(void\* placed = Oot3dNativeGame::GuestWindow::TakePlacement\(size\)\) return placed;\s+)?'
           r'if \(gEnabled\.load\(std::memory_order_relaxed\) && alignment <= kAlignment',
           "oot3d_switch_guard_alloc_tests (TestLayout)"),
-    Guard("guard_alloc: página de folga depois do objeto (cabeçalho do chunk seguinte do newlib)",
+    Guard("guard_alloc: slack page after the object (header of newlib's next chunk)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.h",
           r'kBlockPages = 2U;'),
-    Guard("guard_alloc: guarda desde o boot = boot sem memória ('Not enough space'); só liga na sessão",
+    Guard("guard_alloc: guard from boot = boot out of memory ('Not enough space'); only enabled in the session",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
           r'Oot3dNativeGame::GuardAlloc::Arm\(\);\s+// Hang watchdog'),
-    Guard("guard_alloc modo página: 32768 páginas fechadas esgotaram o kernel (áudio SDL/FS falharam no 1º quadro)",
+    Guard("guard_alloc page mode: 32768 closed pages exhausted the kernel (SDL audio/FS failed on the 1st frame)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'if \(parsed\.GuardMode == Mode::Page && parsed\.QuarantineBlocks > kMaxPageQuarantine\)',
           "oot3d_switch_guard_alloc_tests (TestParse)"),
-    Guard("guard_alloc canário: free lia ptr-256 direto e caiu em página não mapeada (p6t, exceção no __wrap__free_r)",
+    Guard("guard_alloc canary: free read ptr-256 directly and hit an unmapped page (p6t, exception in __wrap__free_r)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'reinterpret_cast<const uint64_t\*>\(address\)\[-1\] != kCanaryTailMagic\) return nullptr;\s+'
           r'auto\* header = reinterpret_cast<CanaryHeader\*>\(address - sizeof\(CanaryHeader\)\);'),
-    Guard("guard_alloc canário: encher o objeto com 0xFD no free travou o console (leitura após free); só cópia",
+    Guard("guard_alloc canary: filling the object with 0xFD on free hung the console (read after free); copy only",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'std::memcpy\(header->Snapshot, header \+ 1, header->Block\.Size\);',
           "oot3d_switch_guard_alloc_tests (TestCanary)", forbid=r'kCanaryFill'),
-    Guard("guard_alloc: teto de blocos vivos (sem ele o heap acaba)",
+    Guard("guard_alloc: cap on live blocks (without it the heap runs out)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'if \(gLive\.load\(std::memory_order_relaxed\) >= gConfig\.MaxLive\) \{'),
-    Guard("handler de exceção grava logs/hang.txt sem alocar e devolve (crash report do Atmosphère continua)",
+    Guard("exception handler writes logs/hang.txt without allocating and returns (Atmosphère crash report still happens)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'void __libnx_exception_handler\(ThreadExceptionDump\* context\) \{\s+HandleException\(context\);\s+\}'),
-    Guard("deko3d.pack previsto dos CMB (~7,5 MiB) lido byte a byte atrasava o boot",
+    # --- 04/11: first-launch import of the player's dump into game/ ---
+    Guard("ROM import must run before the launch arguments read game/ (manifest)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;.*?oot3d_native_process_manifest\.json'),
+    Guard("ROM import: Horizon FS does not rename over an existing file (remove first)",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'void Replace\(const fs::path& from, const fs::path& to\) \{\s+std::error_code error;\s+fs::remove\(to, error\);',
+          "oot3d_rom_import_tests"),
+    # --- 04/11: OTA updater and Exit game (release) ---
+    # Horizon cannot rename over a file or touch an open one: the updater
+    # moves the target aside first and swaps the files other than the NRO at
+    # the next start, before resources.o2r is opened.
+    Guard("OTA install: rename over an existing file fails on Horizon (move the target to .old first)",
+          "tools/oot3d/native_game_runtime/oot3d_update_release.cpp",
+          r'std::filesystem::rename\(target, backup, code\);.*?std::filesystem::rename\(staged, target, code\);',
+          "oot3d_update_release_tests (TestInstall)"),
+    Guard("OTA install: files swapped at the next start before anything opens them",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'Oot3dNativeGame::FinishPendingUpdate\("sdmc:/switch/oot3dre"\);.*?homebrewArguments\{'),
+    Guard("release zip has no TopScreen mod payload: a missing atlas_overrides.o3tu must not stop the game",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!std::filesystem::is_regular_file\(homebrewArguments\[14\]\)\) \{\s+'
+          r'homebrewArgv\.erase\(homebrewArgv\.begin\(\) \+ 13, homebrewArgv\.begin\(\) \+ 15\);'),
+    Guard("Exit game / Close game (L3+R3) close the window like HOME > Close",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(physicalInputFrame\.Exit \|\| devLabQuit \|\| Fast::Oot3d::ExitGameRequested\(\)\) \{'),
+    # --- 04/11: crash on Exit game (hbl + 0x3810, 2001-0106) and right after the ROM import ---
+    Guard("Exit game must leave through AM: returning to hbl crashed it (InvalidCurrentMemory), svcExitProcess still showed a crash",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(Fast::Oot3d::ExitGameRequested\(\)\)\s+__nx_applet_exit_mode = 1;',
+          forbid=r'svcExitProcess\('),
+    Guard("start-up console screens (ROM import, HUD textures): stdout/stderr put back after consoleExit (first log line crashed)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),
+    Guard("second start-up screen (HUD texture offer after the game data import) stayed black: libnx redirects stdout only on the first consoleInit",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'consoleInit\(nullptr\);.*?static const devoptab_t\* const console = devoptab_list\[STD_OUT\];\s+'
+          r'devoptab_list\[STD_OUT\] = console;'),
+    Guard("game data import hands over to the HUD texture offer on the same console (no screen of its own)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+          r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - game data import"\);',
+          forbid=r'SwitchConsoleScreen screen\('),
+    Guard("HUD texture offer reuses the start-up console the import opened",
+          "tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp",
+          r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - HUD textures"\);',
+          forbid=r'SwitchConsoleScreen screen\('),
+    Guard("the start-up console is closed after the HUD and RomFS mods steps, before SDL/deko3d take the window",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!Oot3dNativeGame::RunSwitchTopScreenImport\(\)\)\s+return 0;\s+(//[^\n]*\n\s+)*'
+          r'const Oot3dNativeGame::RomFsModsStartupResult romFsMods = Oot3dNativeGame::PrepareRomFsMods\(\{.*?'
+          r'romFsOverlayArgument = romFsMods\.Overlay[^\n]*\n\s+\}\s+(//[^\n]*\n\s+)*'
+          r'Oot3dNativeGame::CloseStartupScreen\(\);.*?FinishPendingUpdate'),
+    # --- 04/11: TopScreen HUD textures downloaded and built on the console ---
+    # The mod (CC BY-NC-ND) cannot ship with a release: the console downloads
+    # it and builds config/atlas_overrides.o3tu. A damaged pack stops the game
+    # at start-up ("cannot load TopScreen texture overrides").
+    Guard("HUD texture offer runs after the ROM import and before the launch arguments look for atlas_overrides.o3tu",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;.*?'
+          r'if \(!Oot3dNativeGame::RunSwitchTopScreenImport\(\)\)\s+return 0;.*?config/atlas_overrides\.o3tu'),
+    Guard("HUD texture pack: read back before it replaces anything; Horizon does not rename over a file (remove first)",
+          "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
+          r'the SD card did not keep .*?fs::remove\(path, error\); // Horizon cannot rename over an existing file\s+'
+          r'fs::rename\(partial, path, error\);',
+          "oot3d_topscreen_import_tests (TestWriteAndIdentify)"),
+    Guard("HUD texture pack written last: the game only looks for the font pack beside an existing pack",
+          "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
+          r'WriteFileVerified\(configDirectory / kFontPackName, outputs\.Fonts\);.*?'
+          r'WriteFileVerified\(configDirectory / kUiAtlasHdName, outputs\.UiAtlasHd\);.*?'
+          r'outputs\.HdTextures\[index\]\);\s+\}\s+'
+          r'if \(!outputs\.LinkAnimations\.empty\(\)\)\s+'
+          r'WriteFileVerified\(configDirectory / kRollDashAnimationsName, outputs\.LinkAnimations\);\s+'
+          r'WriteFileVerified\(configDirectory / kPackName, outputs\.Pack\);\s+\}'),
+    # --- 05/11: without the TopScreen pack (player chose "not now") ---
+    Guard("no TopScreen pack: the Items hint/D-pad badges asked for menu_atlas and the frame threw (game closed, hbl crash)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'starts_with\("oot3d/topscreen/2\.1\.1/"\).*?pixels\.rgba8\.assign\(4U, 0U\);\s+\+\+mStats\.profile_asset_absent;\s+return true;',
+          "oot3d_native_ui_texture_provider_tests (packlessProvider)"),
+    Guard("a fatal error must close the game through AM (with the error dialog), not return to hbl (2001-0106)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'catch \(const std::exception& ex\).*?ShowSwitchFatalError\(ex\.what\(\)\);.*?__nx_applet_exit_mode = 1;'),
+    # --- 05/11: TopScreen HD UI atlas (3x) and texture packs on the HUD ---
+    Guard("HD UI atlas: a missing or bad file logs and keeps the native atlas, never stops the game",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'HD UI atlas unused: cannot decode.*?HD UI atlas unused: %dx%d is not a whole multiple',
+          forbid=r'throw std::runtime_error\([^;]*HD UI atlas'),
+    Guard("HD UI atlas and HD images passed only beside an installed pack (--topscreen-ui-atlas-hd and "
+          "--topscreen-hd-textures require the overrides)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'homebrewArgv\.erase\(homebrewArgv\.begin\(\) \+ 13, homebrewArgv\.begin\(\) \+ 15\);\s+'
+          r'\} else \{\s+if \(std::filesystem::is_regular_file\(\s+"sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd\.png"\)\)'
+          r'.*?"--topscreen-hd-textures".*?\}\s+\}'),
+    Guard("HUD custom textures (packs, the mod's HD images), asked for ahead or resolved, are named after the "
+          "game's own texture, not this port's TopScreen CTXB override (the hearts and B label kept the old art)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'original = encoded;\s+switch \(mTextureOverrides->Apply\(encoded\)\).*?'
+          r'ApplyCustomTexture\(encoding->native_pica_format, original\.empty\(\) \? encoded : original,\s+'
+          r'pixels, true, false\);.*?'
+          r'ApplyCustomTexture\(encoding->native_pica_format, original, pixels, false, true\);',
+          "oot3d_native_ui_texture_provider_tests (identified by the game's own bytes, ahead too)"),
+    Guard("HUD pack images: UI requests keep the 3x cap and their own cache (ReleaseDecoded of a world upload must not drop them)",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'DecodeOptions\{native, kUiTextureMaxScale, false\}',
+          "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    # --- 07/11: the TopScreen HUD showed the game's art for ~0.5 s, then the pack's ---
+    # HUD decodes waited behind a scene's world PNGs on the single pack worker.
+    Guard("HUD pack images decode on their own worker, never queued behind world images",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'\(userInterface \? mUiLoadJobs : mLoadJobs\)\.push_back\(std::move\(job\)\);.*?'
+          r'mUiWorkAvailable\.wait\(lock, \[&\] \{ return mStopping \|\| !mUiLoadJobs\.empty\(\); \}\);',
+          "oot3d_azahar_texture_pack_tests (HudImagesDoNotWaitBehindWorldImages)"),
+    Guard("Switch: the HUD's pack images are remembered in config/texture_pack_hud and decoded at start-up",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'MakeTexturePackConfiguration\(mTexturePackSettings, kConfigDirectory\).*?'
+          r'MakeTexturePackConfiguration\(settings, kConfigDirectory\)',
+          "oot3d_azahar_texture_pack_tests (HudImagesSeenOnceAreDecodedAtTheNextStart)"),
+    Guard("a HUD texture whose pack image decodes is held, not drawn with the old art (provider marks the stand-in)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'pixels\.provisional = true;\s+pixels\.native_stand_in = custom\.rgba8 == nullptr;',
+          "oot3d_n64_ui_renderer_tests (TestHeldFirstDraws), oot3d_native_ui_texture_provider_tests"),
+    # --- 07/11 (test.8): first start, empty HUD list: two HUD images first seen in play, held up to 263 ms ---
+    Guard("the HUD's textures are asked for ahead of its first frame (title screen), one per frame, again per revision",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'uiLifecycleBridge\.HudTexturesAhead\(.*?n64UiRenderer\.RequestAhead\(ahead\) && complete',
+          "oot3d_n64_ui_renderer_tests (TestRequestAhead), oot3d_native_ui_lifecycle_bridge_tests"),
+    Guard("the UI renderer's provider (ocarina text runtime) passes the pack revision and ahead requests through",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_ocarina_text_runtime.h",
+          r'Revision\(\) const noexcept override \{ return mNativeTextures\.Revision\(\); \}.*?'
+          r'mNativeTextures\.RequestAhead\(identity\);',
+          "oot3d_top_screen_ocarina_text_runtime_tests"),
+    Guard("an ahead HUD request queues its pack decode as one decoded ahead",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'\.UserInterface = true,\s+\.Ahead = request\.ahead,',
+          "oot3d_azahar_texture_pack_tests (HudImagesAskedAheadAreReadyAtFirstSight), "
+          "oot3d_native_ui_texture_provider_tests"),
+    # --- 07/11 (test.9): pause pages showed the game's tab bar, then the pack's, on every page ---
+    Guard("pause pages (PICA, Ui draws) resolve their pack images as HUD images, shared with the HUD's ahead requests",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'menu = PicaTextureIsMenuArt\(view, menuDraw, mMenuImages\);.*?\.UserInterface = menu,\s+\.Menu = menu,',
+          "oot3d_azahar_texture_pack_tests (MenuTexturesShareTheHudImagesAndStayDecoded), "
+          "oot3d_deko3d_backend_tests (TestMenuArt)"),
+    Guard("a menu texture's pack image is not released after its upload (another guest address re-decoded it)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'if \(!menu\) \{\s+::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.ReleaseDecoded\(',
+          "oot3d_azahar_texture_pack_tests (MenuTexturesShareTheHudImagesAndStayDecoded)"),
+    Guard("a HUD/menu texture asked for at its draw goes before the images decoded ahead",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'if \(onSight\) \{\s+mUiLoadJobs\.push_front\(std::move\(job\)\);',
+          "oot3d_azahar_texture_pack_tests (TexturesOnScreenGoBeforeHudImagesAskedAhead)"),
+    # --- 07/11 (pop18, after test.10): file select, world textures and grass without pop-in
+    # (SWITCH_PORT.md "File select, world textures and grass without pop-in").
+    Guard("file select (relocated bottom screen, atmosphere layer) resolves its pack images as menu art",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'draw\.Composition\.Layer == Renderer3ds::PicaCompositionLayer::Ui \|\|\s+'
+          r'\(mTexturePack && mMenuImages && !draw\.Textures\.empty\(\) && RelocatedMenuDraw\(draw\)\);',
+          "gl_widescreen_menu_policy_tests (FileSelectPiecesAreRelocatedMenuDrawsInEitherDomain)"),
+    Guard("a scene change reaches the pack runtime in frame order (scene lists, preload, hold)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'frameArea\.Scene != texturePackScene\) \{\s+texturePackScene = frameArea\.Scene;\s+'
+          r'renderStream\.Submit\(\[scene = texturePackScene\] \{\s+'
+          r'::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.NoteScene\(scene\);',
+          "oot3d_azahar_texture_pack_tests (SceneImagesSeenOnceAreDecodedWhenTheSceneStarts)"),
+    Guard("a scene change drops the scene before's queued world decodes",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'\+\+mSceneSerial;\s+mScene\.Dropped \+= DropEarlierSceneJobsLocked\(\);',
+          "oot3d_azahar_texture_pack_tests (SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen)"),
+    Guard("the hold waits only for world textures drawn native last frame, within the scene's budget",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'pack\.WaitForImages\(mHoldHashes, std::chrono::microseconds\(mHoldLeftMicros\)\);',
+          "oot3d_azahar_texture_pack_tests (SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen)"),
+    # --- 08/11 (TexLive): HD textures turned on, or another "HD texture size", in the Video tab did not
+    # show on the textures already in view: drawn while the pack indexed again, they had no hash, the poll
+    # answered Missing and they stayed native until evicted (SWITCH_PORT.md "HD textures applied at once").
+    Guard("textures drawn while the pack indexes (no hash) are made again once its index is ready",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'TexturePackEntryActionFor\(false, native\.PackEpoch, mPackEpoch,\s+'
+          r'mTexturePack, native\.PackUnindexed,\s+mPackIndexReady\) ==\s+'
+          r'::Oot3d::Renderer::TexturePackEntryAction::Rebuild;.*?'
+          r'texture\.PackUnindexed = mTexturePackSettings\.Reresolve &&\s+'
+          r'pack\.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending &&\s+!pack\.NativeHashAvailable;',
+          "oot3d_texture_pack_scale_tests (ToggleCache), "
+          "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
+    Guard("the renderer learns when the pack's index is ready after a change, and never polls an empty hash",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'mPackIndexReady = false;.*?mHoldLeftMicros = 0U;\s+Log\("resources: texture pack %s \(cap %ux\)".*?'
+          r'if \(mTexturePack && !mPackIndexReady\) \{.*?'
+          r'mPackIndexReady = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.IndexReady\(\);.*?'
+          r'if \(texture\.PackPending && !texture\.PackUnindexed && !texture\.Replacement && '
+          r'texture\.PackEpoch == mPackEpoch &&',
+          "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
+    Guard("a native made while indexing is resolved again only once the index is ready, never a pack image",
+          "runtime/three_ds_recomp/include/oot3d/renderer/azahar_texture_pack_settings.h",
+          r'return !replacement && packOn && unindexed && indexReady \? TexturePackEntryAction::Rebuild',
+          "oot3d_texture_pack_scale_tests (ToggleCache)"),
+    # --- 08/11 (ToggleFreeze, test.13 logs21): each HD-texture change froze the game: every HUD texture
+    # resolved again at once and those still decoding polled at every call (game thread +25-50 ms per frame
+    # for ~10 frames, hitches.txt:1629-1680), the render thread resolved a whole view again at the change and
+    # at the index, and turning the pack on in a scene entered while it was off armed the scene hold (613 ms,
+    # hitches.txt:1735) (SWITCH_PORT.md "HD texture changes without a freeze").
+    Guard("a pack settings change never arms the scene hold, also for a scene entered while the pack was off",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'serial != mSceneSerial\) \{\s+FollowScene\(serial, false\);\s+\}\s+mHoldLeftMicros = 0U;.*?'
+          r'mHoldLeftMicros = ::Oot3d::Renderer::TexturePackSceneHoldMicros\(entered, mTexturePackSettings\.HoldMs\);',
+          "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
+    Guard("after a pack change the render thread resolves a view again a few textures per frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'mPackRebuilds\.NewFrame\(\);.*?'
+          r'if \(!mPackRebuilds\.Take\(\)\) \{\s+mPackChange\.Deferred.*?'
+          r'const bool deferred = rebuild && !mPackRebuilds\.Take\(\);',
+          "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
+    Guard("a new UI provider revision resolves the HUD textures that draw a few per call, never holding them",
+          "tools/oot3d/ui_n64/oot3d_n64_ui_renderer.cpp",
+          r'if \(first && drawable\) \{.*?if \(!take\(\)\) \{.*?'
+          r'if \(pixels\.native_stand_in && drawable\) \{.*?continue;',
+          "oot3d_n64_ui_renderer_tests (TestRevisionResolvesAreSpread, TestHeldFirstDraws)",
+          forbid=r'\+\+provisional_poll_ %'),
+    Guard("HD textures off: the pack answers Disabled at once, also while it indexes",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'if \(!mIndexReady\) \{.*?if \(!mConfiguration\.LoadCustomTextures && !mConfiguration\.DumpTextures\) return \{\};',
+          "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
+    Guard("the game thread's longest frame and HUD preparation during a pack change are logged",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'packChangeWatch\.Observe\(frameMicros,',
+          "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
+    # --- 08/11 (TogglePack2, test.14 logs22a): each HD-texture change still stuttered: every 4th frame the
+    # game thread took 66-108 ms (20 ms guest; hitches.txt:805-944): the HUD's provisional polls and
+    # refreshes decoded each texture again on the game thread (a 512x256 decode: 6 ms on a desktop core).
+    # Deko3d lines were cut at 511 characters (SWITCH_PORT.md "HD texture changes: the HUD without decodes").
+    Guard("deko3d.txt lines are never cut: a longer line formats again into a string of its length",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_log_line.h",
+          r'if \(static_cast<std::size_t>\(length\) < sizeof\(line\)\) \{.*?'
+          r'std::string longer\(static_cast<std::size_t>\(length\), \'\\0\'\);',
+          "oot3d_texture_pack_scale_tests (LogLines)",
+          forbid=r'char line\[512\]'),
+    Guard("a HUD texture resolved again is taken from the identity cache: read and hashed, not decoded",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'if \(!generatedText &&\s+ApplyCachedCustomTexture\(encoding->native_pica_format,.*?'
+          r'pixels\.shared_rgba8 = found->second\.native;',
+          "oot3d_native_ui_texture_provider_tests (identity cache)",
+          forbid=r'pixels\.rgba8 = \*custom\.rgba8;'),
+    Guard("the HUD source passes the cached hashes to the pack and returns the legacy one for the cache",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'\.KnownModernHash = request\.modern_hash,\s+\.KnownLegacyHash = request\.legacy_hash,.*?'
+          r'custom\.legacy_hash = identity\.KnownLegacyHash;',
+          "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    Guard("another HD texture size keeps the pack's HUD images (no first-sight wait after a cap change)",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'const bool keepHud = mConfigured && configuration\.LoadCustomTextures && otherCap == mConfiguration;.*?'
+          r'cached->second->Generation >= mUiValidFromGeneration',
+          "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    Guard("the UI renderer's deferrable resolves have a time budget per call as well as a count",
+          "tools/oot3d/ui_n64/oot3d_n64_ui_renderer.cpp",
+          r'if \(budget == 0U \|\| std::chrono::steady_clock::now\(\) - start >= kUiResolveTimeBudget\) return false;',
+          "oot3d_n64_ui_renderer_tests (TestRevisionResolvesAreSpread)"),
+    # --- 08/11 (TogglePack3, test.15 logs23): 9 of 10 HD texture size changes still gave one 117-157 ms
+    # game-thread frame (hitches.txt:313-510): the Video tab wrote config/texture_pack(_scale) and probed the
+    # pack folder on the game thread; each size change also indexed the pack again and decoded the scene's
+    # whole list (SWITCH_PORT.md "HD texture size changes: nothing on the game thread, the index kept").
+    Guard("the Video tab writes its config files on the settings writer's thread, never in its draw",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'::Oot3d::Renderer::LiveTexturePackSettings\(\)\.Publish\(mPack\);\s+'
+          r'Write\(::Oot3d::Renderer::kTexturePackConfigName, \[settings = mPack, config = mConfig, found = mPackFound\] \{',
+          "oot3d_texture_pack_scale_tests (SettingsWriter)",
+          forbid=r'mPackError = mPack\.Save\(mConfig\);|mPackFound = PackFolderExists\(\);'),
+    Guard("a change of only HD texture size keeps the pack's index and the HUD's revision",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'if \(keepHud && mIndexReady && !mRebuildRequested && !mBuilding\) \{.*?'
+          r'QueueScenePreloadLocked\(previousCap\);\s+mIdle\.notify_all\(\);\s+return;',
+          "oot3d_azahar_texture_pack_tests (ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges)"),
+    Guard("a size change queues again only the scene images the new cap draws at another size",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'!TexturePackCapChangesImage\(native, source->second, \*changedFromCap,',
+          "oot3d_azahar_texture_pack_tests (ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges), "
+          "oot3d_texture_pack_scale_tests (CapChanges)"),
+    Guard("the HUD's texture revision is the pack's UI revision (not bumped by a size change)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'\[\] \{ return Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.UiRevision\(\); \},',
+          "oot3d_azahar_texture_pack_tests (ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges)"),
+    Guard("the renderer keeps the pack images a size change draws at the same size",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'const bool capOnly = mTexturePackSettings\.Enabled && settings\.Enabled;.*?'
+          r'!::Oot3d::Renderer::TexturePackCapChangesImage\(.*?texture\.PackEpoch = mPackEpoch;',
+          "oot3d_texture_pack_scale_tests (CapChanges)"),
+    Guard("textures are destroyed at most kTextureReleasesPerFrame a frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'if \(idle\(texture\) < policy\.MinIdleFrames \|\| releases >= kTextureReleasesPerFrame\) \{.*?'
+          r'if \(idle\(texture\) >= policy\.MinIdleFrames && releases < kTextureReleasesPerFrame\) \{',
+          "no host test (Switch-only renderer); the change's detail line shows the release time"),
+    # --- 08/11 (TexSizes, test.13 report): "if we have 3x textures max, the setting shouldn't show 4." The
+    # Video tab offers only the sizes the pack has, measured by the pack worker when it has nothing else to
+    # do (SWITCH_PORT.md "HD texture size: only the sizes the pack has").
+    Guard("the pack's image scale is measured only while no decode, dump or index waits on any pack worker",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'return mImageScaleScan\.Active && mImageScaleScan\.Generation == mGeneration && mPendingLoads == 0U &&\s+'
+          r'mLoadJobs\.empty\(\) && mUiLoadJobs\.empty\(\) && mDumpJobs\.empty\(\) && !mRebuildRequested && !mBuilding &&.*?'
+          r'\} else if \(mStopping\) \{\s+return;\s+\} else if \(ImageScaleScanRunnableLocked\(\)\) \{\s+measuring = true;',
+          "oot3d_azahar_texture_pack_tests (MeasuresThePacksLargestImageScaleAndRemembersIt)"),
+    Guard("the Video tab offers the sizes the pack has, and keeps a saved cap above them unwritten",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'TexturePackMenuLargest\(\s*::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.LargestImageScale\(\), '
+          r'mRememberedSizes\);.*?'
+          r'MakeTexturePackScaleMenu\(mPack\.MaxScale, largest\).*?'
+          r'if \(ImGui::Selectable\(choice\.Label\.c_str\(\), selected\) && !selected\) \{',
+          "oot3d_texture_pack_scale_tests (ScaleMenu, RememberedSizes)",
+          forbid=r'kPackScales|mPack\.Enabled \? ::Oot3d::Renderer::AzaharTexturePackRuntime'),
+    # --- 11/09 (user, before 0.2.1): with HD textures off the size menu still offered 3x and 4x for a 2x
+    # pack and dropped them once HD textures were on. The last measure remembered in
+    # config/texture_pack_sizes names the sizes until this start measures.
+    Guard("the size menu uses this start's measure, else the remembered one, else every size",
+          "runtime/three_ds_recomp/include/oot3d/renderer/azahar_pack_scale.h",
+          r'if \(measured != 0U\) return measured;\s+return remembered \? remembered->Largest : 0U;',
+          "oot3d_texture_pack_scale_tests (RememberedSizes)"),
+    Guard("the Video tab reads config/texture_pack_sizes once, at its start",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'std::optional<::Oot3d::Renderer::PackScaleRecord> mRememberedSizes =\s+'
+          r'::Oot3d::Renderer::ReadPackScaleRecord\(mConfig / ::Oot3d::Renderer::kTexturePackSizesName\);',
+          "oot3d_texture_pack_scale_tests (RememberedSizes)"),
+    Guard("a saved cap at or above the pack's largest image shows the largest (No limit only above 4x)",
+          "runtime/three_ds_recomp/include/oot3d/renderer/azahar_pack_scale.h",
+          r'if \(largest == 0U \|\| largest > kTexturePackLargestNamedScale\) \{.*?'
+          r'if \(largest != 0U && \(cap == 0U \|\| cap >= largest\)\)\s+'
+          r'shown = largest > kTexturePackLargestNamedScale \? 0U : largest;',
+          "oot3d_texture_pack_scale_tests (ScaleMenu)"),
+    Guard("deko3d grass keeps placements on the SD card (config/grass_placement_cache)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(placementCache\) \{\s+state->Placements->SetCacheDirectory\(',
+          "oot3d_grass_switch_tests (Oot3dGrassPlacementCache), oot3d_grass_async_placement_builder_tests"),
+    # --- 08/11 (test.12): Hyrule Field grass popped in after the fade-in. The
+    # disk cache's file name held the ground's exact model-to-world, rounded
+    # differently by each session's first camera (logs20b/c built it again).
+    Guard("a stored grass ground is named by its rounded transform and matched in the file (config/grass_placement_reuse)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_persistent_placement_cache.cpp",
+          r'settings\.Add\(RoundedTransform\(r\.ModelToWorld\)\);',
+          "oot3d_grass_switch_tests (TheNextSessionReusesTheGroundOfAnotherFirstCamera)",
+          forbid=r'settings\.Add\(r\.ModelToWorld\);'),
+    Guard("a reused grass ground is drawn with the transform its tufts were made with",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'drawn\.ModelToWorld = \*result\.Placement->ModelToWorld;',
+          "oot3d_grass_switch_tests (TheNextSessionReusesTheGroundOfAnotherFirstCamera)"),
+    Guard("a scene's first frames wait for its first grass at frame start (config/grass_hold)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'mResources\.BeginFrame\(mResourcesFrame\);\s+Deko3d::GrassBeginFrame\(\);',
+          "oot3d_grass_switch_tests (Oot3dGrassSceneHold)"),
+    # --- 08/11 (test.13): "frame drops, but if I stay in the area it stabilizes to 60" (logs20a-e) ---
+    # Entering an area, one-off work (pack decodes and uploads, grass, slow fences) dropped the
+    # in-between frames; the full frame's ratio learnt then stayed while nothing was drawn, and
+    # only the probe every 60 decisions (2 s) brought 60 back, long after the work had ended.
+    Guard("after a scene entry the pacer probes 60 again soon after the entry work ends (config/pacer_entry_recover)",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'bool EntryRecover = true;.*?const bool entryProbe = mConfig\.EntryRecover && entry && !mEntryWork &&'
+          r'.*?const bool due = \+\+mBelowPreferred >= ProbeIntervalNow\(entryProbe\) \|\|',
+          "oot3d_native_interpolation_pacing_tests (TestEntrySpikeThenRecovery)"),
+    Guard("a failed probe doubles the probe interval (no extra probes in a view that really is too heavy)",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'interval \*= 2U;.*?\+\+mFailedProbes;\s+\+\+mStats\.FailedProbes;',
+          "oot3d_native_interpolation_pacing_tests (TestFailedProbeBacksOff, TestSustainedHeavyViewDoesNotOscillate)"),
+    # --- 09/11 (test.15): a stale in-between ratio kept 30 after the view got lighter (logs22a:366) ---
+    Guard("a full-frame ratio above 1.10 left unmeasured while the step alone would fit is probed at once",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'const bool stale = StaleRatio\(probe, budget\);.*?if \(due \|\| stale\) \{'
+          r'.*?\(probePair <= 1\.25 \* budget \|\| stale\)'
+          r'.*?mRatio\[index\] > mConfig\.FreshRatio &&\s+mRatioAge\[index\] >= StaleAfterNow\(\) &&'
+          r'\s+mStepCostMs \* \(1\.0 \+ mConfig\.FreshRatio\) <=',
+          "oot3d_native_interpolation_pacing_tests (TestStaleRatioRecoversWithinOneProbe)"),
+    Guard("stale probes back off on their own failures only, and only the full level's ratio is judged stale",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'failed < mStaleFailures && after < cap.*?mConfig\.EntryRecover && level == InterpolatedSampleLevel::Full',
+          "oot3d_native_interpolation_pacing_tests (TestStaleRatioHeavyViewsDoNotFlap)"),
+    Guard("the game thread hands each scene entry to the pacer, the render thread its entry work",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'renderStream\.Submit\(\[this\] \{ interpolationPacing\.NoteEntry\(\); \}\);'),
+    Guard("logs37: at Full and the Standard GPU clock the Temple of Time cutscene went between 30 and 60 FPS "
+          "(a 16.1-17 ms frame on a 33.3 ms pair): on deko3d a reduced in-between frame is one dynamic-"
+          "resolution step for that frame alone, and the step frame (or a full in-between frame before it) "
+          "asks for its own scale again, so no later frame stays lower",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(drsDeko3dTiming && backendScale\.Supported\) \{.*?'
+          r'config\.ReducedScale = Oot3dNativeGame::DynamicStepReducedScale\(.*?'
+          r'reducedViaDynamicScale = pacing\.ReducedAvailable;.*?'
+          r'\+\+Fast::PicaGlDynamicScale::gState\.FrameSerial;\s+reducedStepScale\.reset\(\);.*?'
+          r'if \(reducedViaDynamicScale\) \{.*?'
+          r'if \(!reducedStepScale\) reducedStepScale = backendScale\.Requested;.*?'
+          r'std::min\(interpolationPacing\.Config\(\)\.ReducedScale, stepScale\);\s+'
+          r'\+\+backendScale\.FrameSerial;.*?'
+          r'\} else if \(reducedStepScale\) \{.*?backendScale\.Requested = \*reducedStepScale;\s+'
+          r'\+\+backendScale\.FrameSerial;\s+reducedStepScale\.reset\(\);',
+          "oot3d_native_interpolation_pacing_tests (TestDynamicStepReducedScale)"),
+    Guard("render-thread holds (texture pack, grass) are not frame work for the pacer",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'Fast::Deko3dTakeRenderHoldMicros\(\).*?interpolationPacing\.SetEntryWork\(entryWork\);'
+          r'.*?std::max\(0\.0, cpuMs - holdMs\).*?NativeRenderThreadBusyMs\(workCpuMs, waitMs\)'),
+    Guard("the texture pack hold reports its wait to the pacer",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'mScene\.HoldMicros \+= waited;.*?Deko3dNoteRenderHold\(waited\);'),
+    Guard("the grass hold reports its wait to the pacer",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'state->HoldMicros \+= waited;.*?Deko3dNoteRenderHold\(waited\);'),
+    Guard("config/pacer_entry_recover: on without the file, \"0\" the former pacer",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'readText\("pacer_entry_recover", "TRIAEVUM_PACER_ENTRY_RECOVER"\)\)\s+'
+          r'options\.PacerEntryRecover = trimmed\(\*text\) != "0";'),
+    Guard("HUD button labels draw over the item icons (a pack's bigger bomb hid the R of ZR)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'primitive\.layer = kTopScreenButtonLabelLayer;.*?'
+          r'primitive\.layer = index < 4U \? kTopScreenButtonLabelLayer : 13U;',
+          "oot3d_top_screen_hud_touch_tests (TestLabelsOverItemIcons)"),
+    # --- 05/11: inventory taps one slot off (pause Items/Gear/Map, TopScreen) ---
+    # The touch scaled the 400-wide top screen down to the 320-wide touch
+    # screen, but TopScreen draws the page one pixel per pixel at X + 40 (the
+    # widened Items grid at X + 63, its sixth column at X + 80): a tap on the
+    # first Items column landed on the second.
+    Guard("tapping an item in the pause inventory selected the block to its right (left side of the page)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp",
+          r'MapPresentationPointToTouch\(\s+TopScreenPresentedToPageX\(topScreen\.X, layout\), topScreen\.Y,',
+          "oot3d_native_a32_input_tests (TestSwitchPageTouchLandsOnTheTappedElement)",
+          forbid=r'TopScreen400x240'),
+    Guard("inventory touch: the widened Items page maps with its own layout (grid X + 63, sixth column X + 80)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'ReadTopScreenWidePageState\(memory, &page\) &&\s+page\.ItemsActive\s+'
+          r'\? NativeA32TouchPresentation::TopScreenWideItemsPage'),
+    # --- 05/11: erasing a save file on the file select screen closed the game ---
+    # The guest deletes "data:/save0N.bin" (worker 0x41E7B8) and sends any failed
+    # result to its fatal-error handler. The host's DeleteFile made the save root
+    # "sdmc:/switch/oot3dre/savedata" canonical: std::filesystem treats it as
+    # relative and put the cwd in front, so the delete always failed on Horizon.
+    Guard("erasing a save file on the file select screen closed the game (DeleteFile canonicalized the sdmc:/ save root)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'kFsDeleteFileRequest\) \{.*?auto target = archive->Root;\s+bool missing = false;.*?'
+          r'removed = std::filesystem::remove\(target, error\);',
+          "oot3d_native_a32_ctr_fs_tests (TestSlotEraseWithRelativeSaveRoot)",
+          forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
+    # --- hud18 (test.10): the Restoration HUD's layout was wrong; it is removed and a
+    # saved hud_layout (normal or restoration) loads as the Normal HUD. ---
+    Guard("hud18: L3+R3 > HUD offers no Restoration layout; a saved hud_layout is read and ignored",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp",
+          r'"schema", "hud_layout", "hud_scale"',
+          "oot3d_top_screen_mod_profile_tests (saved hud_layout loads)",
+          forbid=r'TopScreenHudLayout|ParseTopScreenHudLayout'),
+    Guard("hud18: the settings panel has no layout radio buttons",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_settings_panel.cpp",
+          r'Checkbox\("Render Items hint"',
+          forbid=r'Restoration HUD|HudLayout'),
+    # --- hud18: the HUD said ZR/ZL over the items the physical R/L use (ZR/ZL do the
+    # game's shield/Z-target). custom_ui01 has no R/L label: the second letter of its
+    # ZR (rect 15) and ZL (rect 14) labels is drawn, centred where the label was. ---
+    Guard("hud18: Item I/II lanes labelled ZR/ZL instead of the physical R/L",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'result\.Quads\[0\] = \{alpha != 0\.0F,\s*\{372\.0F - 3\.875F, 31\.0F\},\s*'
+          r'\{7\.75F, 16\.0F\}, \{54\.625F, 231\.0F\},.*?'
+          r'\{6\.375F, 16\.0F\}, \{253\.0F, 227\.0F\},',
+          "oot3d_top_screen_mod_profile_tests (R/L labels)"),
+    # --- hud18: R (host ZR) lowered the ZR circle and the Y item; L only ZL; X/Y/A/B
+    # never. The icons read the lane offsets by item region (Item I, X, Y, Item II),
+    # so lane 2 (ZR) moved the Y icon. No lane moves on a press now. ---
+    Guard("hud18: pressing R also moved the Y item (no HUD lane moves on a press)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'bool ReadTopScreenTouchDynamicState\(NativeA32Memory &memory,\s*'
+          r'TopScreenTouchDynamicState \*state,',
+          "oot3d_top_screen_mod_profile_tests (press handling)",
+          forbid=r'VerticalOffsets|kNativeButtonOffsets'),
+    # --- 11/07: Landing roll (N64), L3+R3 > Game > Gameplay (config/no_landing_roll) ---
+    # OoT3D keeps the run-jump animation to the ground, so its run-jump-end check (0x004BC080)
+    # pre-empts the game's own roll (0x004BC120). The hook must stay in the block-entry list and
+    # divert only on the decision (generated code untouched).
+    Guard("Landing roll: no roll after jumping off a ledge (run-jump end pre-empted the roll)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'pc == Oot3dNativeGame::kLandingRollHookPc && wholeAotExecutionActive &&.*?'
+          r'DecideLandingRoll\(landing\) ==\s+Oot3dNativeGame::LandingRollChoice::Roll\).*?'
+          r'Oot3dWholeAotExitAt\(Oot3dNativeGame::kLandingRollSetupPc, state\)',
+          "oot3d_landing_roll_tests"),
+    Guard("Landing roll: the hook pc is a block-entry hook",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'add\("base", std::array\{[^}]*kLandingRollHookPc,',
+          "oot3d_landing_roll_tests, oot3d_native_block_entry_hooks_tests"),
+    # --- 11/09: Roll dash, L3+R3 > Game > Gameplay (config/roll_dash, off by default; issue #6) ---
+    # SingleScreen 3.0/3.1's Roll Dash from coccofresco's 5acf8138, 54fe8edf, 5b34bd61/3c2ed0f3 and
+    # a3eeb1e2. Off, no hook observes anything; the guest regions are mapped outside guest code; a
+    # 0.2.0 install is asked to download again only once the option is on without the animations.
+    Guard("Roll dash: on by default would change 0.2.0's game (the option is off until config/roll_dash)",
+          "tools/oot3d/native_game_runtime/oot3d_roll_dash.h",
+          r'RollDashEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
+          r'return std::filesystem::exists\(config / kRollDashConfigName, error\);',
+          "oot3d_roll_dash_runtime_tests (ConfigFile)"),
+    Guard("Roll dash: a hook observed with the option off (speed sites only while dashing, Navi only in a dash)",
+          "tools/oot3d/native_game_runtime/oot3d_roll_dash_runtime.cpp",
+          r'case kRollDashTurnSpeedSite:\s+case kRollDashMoveSpeedSite:\s+return mEnabled && mRunScale != 1\.0F;.*?'
+          r'case kRollDashRollSite:.*?return mEnabled \|\| mRollStep != RollStep::None;\s+'
+          r'case kRollDashNaviSite:\s+return mEnabled && mInRoll;\s+case kRollDashCsabQuery:\s+return mAnswerDash;',
+          "oot3d_roll_dash_runtime_tests (OffObservesNothing)"),
+    Guard("Roll dash: the hook PCs are block-entry hooks in every configuration (whole_aot_hook_gates.json)",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'add\("roll_dash", kRollDashHookPcs\);',
+          "oot3d_native_block_entry_hooks_tests, whole_aot_hook_gates_census"),
+    Guard("Roll dash: the policy must leave the graph at the runtime's target with its registers",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'runtime\.RollDash != nullptr && wholeAotExecutionActive &&\s+runtime\.RollDash->ShouldObserve\(pc\)\) \{.*?'
+          r'if \(runtime\.RollDash->Execute\(pc, state, &exit, nullptr\)\) \{.*?'
+          r'Oot3dWholeAotExitAt\(exit\.pc, state\);',
+          "oot3d_roll_dash_runtime_tests"),
+    Guard("Roll dash: flat scene view while A is held (the dash query's return taken for Player_Update, a3eeb1e2)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'if \(pc == Oot3dNativeGame::kOot3dPlayerUpdateEntry &&\s+'
+          r'\(runtime\.RollDash == nullptr \|\| !runtime\.RollDash->DashQueryPending\(\)\)\) \{\s+'
+          r'if \(runtime\.PlayerTimingProbe != nullptr\)',
+          "oot3d_roll_dash_runtime_tests (Update: registers restored)"),
+    Guard("Roll dash: its guest regions are mapped at the host frame start (a page-table rebuild from a hook "
+          "would run under guest code)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'ApplyTopScreenConfigSnapshot\(\);\s+UpdateRollDash\(\);',
+          "oot3d_roll_dash_runtime_tests"),
+    Guard("Roll dash: savestates wait for its native calls; a load resets it and maps its regions again",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'if \(rollDashStorage->Pending\(\)\) return SaveStateOutcome::Deferred;.*?'
+          r'rollDashStorage->Reset\(\);\s+UpdateRollDash\(\);',
+          "oot3d_roll_dash_runtime_tests (ResetAfterAStateLoad)"),
+    Guard("Roll dash: the import must extract and pin zelda_link_ext.zar beside the HUD outputs",
+          "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
+          r'Sha256Hex\(data\) != kLinkAnimationsSha256\).*?'
+          r'outputs\.LinkAnimations = ExtractLinkAnimations\(archive, source, region\);.*?'
+          r'WriteFileVerified\(configDirectory / kRollDashAnimationsName, outputs\.LinkAnimations\);',
+          "oot3d_topscreen_import_tests (TestLinkAnimations, TestInstall, --link-animations)"),
+    Guard("Roll dash: a 0.2.0 install (pack and HD art) must not be offered the 56 MB download unless "
+          "Roll dash is on without the animations",
+          "tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp",
+          r'const bool dashAnimationsMissing = ReadRollDashEnabled\(Config\(\)\) && '
+          r'!RollDashAnimationsInstalled\(Config\(\)\);\s+'
+          r'if \(\(packExists && hdArtExists && !dashAnimationsMissing\) \|\| !romfsExists\) return true;',
+          "oot3d_topscreen_import_tests (TestOffer)"),
+    # --- 11/10: Damage taken, Quick put away, Unmirrored Master Quest, L3+R3 > Game > Gameplay (issue #8) ---
+    # "OoT3D: Single Screen Experience" 3.2.2's options, off by default, always hooked and inert while
+    # off. The 33 mirror hooks are not block starts of a title module generated without
+    # whole_aot_observed_sites.json (check_master_quest_mirror_sites).
+    Guard("Damage taken: on by default would change the game (normal until config/damage_multiplier)",
+          "tools/oot3d/native_game_runtime/oot3d_damage_multiplier.h",
+          r'static std::atomic<std::uint8_t> multiplier\{kDamageMultiplierNormal\};.*?'
+          r'if \(!\(file >> word\)\) return kDamageMultiplierNormal;',
+          "oot3d_damage_multiplier_tests (TestConfig)"),
+    Guard("Quick put away: on by default would change the game (off until config/quick_put_away)",
+          "tools/oot3d/native_game_runtime/oot3d_quick_put_away.h",
+          r'QuickPutAwayEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
+          r'return std::filesystem::exists\(config / kQuickPutAwayConfigName, error\);',
+          "oot3d_quick_put_away_tests"),
+    Guard("Unmirrored Master Quest: on by default would change the game (mirrored until "
+          "config/master_quest_unmirrored)",
+          "tools/oot3d/native_game_runtime/oot3d_master_quest_mirror.h",
+          r'MasterQuestUnmirrored\(\) noexcept \{\s+static std::atomic<bool> unmirrored\{false\};.*?'
+          r'return std::filesystem::exists\(config / kMasterQuestUnmirroredConfigName, error\);',
+          "oot3d_master_quest_mirror_tests (TestDecision, TestConfig)"),
+    Guard("Damage taken: Health_ChangeBy's change is scaled at its entry, before Master Quest's doubling",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'if \(pc == Oot3dNativeGame::kDamageMultiplierHookPc\) \{.*?'
+          r'state\.r\[1\] = static_cast<uint32_t>\(Oot3dNativeGame::ScaleHealthChange\(',
+          "oot3d_damage_multiplier_tests (TestWithTheGame)"),
+    Guard("Quick put away: the 30-frame wait becomes one by leaving the graph at its store",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'pc == Oot3dNativeGame::kQuickPutAwayHookPc && wholeAotExecutionActive &&.*?'
+          r'state\.r\[0\] = Oot3dNativeGame::kQuickPutAwayFrames;.*?'
+          r'Oot3dWholeAotExitAt\(Oot3dNativeGame::kQuickPutAwayStorePc, state\)',
+          "oot3d_quick_put_away_tests"),
+    Guard("Unmirrored Master Quest: a scene mixed both worlds (the setting applies at the game's own read, "
+          "then the mirror reads see 0)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'if \(pc == Oot3dNativeGame::kMasterQuestMirrorApplyPc\) \{\s+'
+          r'Oot3dNativeGame::ApplyMasterQuestUnmirrored\(\);\s+'
+          r'\} else if \(Oot3dNativeGame::MasterQuestUnmirrorApplied\(\)\.load\(std::memory_order_relaxed\)\) \{\s+'
+          r'if \(const auto \*read = Oot3dNativeGame::FindMasterQuestMirrorRead\(pc\)\)\s+'
+          r'state\.r\[read->Register\] = 0U;',
+          "oot3d_master_quest_mirror_tests (TestDecision)"),
+    Guard("Unmirrored Master Quest: the TopScreen free camera inverted the stick in an unmirrored world",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp",
+          r'\(flags1 & 0x2000U\) != 0U, MasterQuestMirrorShown\(masterQuest\),',
+          "oot3d_master_quest_mirror_tests (TestDecision)"),
+    Guard("Unmirrored Master Quest: the pause map kept the mirrored world's inset",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'const float compactInset = MasterQuestMirrorShown\(compactLayout\) \? 36\.0F : 0\.0F;',
+          "oot3d_master_quest_mirror_tests (TestDecision)"),
+    Guard("Gameplay options: the hook PCs are block-entry hooks in every configuration (whole_aot_hook_gates.json)",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'add\("gameplay_options", std::array\{kDamageMultiplierHookPc, kQuickPutAwayHookPc,\s+'
+          r'kMasterQuestMirrorApplyPc, kSimpleShadowHookPc\}\);\s+'
+          r'for \(const auto &read : kMasterQuestMirrorReads\)\s+'
+          r'hooks\.push_back\(\{read\.HookPc, "master_quest_mirror"\}\);',
+          "oot3d_native_block_entry_hooks_tests, whole_aot_hook_gates_census"),
+    Guard("Simple shadow: on by default would change the game (off until config/simple_shadow; the body in "
+          "cutscenes off until config/simple_shadow_cutscenes)",
+          "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
+          r'SimpleShadowEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
+          r'SimpleShadowCutscenes\(\) noexcept \{\s+static std::atomic<bool> cutscenes\{false\};.*?'
+          r'inline bool ReadSimpleShadowFlag\(const std::filesystem::path &config, const char \*name\) \{\s+'
+          r'std::error_code error;\s+return std::filesystem::exists\(config / name, error\);',
+          "oot3d_simple_shadow_tests (TestConfig)"),
+    Guard("Simple shadow: the foot shadows run at alpha 0 (their floor bookkeeping kept, as in the mod) and "
+          "return into the hook, which puts the alpha back",
+          "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
+          r'if \(mFeetPending\) \{.*?memory\.Write8\(mActor \+ kSimpleShadowAlphaOffset, mAlpha\);\s+'
+          r'if \(state\.r\[14\] != mCaller\) \{\s+state\.r\[14\] = mCaller;\s+if \(compiled\) return mCaller;.*?'
+          r'state\.r\[index\] = mArguments\[index\];.*?if \(!enabled \|\| !compiled\) return std::nullopt;.*?'
+          r'memory\.Write8\(actor->Address \+ kSimpleShadowAlphaOffset, 0U\)\) return std::nullopt;.*?'
+          r'state\.r\[14\] = kSimpleShadowHookPc;',
+          "oot3d_simple_shadow_tests (TestHook)"),
+    Guard("Simple shadow: the policy leaves the graph where the hook says (whole-AOT execution only), and "
+          "hides the foot shadows only while the renderer can draw the body",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'pc == Oot3dNativeGame::kSimpleShadowHookPc && runtime\.SimpleShadow != nullptr &&\s+'
+          r'\(wholeAotExecutionActive \|\| runtime\.SimpleShadow->Pending\(\)\)\) \{.*?'
+          r'SimpleShadowEnabled\(\)\.load\(std::memory_order_relaxed\) &&\s+'
+          r'Fast::Oot3d::PlayerShadowBridge::Instance\(\)\.RendererReady\(\);.*?'
+          r'Execute\(\s+state, memory, simpleShadow, wholeAotExecutionActive,\s+'
+          r'Oot3dNativeGame::SimpleShadowCutscenes\(\)\.load\(std::memory_order_relaxed\)\)\) \{.*?'
+          r'Oot3dWholeAotExitAt\(\*exitPc, state\);',
+          "oot3d_simple_shadow_tests (TestHook)"),
+    Guard("Simple shadow: deko3d says it can draw the body only once its program is loaded",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'PlayerShadowBridge::Instance\(\)\.SetRendererReady\(mPlayerShadow\.Fragment != nullptr\);',
+          "oot3d_player_shadow_tests (TestBridge)"),
+    Guard("Simple shadow: each target gets its own captured draws (a frame can draw Link into two)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'record\.Target = &target;.*?std::erase_if\(shadow\.Draws, \[&\]\(const PlayerShadowDraw& draw\) \{\s+'
+          r'if \(draw\.Target != &target\) return false;',
+          ""),
+    Guard("Simple shadow: a state saved between the foot shadows and their return would keep alpha 0",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'if \(simpleShadow\.Pending\(\)\) return SaveStateOutcome::Deferred;.*?simpleShadow\.Reset\(\);',
+          "oot3d_simple_shadow_tests (TestHook)"),
+    Guard("Simple shadow: each native frame's shadow goes to the renderer with that frame, and the drawn sample "
+          "selects it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'PlayerShadowBridge::Instance\(\)\.PublishFrame\(\s+currentVisualFrame->Sequence, '
+          r'simpleShadow\.TakeFrame\(\)\);.*?'
+          r'PlayerShadowBridge::Instance\(\)\.SelectSample\(temporalSample\);',
+          "oot3d_player_shadow_tests (TestBridge)"),
+    Guard("Simple shadow: taken only from Link's opaque scene draws whose depth is the rasterizer's (the floor "
+          "was tested with it)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'composition\.NativeActorIdentity != Oot3d::PlayerShadowActorIdentity\(shadow\.Selected->Actor\).*?'
+          r'composition\.Layer != Renderer3ds::PicaCompositionLayer::OpaqueWorld.*?'
+          r'const bool rasterDepth = !draw\.WBuffering && draw\.DepthRange == -1\.0F && draw\.NearPlane == 0\.0F;\s+'
+          r'if \(!draw\.DepthTestEnabled \|\| !draw\.DepthWriteEnabled \|\| !rasterDepth \|\|',
+          "oot3d_player_shadow_tests (TestPatch)"),
+    Guard("Simple shadow, two passes: overlapping limbs darken a pixel once, and the borrowed stencil bit goes "
+          "back to zero (a second pass over the same meshes; a whole-target clear only once the game or a "
+          "savestate may have set it, since clearing one stencil bit rewrites the whole depth and stencil image)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'if \(stencil && shadow\.StencilShared && shadow\.StencilClean\.insert\(&target\)\.second\) \{.*?'
+          r'dkCmdBufClearDepthStencil\(cmd, false, 0\.0F, kPlayerShadowStencilBit, 0U\);.*?'
+          r'dkColorWriteStateSetMask\(&noColor, 0, 0\);.*?'
+          r'depthStencil\.stencilFrontPassOp = depthStencil\.stencilBackPassOp = pass;\s+'
+          r'depthStencil\.stencilFrontCompareOp = depthStencil\.stencilBackCompareOp = compare;.*?'
+          r'case Method::TwoPass:.*?'
+          r'drawMeshes\(true, DkStencilOp_Replace, DkCompareOp_NotEqual, std::nullopt\);.*?'
+          r'dkCmdBufBindColorWriteState\(cmd, &noColor\);\s+'
+          r'drawMeshes\(true, DkStencilOp_Zero, DkCompareOp_Always, std::nullopt\);',
+          "", forbid=r'depthWriteEnable = 1'),
+    Guard("Simple shadow, cover: the meshes set the stencil bit only inside the rectangle the cover then draws "
+          "over, so every bit they set goes back to zero (a bit left set would darken a later frame's cover or "
+          "block the two-pass shadow there)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'const DkScissor scissor = clip \? Intersect\(draw\.Scissor, \*clip\) : draw\.Scissor;.*?'
+          r'case Method::Cover: \{.*?'
+          r'const DkScissor marked = clip \? Intersect\(draw\.Scissor, \*clip\) : draw\.Scissor;\s+'
+          r'if \(marked\.width != 0U && marked\.height != 0U\) cover = cover \? Union\(\*cover, marked\) : marked;.*?'
+          r'drawMeshes\(true, DkStencilOp_Replace, DkCompareOp_Always, clip\);.*?'
+          r'bindDepthStencil\(false, DkCompareOp_Always, true, DkStencilOp_Zero, DkCompareOp_Equal\);.*?'
+          r'ApplyDkViewport\(cmd, static_cast<float>\(cover->x\), static_cast<float>\(cover->y\),\s+'
+          r'static_cast<float>\(cover->width\), static_cast<float>\(cover->height\)\);\s+'
+          r'dkCmdBufSetScissors\(cmd, 0, &\*cover, 1\);',
+          "oot3d_player_shadow_tests (TestScreenRect)"),
+    Guard("Simple shadow, texture: the floor quad samples the silhouette only once it is drawn (a fragment "
+          "barrier, the image cache dropped), a second target's silhouette waits for the first quad's reads, and "
+          "the scene target is bound again after it",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'if \(shadow\.SilhouetteFrame == mDevice\.Frame\(\)\) dkCmdBufBarrier\(cmd, DkBarrier_Fragments, 0\);.*?'
+          r'dkCmdBufBindRenderTargets\(cmd, colors, 1, nullptr\);\s+mBoundTarget = nullptr;.*?'
+          r'dkCmdBufBarrier\(cmd, DkBarrier_Fragments, DkInvalidateFlags_Image\);.*?'
+          r'if \(method == Method::Texture\) DrawPlayerShadowSilhouette\(draws\);\s+BindPicaTarget\(target\);',
+          "oot3d_player_shadow_tests (TestSilhouette)"),
+    Guard("Simple shadow: a frame whose draws use the top stencil bit keeps it (two passes and cover draw in one "
+          "pass then, not dropped: the foot shadows are hidden already)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'if \(draw\.Stencil\.Enabled && \(\(draw\.Stencil\.WriteMask \| draw\.Stencil\.CompareMask\) & '
+          r'kPlayerShadowStencilBit\) != 0U\) \{\s+shadow\.StencilTaken = shadow\.StencilShared = true;\s+'
+          r'shadow\.StencilClean\.clear\(\);.*?'
+          r'if \(shadow\.StencilTaken && \(method == Method::TwoPass \|\| method == Method::Cover\)\) \{.*?'
+          r'method = Method::OnePass;\s+\}\s+'
+          r'const bool stencil = method == Method::TwoPass \|\| method == Method::Cover;.*?'
+          r'case Method::OnePass:\s+drawMeshes\(false, DkStencilOp_Keep, DkCompareOp_Always, std::nullopt\);',
+          ""),
+    Guard("Simple shadow: drawn at the grass's points (after the opaque world, before translucent draws, "
+          "overlays and the display transfer)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(Oot3d::GrassDrawPointOf\(draw\.CompositionDomain, draw\.Composition\.Layer\)\) \{\s+'
+          r'DrawPlayerShadow\(\*target\);.*?DrawPlayerShadow\(\*source\);.*?DrawPlayerShadow\(\*source\);',
+          ""),
+    Guard("Gameplay options: a product title module without a block at their PCs would never run them",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'#if defined\(OOT3D_WHOLE_AOT_PRODUCT_MODE\)\s+'
+          r'// A gate runs only where the title module starts a block\.\s+'
+          r'const auto entries = Oot3dNativeGame::Oot3dWholeAotEntryPoints\(\);.*?'
+          r'for \(const uint32_t pc : Oot3dNativeGame::Oot3dGameplayOptionBlockPcs\(\)\).*?'
+          r'throw std::runtime_error\(',
+          "oot3d_native_block_entry_hooks_tests"),
+    # --- 11/08: N4 hook gates (--sparse-block-entries) ---
+    # Sparse whole-AOT code calls the block-entry callback only at the PCs of
+    # whole_aot_hook_gates.json, the census of Oot3dNativeBlockEntryHookPcs: a
+    # hook list assembled anywhere else would silently miss its gate.
+    Guard("N4: the window must take its block-entry hook list from Oot3dNativeBlockEntryHookPcs (the gated census)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'blockEntryHooks =\s+Oot3dNativeGame::Oot3dNativeBlockEntryHookPcs\(blockEntryHookOptions\);',
+          "oot3d_native_block_entry_hooks_tests",
+          forbid=r'blockEntryHooks\.(?:insert|push_back|emplace_back)\(|blockEntryHooks = std::vector'),
+    Guard("N4: the window refuses a hook list (or every-block callback) that sparse whole-AOT code does not gate",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(enableWholeAot\) \{\s+if \(const std::string error = Oot3dNativeGame::Oot3dWholeAotHookGatesError\(\s+'
+          r'Oot3dNativeGame::Oot3dLinkedWholeAotHookGates\(\), nativeBlockEntryPcs\);\s+!error\.empty\(\)\)\s+'
+          r'throw std::runtime_error\(error\);',
+          "oot3d_native_block_entry_hooks_tests"),
+    Guard("N4: generated code never runs a block-entry callback whose list its gates do not cover",
+          "tools/oot3d/native_game_runtime/oot3d_native_compiled_functions.cpp",
+          r'if \(blockEntry != nullptr && !blockEntrySelection\.GateError->empty\(\)\) \[\[unlikely\]\] \{\s+'
+          r'throw std::runtime_error\(\*blockEntrySelection\.GateError\);',
+          "oot3d_native_block_entry_hooks_tests"),
+    Guard("N4: the guest profile refuses to start on sparse whole-AOT code (it needs every block)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(guestProfileOn &&\s+!Oot3dNativeGame::Oot3dLinkedWholeAotHookGates\(\)\.EveryBlock\) \{.*?'
+          r'guestProfileOn = false;'),
+    Guard("N4: a title plugin never exports sparse whole-AOT code (the plugin ABI has no gate list)",
+          "tools/oot3d/native_game_runtime/triaevum_title_whole_aot_plugin.cpp",
+          r'if \(!Oot3dWholeAotHookGates\(\)\.EveryBlock\) \{.*?return nullptr;'),
+    # --- 07/11: fixes from upstream coccofresco/TriAevum after beta.1c ---
+    # dsp::DSP 0x14 (header 0x00140082) went unserved shortly before the end credits
+    # (TRIAEVUM_HOST_REQUEST_UNSERVED detail=0x140082); upstream 657e3d0f (#104).
+    Guard("process faulted before the end credits (DSP InvalidateDataCache 0x14 unserved, upstream #104)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_dsp.cpp",
+          r'event\.Detail == kDspFlushDataCacheRequest \|\|\s+event\.Detail == kDspInvalidateDataCacheRequest',
+          "oot3d_native_a32_ctr_host_tests"),
+    # A guest thread's ExitThread while the others only waited made Run report
+    # Terminated, and the window loop ended the game (leaving a hint-stone vision);
+    # upstream 034405bd.
+    Guard("game closed when one guest thread exited while the others waited (hint-stone vision)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'result\.Kind = ResolveStoppedThreadRunKind\(\s+result\.Kind, AllThreadsTerminated\(\)\);.*?'
+          r'result\.Kind = ResolveStoppedThreadRunKind\(\s+result\.Kind, AllThreadsTerminated\(\)\);',
+          "oot3d_native_a32_process_tests (TestThreadExitWhileOthersWait)",
+          forbid=r'if \(AllThreadsTerminated\(\)\) \{\s+result\.Kind = NativeA32ProcessRunKind::Terminated;'),
+    # --- 07/11: tevskip, pass-through TEV stages compiled as copies in deko3d.pack ---
+    # The binary must stay under the unmodified text's key (the console hashes the text it
+    # generates); stage 0's "previous" source is another input; a `precise` copy stopped uam
+    # folding the earlier clamps into .sat (+24 instructions on some texts).
+    Guard("tevskip: pass-through rewrite keyed by the unmodified text, stage 0 left alone, copies not precise",
+          "tools/oot3d/deko3d_shader_pack.py",
+          r'stage >= 1 and rgb_ok and match\["expr"\] == "combiner_output\.rgb".*?'
+          r'stage >= 1 and alpha_ok and match\["expr"\] == "combiner_output\.a".*?'
+          r'source, \(colors, alphas, stages\) = skip_tev_passthrough\(text\).*?'
+          r'compiled\[key\] = \(stage, source, flags\).*?entries\[key\] = \(stage, blob, flags\)',
+          "tests/switch/test_tev_passthrough.py",
+          forbid=r'shader_text_key\(\w+, source\)|precise vec3 color_output_\{stage\} = combiner_output\.rgb'),
+    # From the fork author's a7424d3b: the pack read byte by byte delayed the boot.
+    Guard("deko3d.pack read byte by byte delayed the boot (fork a7424d3b: one read)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'std::ios::binary \| std::ios::ate\);.*?file\.read\(reinterpret_cast<char\*>\(bytes\.data\(\)\)',
           forbid=r'std::vector<uint8_t> bytes\(\(std::istreambuf_iterator'),
+    Guard("tevskip: config/deko3d_pack picks the pack and deko3d.txt says which and whether it skips TEV stages",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
+          r'ShaderPackNameFromConfig\(line\).*?tev_passthrough=%s',
+          "oot3d_deko3d_backend_tests (TestShaderPack)"),
+    # --- 07/11: test.9 "the general flickers were still happening" (logs17) ---
+    # A command list the GSP queue kicked after the next Gameplay_Draw had switched the frame to
+    # its HUD phase came through as UI: its world models lost per-pixel lighting, grass and their
+    # placement for one frame (ui_list in deko3d.txt). The tracker stamps spans with their
+    # Gameplay_Draw generation; a list whose spans all predate the current one keeps its on-time
+    # domain (config/late_lists_as_ui restores the old attribution).
+    Guard("blink17: spans carry the Gameplay_Draw generation they were written in",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_composition.cpp",
+          r'span\.WriteGeneration = mWriteGeneration;.*?'
+          r'if \(pc == kOot3dGameplayDrawEntry\) \{\s+if \(\+\+mWriteGeneration == 0U\) \+\+mWriteGeneration;',
+          test="oot3d_native_pica_composition_tests (TestWriteGeneration)"),
+    Guard("blink17: a late list (every span from an earlier Gameplay_Draw, kicked in the HUD phase) keeps its "
+          "on-time domain unless config/late_lists_as_ui",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'const bool lateList = IsLateCompositionCommandList\(\s*mCommandListCompositionDomain, compositionSpans, '
+          r'mCurrentWriteGeneration\);.*?lateList && mLateCommandListsOnTime \? mOnTimeCompositionDomain.*?'
+          r': listDomain == Oot3dPicaCompositionDomain::Ui.*?auto domain = listDomain;',
+          test="oot3d_native_pica_frontend_tests"),
+    Guard("blink17: the GSP submission gives the frontend the refresh domain and the write generation",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_gsp.cpp",
+          r'SetCommandListTiming\(.*?PicaRefreshCompositionDomain.*?CurrentWriteGeneration\(\)'),
+    Guard("blink17: config/late_lists_as_ui is the A/B switch of the late-list attribution",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'SetLateCommandListsOnTime\(\s*!std::filesystem::exists\(configDirectory / "late_lists_as_ui".*?'
+          r'hostConfig\.PicaRefreshCompositionDomain = &picaRefreshCompositionDomain;'),
+    Guard("blink17: the transient watch compares each frame kind with its own kind (at 60 FPS the real frame "
+          "and its in-between frame lose the same draw) and names the first draw lost to its composition",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp",
+          r'auto& history = mHistory\[mOpen\.InBetween \? 1U : 0U\];.*?'
+          r'composition && mOpen\.LostToComposition\(\) == 0U',
+          test="oot3d_deko3d_inbetween_lighting_tests (TestLightingTransients)"),
+    Guard("blink17: perf.txt counts late lists, UI-kept world draws, scene draws in no span and invalid spans",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'" spans_invalid=".*?" late_lists=".*?" ui_world_draws=".*?" no_span_draws=".*?" owner_holes=".*?'
+          r'"composition note: window_end="'),
+    # --- 07/11: test.10 flicker (logs18, Temple of Time video 14:54:23 frame 102) ---
+    # Every remaining lighting transient was one scene draw in no span (no_span=1): a draw a CMB
+    # renderer writes inside its pass but outside its mesh packets lost per-pixel lighting for a
+    # game frame (the room mesh: pillar lighter, windows brighter). The tracker records the whole
+    # pass and the frontend gives such a draw its pass's composition (config/no_pass_span_fallback = old).
+    Guard("flicker18: the tracker records each scene CMB pass (SubmitDrawHandle entry to its return) as a pass span",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_composition.cpp",
+          r'if \(mActivePassBeginValid && !mActiveUiScope && !mActiveAtmosphereScope &&.*?'
+          r'span\.Attribution\.TemporalIdentity = \{\};.*?mPendingPassSpans\.push_back',
+          test="oot3d_native_pica_composition_tests (TestPassSpans)"),
+    Guard("flicker18: a scene draw in no span but inside a CMB pass takes the pass's composition",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'\+\+mCompositionResolveStats\.NoSpanDraws;.*?if \(passSpan != nullptr && mPassSpanFallback\) \{\s*'
+          r'\+\+mCompositionResolveStats\.PassSpanDraws;\s*return passSpan;',
+          test="oot3d_native_pica_frontend_tests"),
+    Guard("flicker18: the GSP submission hands the list's pass spans to the frontend",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_gsp.cpp",
+          r'TakeCommandListPassSpans\(.*?SetNextCommandListPassSpans\('),
+    Guard("flicker18: config/no_pass_span_fallback is the A/B switch of the pass fallback",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'SetPassSpanFallback\(\s*!std::filesystem::exists\(configDirectory / "no_pass_span_fallback"'),
+    Guard("flicker18: late_list notes have their own cap, so no_span notes still reach perf.txt",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'note\.Kind == Oot3dPicaCompositionNoteKind::LateList && mLateListNotesRecorded\+\+ >= 8U'),
+    Guard("listwalk: the fast list walk dispatches the draw triggers and the P3D interrupt request (kRegisterKinds)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'kinds\[kPicaTriggerDraw\] = kRegisterTrigger;\s*kinds\[kPicaTriggerDrawIndexed\] = kRegisterTrigger;\s*'
+          r'kinds\[kPicaIrqRequest\] = kRegisterTrigger;',
+          test="oot3d_native_pica_list_walk_tests"),
+    Guard("listwalk: diagnostic history (every write recorded) keeps the per-word walk",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'const bool fastWalk = mListWalkFast && !mDiagnosticHistoryEnabled;.*?'
+          r'while \(!fastWalk && cursor < commandListWords\.size\(\)\)',
+          test="oot3d_native_pica_list_walk_tests (TestDiagnosticHistory)"),
+    Guard("listwalk: config/list_walk_fast is read at setup (absent = on, 0 = per-word walk)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'picaFrontend\.SetListWalkFast\(Oot3dNativeGame::ReadNativeListWalkFast\(\)\);'),
+    Guard("hudscale75: the Switch's default HUD scale is 0.75 with no config (the mod's screenshots are ~0.70)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_config.h",
+          r'#ifdef __SWITCH__\s*inline constexpr float kTopScreenHudScaleDefault = 0\.75F;'),
+    Guard("hudscale75: the staged Switch config ships HUD scale 0.75",
+          "config/topscreen_ui.switch.json",
+          r'"hud_scale": 0\.75,'),
+    Guard("renderdraw: plans built unlocked take the shader-cache mutex around every cache access "
+          "(structural, vertex, fragment + uber, fixed binding)",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan.cpp",
+          r'CacheAccess access\(options\.CacheMutex\);\s*const auto cached =\s*'
+          r'shaderCache->VertexStructuralStates\.find.*?'
+          r'CacheAccess access\(options\.CacheMutex\);\s*const auto cachedVertex =.*?'
+          r'CacheAccess access\(options\.CacheMutex\);\s*const auto cachedFragment =.*?'
+          r'UberFragmentsBySpecializedKey\.emplace.*?'
+          r'CacheAccess access\(options\.CacheMutex\);\s*auto& shared = shaderCache->FixedBindingBytes;',
+          test="oot3d_native_pica_plan_build_tests"),
+    Guard("renderdraw: every deferred build passes the builder's options (the cache mutex with parallel builds)",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan.cpp",
+          r'options\.CacheMutex = mParallel \? &mCacheMutex : nullptr;',
+          forbid=r'BuildOot3dPicaVulkanDrawPlanAndConsumeResources\([^;]*&mShaderCache\);',
+          test="oot3d_native_pica_plan_build_tests"),
+    Guard("renderdraw: a parallel resolve builds the pending slots and only then waits for the worker's",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan.cpp",
+          r'parallel\.Resolve\(\*slot, draw, error, true, deferred\).*?'
+          r'run\.Close\(\);\s*for \(auto& \[drawIndex, slot\] : building\)',
+          test="oot3d_native_pica_plan_build_tests"),
+    Guard("renderdraw: the deko3d draw path never reads the canonical identity (left empty there, "
+          "config/plan_full_identity)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'SubmitPicaDraw',
+          forbid=r'Canonical(VertexProgram|FragmentProgram|RasterState|Pipeline|DynamicState|FullRegisterState)Id'),
+    Guard("renderdraw: the identity is left out only on deko3d without the semantic trace or extended diagnostics",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'"sdmc:/switch/oot3dre/config/plan_one_lock".*?'
+          r'const bool identityUnread =\s*std::string_view\(apiPointer->GetName\(\)\) == "deko3d" &&\s*'
+          r'!picaSemanticTrace\.Enabled\(\) && !launch\.ExtendedDiagnostics;'),
+    Guard("renderdraw: perf.txt reports the plan build options, worker draws, cost per draw and slot waits",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'" plan_identity=".*?" plan_in_place=".*?" plan_parallel=".*?" plan_worker_draws=".*?'
+          r'" plan_us_draw=".*?" plan_slot_waits=".*?" plan_slot_wait_ms="'),
+    # --- 11/07: Profile18 mirror natives (render loops, allocator walk, divide) ---
+    Guard("cpunatives: the mirror replacements use single-line prologues (the PGO profile of every other function in their shards stays valid)",
+          "tools/oot3d/native_a32_runtime/guest_overrides.json",
+          r'"0x00452DA4"[^\n]*"inline": true.*"0x0046E140"[^\n]*"inline": true.*"0x0046E048"[^\n]*"inline": true'
+          r'.*"0x0046D734"[^\n]*"inline": true.*"0x0046DA6C"[^\n]*"inline": true.*"0x00477D60"[^\n]*"inline": true'
+          r'.*"0x003FCA08"[^\n]*"inline": true.*"0x00466F78"[^\n]*"inline": true.*"0x00368D94"[^\n]*"inline": true'),
+    Guard("cpunatives: each mirror replacement has its own kill switch (config/guest_overrides_disable)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'config/guest_overrides_disable.*DisableOot3dGuestOverridesFromList'),
+    Guard("cpunatives: perf.txt shows the mirror replacements' executions and declines per window",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'perf << Oot3dNativeGame::FormatOot3dGuestOverridesPerfLine\(\);'),
+    # --- 11/08: the in-game updater never writes the save's siblings ---
+    Guard("updater: a release.json path under savedata-backups/, savedata.format or savestates/ was accepted",
+          "tools/oot3d/native_game_runtime/oot3d_update_release.cpp",
+          r'"game", "savedata", "savestates", "logs", "config", "update", "lab", "bench"\};.*?'
+          r'if \(first\.starts_with\("savedata"\)\) return false;',
+          "oot3d_update_release_tests (TestPaths, saves and save backups are untouched)"),
+    # --- 11/08: lighting LUT write of an equal value (ported from Gustavo's 014e0dee) ---
+    Guard("lighting LUT: a write of the value already there copied 24 KiB and rehashed with capture delta off",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'const uint32_t previous = std::as_const\(\*mLightingLuts\)\.Entry\(table, index\);\s*'
+          r'if \(previous == value\) \{',
+          "oot3d_native_pica_frontend_tests (repeated lighting LUT write)",
+          forbid=r'if \(mCaptureDelta && previous == value\)'),
+    # --- 11/05: loss-proof saves (docs/SAVE_SAFETY.pt-BR.md) ---
+    # weakly_canonical/canonical with a device root (sdmc:/) prepends the cwd
+    # on devkitA64, so DeleteFile answered CommandNotAllowed on the Switch.
+    Guard("DeleteFile (Erase file) on the Switch: lexical containment, no canonical/weakly_canonical with sdmc:/",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'CtrArchivePathContained\(archive->Root, \*relative\)',
+          "oot3d_native_a32_ctr_fs_tests (TestArchiveContainmentLexical)",
+          forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
+    Guard("FormatSaveData deleted the save directory (remove_all); now moves it to <save>-backups/format-*",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'journal->MoveSaveAsideForFormat\(',
+          "oot3d_native_a32_ctr_fs_tests (TestFormatNeverDeletesSave)",
+          forbid=r'remove_all\(mConfig\.SaveDataDirectory'),
+    # Per-handle commit (11/05, round 2): the old journal->Commit(file.FilePath)
+    # committed on Close/Flush of ANY handle, even a read-only one (S3).
+    Guard("in-place save write (a crash midway truncated the save): journal .triaevum-tmp/.triaevum-new, per-handle commit",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'journal->BeginWrite\(file\.FilePath, file\.SaveJournalWriter\).*?'
+          r'journal->Flush\(file\.FilePath, file\.SaveJournalWriter\).*?'
+          r'journal->Close\(file\.FilePath, file\.SaveJournalWriter\)',
+          "oot3d_native_a32_ctr_fs_tests (TestSaveWriteIsAtomic, TestReadOnlyCloseDoesNotCommit)",
+          forbid=r'journal->Commit\(file\.FilePath\)'),
+    # The old way (remove destination + rename) lost the save if the rename
+    # of the new file failed after the remove; now the destination becomes .triaevum-old and is restored.
+    Guard("save swap on the Switch (EEXIST): destination becomes .triaevum-old and is restored if the new rename fails",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
+          r'error == std::errc::file_exists.*?RenamePath\(destination, previous, asideError\).*?'
+          r'RenamePath\(source, destination, error\);\s+if \(error\) \{.*?RenamePath\(previous, destination, backError\)',
+          "oot3d_native_a32_ctr_fs_tests (TestHorizonRenameCommit, TestRenameFailureNeverLosesSave)",
+          forbid=r'std::filesystem::remove\(destination, \w+\);\s+error\.clear\(\);\s+'
+                 r'(std::filesystem::rename|RenamePath)\(source, destination'),
+    Guard("failed save Write/SetSize (SD full) was committed on Close (S2)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'if \(!success && journal != nullptr\) journal->MarkFailed\(file\.FilePath\);.*?'
+          r'if \(!resized && journal != nullptr\) journal->MarkFailed\(file\.FilePath\);',
+          "oot3d_native_a32_ctr_fs_tests (TestFailedWriteIsNotCommitted)"),
+    Guard("svcCloseHandle of the last writer handle commits the save transaction (S3)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'object->Type == "client_session:file:savedata".*?journal->Close\(object->FilePath, object->SaveJournalWriter\)',
+          "oot3d_native_a32_ctr_fs_tests (TestReadOnlyCloseDoesNotCommit)"),
+    Guard("backup prune deleted the just-created generation (ordered by name date; clock went back) (S4)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
+          r'AppendBackupOrder\(mBackupRoot, mGeneration\.filename\(\)\.string\(\)\);\s+'
+          r'PruneCtrSaveBackups\(mBackupRoot, kCtrSaveBackupGenerations, mGeneration\);',
+          "oot3d_native_a32_ctr_fs_tests (TestBackupPruneUsesSequence)"),
+    Guard("truncated/corrupt backup counted as a copy: copy to .triaevum-tmp is verified (size + checksum) (S1)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
+          r'copy\.size\(\) == bytes\.size\(\) &&\s+Checksum\(copy\) == Checksum\(bytes\).*?'
+          r'const auto partial = WithSuffix\(destination, kCtrSaveJournalTemporarySuffix\);',
+          "oot3d_native_a32_ctr_fs_tests (TestBackupIsVerified)"),
+    Guard("interrupted swap was not recovered when the run starts from a savestate (S8)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'mSaveJournal = std::make_shared<CtrSaveJournal>\(mConfig\.SaveDataDirectory\);.*?mSaveJournal->RecoverOnce\(\);',
+          "oot3d_native_a32_ctr_fs_tests (TestRecoveryBeforeFirstAccess)"),
+    Guard("[compatibility] the OoT3D save on the Switch stays at sdmc:/switch/oot3dre/savedata",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'const_cast<char\*>\("--save-data"\),\s+const_cast<char\*>\("sdmc:/switch/oot3dre/savedata"\)'),
+    # --- Guardas do nosso fork (deko3d) sem equivalente no english do JohnUzoka (mescla 12/11) ---
     Guard("uber (paramétrico) de 91-154 KiB: loop do TEV desenrolado pelo uam",
           "runtime/three_ds_recomp/src/fast/renderer3ds/pica_tev_program.cpp",
           r'int stage_count = program\.control\.z == 0u \? 6 : int\(program\.control\.z\);\s+'
@@ -633,10 +2790,6 @@ GUARDS = [
     Guard("uber embutia o avaliador de proctex mesmo com a unidade desligada",
           "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_shader_gen.cpp",
           r'if \(procTexEnabled\)\s+source << Fast::Renderer3ds::PicaProcTexCode'),
-    # --- 05/11: outro título (Super Mario 3D Land) no mesmo runtime ---
-    # Os núcleos manuais (PicaCommandWriter 0x00307BD8, memcpy 0x00371738...) e o
-    # desbloqueio do Master Quest estão presos a endereços/arquivos do OoT3D; num
-    # outro code.bin corromperiam o processo. O perfil vem do program id.
     Guard("perfil genérico de título religou núcleos manuais/MQ do OoT3D (corromperia outro code.bin)",
           "tools/oot3d/native_game_runtime/ctr_title_profile.h",
           r'GenericTitleProfile.*?ManualCompiledFunctions = false;.*?GuestOverrides = false;'
@@ -660,10 +2813,6 @@ GUARDS = [
     Guard("timers do kernel não entravam no relógio do host (SetTimer nunca disparava)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
           r'WakeSleepWaiters\(\);\s+// Ambos.*?FireKernelTimers\(\);\s+ExpireSynchronizationTimeouts\(\);'),
-    # --- 05/11: fronteira de quadro genérica (commit de framebuffer no GSP) ---
-    # O executável achava o fim do quadro só pelos PCs do OoT3D (GameState_Update
-    # 0x00417014 + limitador 0x003FD27C/3A8/3B8). Outro título usa o provedor GSP;
-    # o Zelda tem de continuar nos PCs, sem provedor no host (byte a byte igual).
     Guard("perfil OoT3D deixou de usar a fronteira de quadro pelos PCs do code.bin",
           "tools/oot3d/native_game_runtime/ctr_title_profile.h",
           r'CtrFrameBoundarySource FrameBoundary =\s+CtrFrameBoundarySource::Oot3dGuestPcs;'
@@ -686,17 +2835,22 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.h",
           r'FrameBoundaryProvider\* FrameBoundary = nullptr;',
           "oot3d_native_a32_ctr_host_tests (TestHostReportsGspFrameBoundaries)"),
+    # Desde a mescla do english (12/11) a lista vem só de Oot3dNativeBlockEntryHookPcs (guarda N4):
+    # o static_assert amarra os PCs da fronteira do OoT3D aos da lista, que os tem de ter.
     Guard("os ganchos do limitador do OoT3D sumiram da janela (fronteira por PCs)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
-          r'const auto frameBoundaryHooks = frameBoundaryProvider->GuestHookPcs\(\);\s+'
-          r'blockEntryHooks\.insert\(blockEntryHooks\.end\(\), frameBoundaryHooks\.begin\(\),'),
+          r'static_assert\(Oot3dNativeGame::kOot3dFrameBoundaryGameStateUpdatePc ==\s+kGameStateUpdate &&\s+'
+          r'Oot3dNativeGame::kOot3dFrameBoundaryPacingBeginPc ==\s+Oot3dNativeGame::kOot3dFramePacingBeginEntry &&\s+'
+          r'Oot3dNativeGame::kOot3dFrameBoundaryPacingDecisionPc ==\s+Oot3dNativeGame::kOot3dFramePacingDecisionEntry &&\s+'
+          r'Oot3dNativeGame::kOot3dFrameBoundaryPacingCommitPc ==\s+Oot3dNativeGame::kOot3dFramePacingCommitEntry,.*?'
+          r'blockEntryHooks =\s+Oot3dNativeGame::Oot3dNativeBlockEntryHookPcs\(blockEntryHookOptions\);'),
+    Guard("os ganchos do limitador do OoT3D sumiram da lista de ganchos de bloco",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'kGameStateUpdate,\s+kOot3dPlayerUpdateEntry,\s+kOot3dFramePacingBeginEntry,\s+'
+          r'kOot3dFramePacingDecisionEntry,\s+kOot3dFramePacingCommitEntry,'),
     Guard("ctr_title_boot_probe ligava núcleos manuais do OoT3D sem olhar o perfil",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
           r'dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U\);'),
-    # --- 05/11: Super Mario 3D Land no executável com janela (Linux, Vulkan) ---
-    # A janela ligava sempre os ganchos por PC do OoT3D (projeção, PlayState,
-    # composição PICA, UI, TopScreen), typed gameplay, mass/true AOT e núcleos
-    # manuais; o perfil genérico desliga tudo. O OoT3D tem de continuar igual.
     Guard("perfil OoT3D perdeu os ganchos da janela/TopScreen (Zelda mudaria)",
           "tools/oot3d/native_game_runtime/ctr_title_profile.h",
           r'bool Oot3dGuestHooks = true;.*?bool TopScreenUi = true;'
@@ -763,72 +2917,14 @@ GUARDS = [
     Guard("build Linux do executável com janela: ~SwitchVsyncClock indefinido no link",
           "CMake/oot3d/game.cmake",
           r'if \(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch"\).*?oot3d_switch_vsync_clock\.cpp\)'),
-    # --- 05/11: saves à prova de perda (docs/pesquisas/2026-11-05-saves-seguros.md) ---
-    # weakly_canonical/canonical com raiz de dispositivo (sdmc:/) concatena o cwd
-    # no devkitA64 e o DeleteFile respondia CommandNotAllowed no Switch.
-    Guard("DeleteFile (Erase file) no Switch: contenção lexical, sem canonical/weakly_canonical com sdmc:/",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
-          r'CtrArchivePathContained\(archive->Root, \*relative\)',
-          "oot3d_native_a32_ctr_fs_tests (TestArchiveContainmentLexical)",
-          forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
-    Guard("FormatSaveData apagava a pasta do save (remove_all); agora move para <save>-backups/format-*",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
-          r'journal->MoveSaveAsideForFormat\(',
-          "oot3d_native_a32_ctr_fs_tests (TestFormatNeverDeletesSave)",
-          forbid=r'remove_all\(mConfig\.SaveDataDirectory'),
-    # Commit por handle (05/11, rodada 2): a forma antiga journal->Commit(file.FilePath)
-    # confirmava no Close/Flush de QUALQUER handle, até só de leitura (S3).
-    Guard("escrita de save no lugar (queda no meio truncava o save): diário .triaevum-tmp/.triaevum-new, commit por handle",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
-          r'journal->BeginWrite\(file\.FilePath, file\.SaveJournalWriter\).*?'
-          r'journal->Flush\(file\.FilePath, file\.SaveJournalWriter\).*?'
-          r'journal->Close\(file\.FilePath, file\.SaveJournalWriter\)',
-          "oot3d_native_a32_ctr_fs_tests (TestSaveWriteIsAtomic, TestReadOnlyCloseDoesNotCommit)",
-          forbid=r'journal->Commit\(file\.FilePath\)'),
-    # A forma antiga (remove do destino + rename) deixava o save sumido se o rename
-    # do novo falhasse depois do remove; agora o destino vira .triaevum-old e volta.
-    Guard("troca do save no Switch (EEXIST): destino vira .triaevum-old e volta se o rename do novo falhar",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
-          r'error == std::errc::file_exists.*?RenamePath\(destination, previous, asideError\).*?'
-          r'RenamePath\(source, destination, error\);\s+if \(error\) \{.*?RenamePath\(previous, destination, backError\)',
-          "oot3d_native_a32_ctr_fs_tests (TestHorizonRenameCommit, TestRenameFailureNeverLosesSave)",
-          forbid=r'std::filesystem::remove\(destination, \w+\);\s+error\.clear\(\);\s+'
-                 r'(std::filesystem::rename|RenamePath)\(source, destination'),
-    Guard("Write/SetSize do save que falha (SD cheio) era confirmado no Close (S2)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
-          r'if \(!success && journal != nullptr\) journal->MarkFailed\(file\.FilePath\);.*?'
-          r'if \(!resized && journal != nullptr\) journal->MarkFailed\(file\.FilePath\);',
-          "oot3d_native_a32_ctr_fs_tests (TestFailedWriteIsNotCommitted)"),
-    Guard("svcCloseHandle do último handle escritor confirma a transação do save (S3)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
-          r'object->Type == "client_session:file:savedata".*?journal->Close\(object->FilePath, object->SaveJournalWriter\)',
-          "oot3d_native_a32_ctr_fs_tests (TestReadOnlyCloseDoesNotCommit)"),
-    Guard("prune dos backups apagava a geração recém-criada (ordem pela data do nome; relógio para trás) (S4)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
-          r'AppendBackupOrder\(mBackupRoot, mGeneration\.filename\(\)\.string\(\)\);\s+'
-          r'PruneCtrSaveBackups\(mBackupRoot, kCtrSaveBackupGenerations, mGeneration\);',
-          "oot3d_native_a32_ctr_fs_tests (TestBackupPruneUsesSequence)"),
-    Guard("backup truncado/estragado contava como cópia: cópia em .triaevum-tmp conferida (tamanho + checksum) (S1)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
-          r'copy\.size\(\) == bytes\.size\(\) &&\s+Checksum\(copy\) == Checksum\(bytes\).*?'
-          r'const auto partial = WithSuffix\(destination, kCtrSaveJournalTemporarySuffix\);',
-          "oot3d_native_a32_ctr_fs_tests (TestBackupIsVerified)"),
-    Guard("troca interrompida não era recuperada quando a execução começa por savestate (S8)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
-          r'mSaveJournal = std::make_shared<CtrSaveJournal>\(mConfig\.SaveDataDirectory\);.*?mSaveJournal->RecoverOnce\(\);',
-          "oot3d_native_a32_ctr_fs_tests (TestRecoveryBeforeFirstAccess)"),
     Guard("título genérico nunca usa a pasta de save do OoT3D (sdmc:/switch/oot3dre/savedata)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'ResolveCtrTitleSaveDataDirectory\(',
           "oot3d_native_a32_ctr_fs_tests (TestTitleSaveLayout)"),
-    Guard("[compatibilidade] o save do OoT3D no Switch continua em sdmc:/switch/oot3dre/savedata",
-          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
-          r'const_cast<char\*>\("--save-data"\),\s+const_cast<char\*>\("sdmc:/switch/oot3dre/savedata"\)'),
     Guard("captura .png gravava BMP (primeira imagem do Mario em PNG)",
           "tools/oot3d/native_demo_host/oot3d_demo_host_screenshot.cpp",
           r'const bool png = ScreenshotPathIsPng\(screenshotPath\);.*?WritePngFromRgb8Framebuffer',
           "oot3d_demo_host_png_tests"),
-    # --- 05/11: SM3DL parado no logo amarelo (docs/pesquisas/2026-11-05-sm3dl-logo.md) ---
     Guard("SM3DL: SelfNCCH (arquivo 3, ícone do ExeFS) dava err:f e matava o processo",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'archive->Id == kFsSelfNcchArchiveId.*?'
@@ -848,9 +2944,14 @@ GUARDS = [
           "oot3d_native_a32_ctr_host_tests (TestCfgAzaharDefaultBlocks)"),
     Guard("SM3DL: CMDBUF_JUMP0/1 da PICA ignorado (sub-rotina sem IRQ, lista GX nunca concluía)",
           "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
-          r'kPicaCommandBufferJump0 = 0x23CU;.*?pendingJumpChannel = id - kPicaCommandBufferJump0;.*?'
-          r'commandListWords = jumpedListWords;',
-          "oot3d_native_pica_frontend_tests"),
+          r'kPicaCommandBufferJump0 = 0x23CU;.*?kinds\[kPicaCommandBufferJump0\] = kRegisterJump;.*?'
+          r'const auto followPendingJump = \[&\]\(\) -> bool \{.*?commandListWords = jumpedListWords;.*?'
+          r'if \(kind == kRegisterJump\) \{\s+pendingJumpChannel = id - kPicaCommandBufferJump0;.*?'
+          r'while \(cursor < wordCount \|\| pendingJumpChannel\.has_value\(\)\) \{\s+'
+          r'if \(pendingJumpChannel\.has_value\(\)\) \{\s+if \(!followPendingJump\(\)\).*?'
+          r'pendingJumpChannel = id - kPicaCommandBufferJump0;.*?'
+          r'if \(pendingJumpChannel\.has_value\(\) && !followPendingJump\(\)\)',
+          "oot3d_native_pica_frontend_tests (também com list_walk_fast)"),
     Guard("SM3DL: seletor de Mii (applet 0x402) pré-carregado e GetAppletInfo esperado para sempre",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_applet.cpp",
           r'case kAptGetAppletInfoRequest: \{\s+if \(slot\.Registered && appletId == slot\.AppletId\).*?'
@@ -987,19 +3088,16 @@ GUARDS = [
           r'std::copy_n\(value\.begin\(\), first, bytes\.begin\(\)\);\s*'
           r'for \(size_t filled = first; filled < size;\)',
           "oot3d_native_pica_transfer_tests (fill 16/24/32 bits)"),
-    Guard("LUT de iluminação: escrita de valor igual copiava 24 KB e refazia o hash (SM3DL: 78% das escritas)",
-          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
-          r'table < Oot3dPicaLightingLutState::TableCount &&\s*'
-          r'mLightingLuts->Entry\(table, index\) != writeValue\)',
-          "oot3d_native_pica_frontend_tests (escrita repetida)"),
     Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'
-          r'bottomScreenPictureInPictureVisible;.*?WidescreenMenuCornersActive\(\),\s*lowerScreenPictureInPicture\);',
+          r'bottomScreenPictureInPictureVisible;.*?nativeFrontendTouchEnabled \|\| lowerScreenPictureInPicture,\s*'
+          r'lowerScreenPictureInPicture\s*\? (?:Oot3dNativeGame::)?NativeA32TouchPresentation::LowerScreenPictureInPicture',
           "oot3d_native_a32_input_tests (LowerScreenPictureInPicture)"),
     Guard("toque do PiP: o ponteiro é mapeado pelo retângulo do PiP, não pela tela inteira",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp",
-          r'NativeA32TouchPresentation::LowerScreenPictureInPicture\s*\? Oot3d::Renderer::MapUiPictureInPicturePoint\(',
+          r'if \(presentation == NativeA32TouchPresentation::LowerScreenPictureInPicture\) \{\s+'
+          r'const auto logical = Oot3d::Renderer::MapUiPictureInPicturePoint\(',
           "oot3d_native_a32_input_tests (LowerScreenPictureInPicture)"),
     Guard("tela de baixo do SM3DL vinha de 80 linhas dentro do alvo de cima e ia pela CPU (azul): sub-retângulo só no genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
@@ -1010,10 +3108,6 @@ GUARDS = [
           r'PicaDisplayTransferSourceRowsFor\(.*?const bool nriDisplayCopy = sourceFirstRow == 0U &&.*?'
           r'blit\.srcOffsets\[0\] = \{\s*0, static_cast<int32_t>\(sourceFirstRow\), 0\};',
           "oot3d_native_pica_vulkan_bridge_tests (TestDisplayTransferSourceRows)"),
-    # --- 04/11 (fork JohnUzoka, 0.1.0): mira por giroscópio no Switch ---
-    # O SDL2 do devkitPro não informa sensores: sem o provedor da libnx o
-    # host.ControllerMotion vinha sempre vazio e a mira por giroscópio nunca
-    # funcionava no console (ee13d420).
     Guard("mira por giroscópio nunca funcionava no Switch (SDL do devkitPro sem sensores): seis eixos da libnx",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
           r'if \(switchConsoleMotion && !host\.ControllerMotion\.GyroscopeValid &&\s*'
@@ -1045,21 +3139,14 @@ GUARDS = [
           r'return Normalize\(Multiply\(Delta\(\{pitchRate,0,0\}, t\), next\.SensorToVirtual\)\);',
           "three_ds_recomp_input_tests (TestPhysicalGyroAfterSyntheticAim)",
           forbid=r'Delta\(yawAxis'),
-    # --- 08/11: importação do dump do jogador no primeiro início (port do fork JohnUzoka) ---
-    # Portado de JohnUzoka/TriAevum-Switch a8695b96, 1b2af4ad, 19a8ea64. O game/
-    # do OoT3D é montado no console a partir do .3ds/.cci decriptado do jogador.
     Guard("importação do dump roda antes de os argumentos lerem o game/ (manifesto), só no lançamento padrão do NRO (OoT3D)",
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
-          r'if \(argc <= 1\) \{\s+if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;\s+\}'
-          r'.*?oot3d_native_process_manifest\.json'),
+          r'const bool defaultLaunch =\s+argc <= 1 \|\|.*?if \(defaultLaunch\) \{\s+(//[^\n]*\n\s+)*'
+          r'if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;.*?oot3d_native_process_manifest\.json'),
     Guard("[decisão] config/no_rom_import desliga a importação do dump (o boot lê o game/ como antes)",
           "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
           r'kDisabled = "sdmc:/switch/oot3dre/config/no_rom_import";.*?bool RunSwitchRomImport\(\) \{\s+'
           r'std::error_code error;\s+if \(fs::exists\(kDisabled, error\)\)\s+return true;'),
-    Guard("importação do dump: o FS do Horizon não renomeia por cima de arquivo existente (apaga antes)",
-          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
-          r'void Replace\(const fs::path& from, const fs::path& to\) \{\s+std::error_code error;\s+fs::remove\(to, error\);',
-          "oot3d_rom_import_tests"),
     Guard("importação do dump: commit interrompido não deixa manifesto (o manifesto antigo sai antes dos renames)",
           "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
           r'for \(const char\* name : \{kManifestName, kReceiptName\}\) \{\s+fs::remove\(gameDirectory / name, error\);'
@@ -1074,34 +3161,28 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
           r'\{"title_id", U64\(x \+ 0x200\)\},',
           "oot3d_rom_import_tests (TestManifest)"),
-    Guard("tela da importação: stdout/stderr voltam depois do consoleExit (a primeira linha de log travava o jogo)",
-          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
-          r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),
-    Guard("tela da importação: texto pt-BR sem acento no console do libnx (fonte de 256 glifos, sem UTF-8)",
-          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
-          r'std::printf\("\\x1b\[1;1H\\x1b\[36m%s\\x1b\[0m\\n\\n%s", RomImport::ConsoleAscii\(mTitle\)\.c_str\(\),\s+'
-          r'RomImport::ConsoleAscii\(body\)\.c_str\(\)\);',
-          "oot3d_rom_import_tests (TestConsoleAscii)"),
     Guard("[decisão] manter o dump é o padrão: ele só é apagado com Y, depois de uma importação conferida",
           "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
           r'if \(!failure\.empty\(\)\) \{.*?return false;\s+\}.*?if \(\*button & HidNpadButton_Y\) \{\s+try \{\s+ri::RemoveSource\(plan->Input\);',
           forbid=r'RemoveSource\((?!plan->Input\);)'),
 ]
 
-# Substituições nativas com VFP que custam mais que a tradução: precisam continuar
-# desligadas até alguém medir de novo (FPSCR do guest, 2026-10-18).
-DISABLED_OVERRIDES = {"0x003727F0", "0x003325F0", "0x0036E168", "0x00372070", "0x002CDE90"}
+# Native VFP overrides that cost more than the translation: they must stay
+# disabled until someone measures again (guest FPSCR, 2026-10-18).
+DISABLED_OVERRIDES = {"0x003727F0", "0x003325F0", "0x0036E168", "0x00372070", "0x002CDE90",
+                      # Profile18 mirror round: no gain in the loop-only bench (2026-11-07).
+                      "0x00477D60", "0x003FCA08", "0x00368D94", "0x00466F78"}
 
 
 def check_guard(guard: Guard) -> str | None:
     path = ROOT / guard.path
     if not path.exists():
-        return f"arquivo sumiu: {guard.path}"
+        return f"file disappeared: {guard.path}"
     text = path.read_text(encoding="utf-8", errors="replace")
     if not re.search(guard.pattern, text, re.S):
-        return f"correção não encontrada em {guard.path}"
+        return f"fix not found in {guard.path}"
     if guard.forbid and re.search(guard.forbid, text, re.S):
-        return f"padrão proibido voltou em {guard.path}"
+        return f"forbidden pattern came back in {guard.path}"
     return None
 
 
@@ -1113,25 +3194,49 @@ def check_overrides() -> str | None:
     disabled = {entry["entry"] for entry in entries if entry.get("disabled")}
     missing = sorted(DISABLED_OVERRIDES - disabled)
     if missing:
-        return "substituições VFP religadas sem medição: " + ", ".join(missing)
+        return "overrides re-enabled without measurement: " + ", ".join(missing)
     return None
+
+
+def check_master_quest_mirror_sites() -> str | None:
+    header = (ROOT / "tools/oot3d/native_game_runtime/oot3d_master_quest_mirror.h").read_text(encoding="utf-8")
+    table = re.search(r'kMasterQuestMirrorReads\{\{(.*?)\}\};', header, re.S)
+    if table is None:
+        return "kMasterQuestMirrorReads not found"
+    hooks = {int(pc, 16) for pc in re.findall(r'\{0x([0-9A-Fa-f]{8})U, \dU\}', table.group(1))}
+    catalog = json.loads((ROOT / "tools/oot3d/native_a32_runtime/whole_aot_observed_sites.json")
+                         .read_text(encoding="utf-8"))
+    sites = {int(site["pc"], 16) for site in catalog["sites"]}
+    missing = sorted(hooks - sites)
+    if len(hooks) != 33 or missing:
+        return f"{len(hooks)} mirror hooks; not in whole_aot_observed_sites.json: " + ", ".join(
+            f"0x{pc:08X}" for pc in missing)
+    return None
+
+
+CHECKS = [
+    ("overrides measured slower than the translation remain disabled", check_overrides),
+    ("the 33 unmirrored Master Quest hooks start blocks (whole_aot_observed_sites.json)",
+     check_master_quest_mirror_sites),
+]
 
 
 def main() -> int:
     if "--list" in sys.argv:
         for guard in GUARDS:
-            print(f"- {guard.bug}\n    {guard.path}" + (f"\n    teste: {guard.test}" if guard.test else ""))
+            print(f"- {guard.bug}\n    {guard.path}" + (f"\n    test: {guard.test}" if guard.test else ""))
         return 0
     failures = 0
     for guard in GUARDS:
         error = check_guard(guard)
         print(("FAIL " if error else "ok   ") + guard.bug + (f"\n     {error}" if error else ""))
         failures += error is not None
-    error = check_overrides()
-    print(("FAIL " if error else "ok   ") + "5 substituições VFP seguem desligadas"
-          + (f"\n     {error}" if error else ""))
-    failures += error is not None
-    print(f"{len(GUARDS) + 1 - failures}/{len(GUARDS) + 1} guardas ok")
+    for name, check in CHECKS:
+        error = check()
+        print(("FAIL " if error else "ok   ") + name + (f"\n     {error}" if error else ""))
+        failures += error is not None
+    total = len(GUARDS) + len(CHECKS)
+    print(f"{total - failures}/{total} guards ok")
     return 1 if failures else 0
 
 

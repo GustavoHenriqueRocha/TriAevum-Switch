@@ -1,9 +1,11 @@
 #include "oot3d_native_render_command_stream.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_switch_threads.h"
 #include "oot3d_hang_watchdog.h"
 #include "fast/backends/gl_frame_profiler.h"
 
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -128,15 +130,30 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
         return;
     }
     StartWorker();
+    // config/second_core: the game thread releases the kernel lock (only
+    // from the frame loop's own level, never inside an SVC or a world stop)
+    // when it is about to block for a frame slot, so the second core keeps
+    // its SVCs meanwhile. A submission that does not wait keeps it: on
+    // Horizon an unlock with the second core waiting hands it the lock, and
+    // the game thread then waited for that core's whole SVC or DSP frame at
+    // every Submit. Declared before `lock`: the kernel lock is taken back
+    // only after the stream's mutex is released.
+    std::optional<SecondCore::HostWaitRelease> kernelRelease;
     std::unique_lock lock(mMutex);
     RethrowPendingFailureLocked(lock);
     if (endsFrame) {
+        const auto slotReady = [&] {
+            return mFailure != nullptr || ShutdownRequested() ||
+                   mFramesQueued < mMaxFramesInFlight;
+        };
+        if (!slotReady()) {
+            lock.unlock();
+            kernelRelease.emplace();
+            lock.lock();
+        }
         CountedWait(mProgress, lock, mProgressWaiters,
                     mWaitStats.SubmitWaits, mWaitStats.SubmitWaitNanoseconds,
-                    HangWatch::Stage::WaitFramesInFlight, [&] {
-                        return mFailure != nullptr || ShutdownRequested() ||
-                               mFramesQueued < mMaxFramesInFlight;
-                    });
+                    HangWatch::Stage::WaitFramesInFlight, slotReady);
         if (ShutdownRequested()) return;
         RethrowPendingFailureLocked(lock);
         ++mFramesQueued;
@@ -145,6 +162,7 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     mQueue.push_back({std::move(command), endsFrame, synchronous});
     ++mSubmitted;
     if (mWorkerWaiting) {
+        ++mWaitStats.WorkerWakes;
         mWork.notify_one();
     } else {
         ++mWaitStats.SkippedNotifies;
@@ -184,6 +202,7 @@ bool NativeRenderCommandStream::Run(Command command) {
 
 void NativeRenderCommandStream::Drain() {
     if (mMode == Mode::Inline || !mWorker.joinable()) return;
+    const SecondCore::HostWaitRelease kernelRelease;
     std::unique_lock lock(mMutex);
     CountedWait(mProgress, lock, mProgressWaiters, mWaitStats.DrainWaits,
                 mWaitStats.DrainWaitNanoseconds, HangWatch::Stage::WaitDrain, [&] {

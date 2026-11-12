@@ -105,6 +105,17 @@ public:
   void
   SetTopScreenInputFrame(const TopScreenExtendedInputFrame &input) noexcept;
   void SetTopScreenConfig(const TopScreenUiConfig &config) noexcept;
+  // Item I/II on ZR/ZL after Controls > "Swap shoulders / triggers": their
+  // touch labels read ZR/ZL instead of R/L.
+  void SetTopScreenSwappedItemLabels(bool itemIZr, bool itemIIZl) noexcept {
+    mTopScreenSwappedItemLabels = {itemIZr, itemIIZl};
+  }
+  // Whether the TopScreen pack has custom_ui01 (kTopScreen30UiAtlasSemantic):
+  // the button circles, D-pad cross, touch labels and tab hints draw from it
+  // and are left out without it.
+  void SetTopScreenUiAtlasAvailable(bool available) noexcept {
+    mTopScreenUiAtlasAvailable = available;
+  }
   bool ReadOcarinaGeometry(TopScreenOcarinaGeometry &geometry, std::string *error) {
     return ReadTopScreenOcarinaGeometry(mMemory, mTopScreenOcarina, &geometry, error);
   }
@@ -136,6 +147,17 @@ public:
   NativeActiveFileSelectTextureIdentity() const;
   std::optional<uint32_t> NativePauseSharedTextureGuestAddress(
       oot3d::ui::UiPauseSharedTextureSlot slot) const;
+  // The textures the HUD presentation (BuildTopScreenPresentation with
+  // `topScreen`, else BuildShadowPresentation) draws through the UI
+  // renderer, in the order the player first sees them: the HUD's own
+  // (pause_top_page, item_icons, number_glyphs; then custom_ui01 when the
+  // TopScreen pack has it), then the pause edge's item_page and the ocarina
+  // lane's ocarina_page. Only those the game has loaded (the pause-shared
+  // CTXBs, from the title screen on); `complete` tells whether that is all.
+  // For N64UiFast3dRenderer::RequestAhead: their texture pack images decode
+  // before the HUD's first frame.
+  std::vector<oot3d::ui::UiTextureIdentity> HudTexturesAhead(bool topScreen,
+                                                             bool *complete) const;
 
   const NativeUiLifecycleBridgeStats &Stats() const noexcept;
   const oot3d::ui::N64IntegratedUiRuntime &Runtime() const noexcept;
@@ -174,6 +196,8 @@ private:
   float mTopScreenViewAlpha = 1.0F;
   bool mVersionChoiceRevealRequired = false;
   bool mVersionChoiceRevealed = false;
+  bool mTopScreenUiAtlasAvailable = false;
+  std::array<bool, 2> mTopScreenSwappedItemLabels{};
   TopScreenUiConfig mTopScreenConfig;
 };
 

@@ -103,7 +103,8 @@ struct FsFixture {
         config.RomFsImageSize = 4U;
         return config;
     }
-    explicit FsFixture(NativeA32CtrFilesystem &fs) : Host(Config(fs)), Process(Registry, Host) {
+    explicit FsFixture(NativeA32CtrFilesystem &fs) : FsFixture(Config(fs)) {}
+    explicit FsFixture(NativeA32CtrHostConfig config) : Host(std::move(config)), Process(Registry, Host) {
         std::string error;
         Require(Memory.MapRegion({"tls", Tls, 0x1000U, true, false, {}}, &error), error);
         State.thread_pointer = Tls;
@@ -396,9 +397,9 @@ void TestFsRootedRoundTrip() {
     std::filesystem::remove_all(directory);
 }
 
-// config/unlock_master_quest: system.dat (34 bytes; +0x00 0xBE = MQ liberado,
-// +0x1F 0xEF = modo MQ, +0x20 CRC-16/ARC) sai liberado na leitura e o disco
-// nunca recebe esse 0xBE.
+// config/unlock_master_quest: system.dat (34 bytes; +0x00 0xBE = MQ unlocked,
+// +0x1F 0xEF = MQ mode, +0x20 CRC-16/ARC) comes out unlocked on read and the disk
+// never receives that 0xBE.
 std::vector<uint8_t> MakeSystemData(uint8_t unlocked, uint8_t mode) {
     std::vector<uint8_t> data(kSystemDataSize, 0U);
     data[0] = unlocked;
@@ -473,7 +474,7 @@ void TestMasterQuestUnlockThroughFs() {
         Require(IsValidSystemData(seen) && seen[0] == (enabled ? 0xBEU : 0U) &&
                     std::equal(seen.begin() + 1, seen.begin() + 0x20, disk.begin() + 1),
                 "system.dat read through fs:USER");
-        // O jogo marca o modo MQ (+0x1F) na RAM e regrava o arquivo.
+        // The game sets the MQ mode (+0x1F) in RAM and rewrites the file.
         seen[kSystemDataModeOffset] = 0xEFU;
         StoreSystemDataChecksum(seen);
         Require(f.Memory.WriteBytes(data, seen), "system.dat write bytes");
@@ -485,13 +486,110 @@ void TestMasterQuestUnlockThroughFs() {
                 "system.dat on disk");
         std::vector<uint8_t> after(kSystemDataSize);
         Require(f.Memory.ReadBytes(data, after) && after == seen, "guest buffer changed by write");
-        // Outros arquivos do save passam intactos.
+        // Other save files pass through intact.
         fs.Storage.Bytes = disk;
         f.Call(f.Save, {0x080200C2U, 0U, 0U, 34U, (34U << 4U) | 0xCU, data});
         Require(f.Memory.ReadBytes(data, seen) && seen == disk, "save file patched");
     }
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
+
+#if !defined(_WIN32)
+// A cwd this deep (24 x 201 characters) no longer fits PATH_MAX. POSIX only:
+// Windows limits the current directory to MAX_PATH.
+constexpr int kDeepLevels = 24;
+const std::string kDeepName(200, 'd');
+
+// Climbs into the deep tree under `base` and removes it from the bottom up: an
+// absolute path through it is too long for remove_all.
+void RemoveDeepTree(const std::filesystem::path &base) {
+    namespace fs = std::filesystem;
+    std::error_code error;
+    if (!fs::is_directory(base, error)) return;
+    fs::current_path(base);
+    int depth = 0;
+    for (; fs::is_directory(kDeepName, error); ++depth) fs::current_path(kDeepName);
+    fs::remove_all("savedata", error);
+    for (; depth > 0; --depth) {
+        fs::current_path("..");
+        fs::remove(kDeepName, error);
+    }
+    fs::current_path(base.parent_path());
+    fs::remove_all(base, error);
+}
+
+// Erasing a file on the file select screen, on the product path (save root
+// directory, no filesystem bridge). FileSelect_DeleteSlotFile (0x446FE4) queues
+// an async file task of type 2 for "data:/save0N.bin"; its worker (0x41E7B8)
+// mounts "data:", calls nn::fs::TryDeleteFile and commits. A failed delete goes
+// to Result_ReportFatalToErrF, which asks srv for "err:f" and stops the game.
+// The console's save root "sdmc:/switch/oot3dre/savedata" is relative to
+// std::filesystem, so absolute() and canonical() put the cwd in front of it and
+// name a path that does not exist. A cwd longer than PATH_MAX does the same on
+// the host: relative paths open, the root's absolute form cannot be resolved.
+void TestSlotEraseWithRelativeSaveRoot() {
+    namespace fs = std::filesystem;
+    const auto start = fs::current_path();
+    const auto base = fs::temp_directory_path() / "oot3d_ctr_fs_slot_erase";
+    RemoveDeepTree(base);
+    fs::create_directories(base);
+    fs::current_path(base);
+    for (int level = 0; level < kDeepLevels; ++level) {
+        fs::create_directory(kDeepName);
+        fs::current_path(kDeepName);
+    }
+    auto config = MakeConfig();
+    config.SaveDataDirectory = "savedata";
+    config.RomFsImagePath = base / "romfs.bin"; // opened lazily, never read here
+    config.RomFsImageSize = 4U;
+    {
+        FsFixture f(std::move(config));
+        const auto writePath = [&](std::u16string_view path) {
+            std::vector<uint8_t> bytes;
+            for (const char16_t c : path) {
+                bytes.push_back(static_cast<uint8_t>(c));
+                bytes.push_back(static_cast<uint8_t>(c >> 8U));
+            }
+            bytes.insert(bytes.end(), {0U, 0U});
+            Require(f.Memory.WriteBytes(FsFixture::Buffer, bytes), "slot path");
+            return static_cast<uint32_t>(bytes.size());
+        };
+        const uint32_t data = FsFixture::Buffer + 0x80U;
+        for (const auto slot : {u"/save00.bin", u"/save01.bin"}) {
+            const uint32_t size = writePath(slot);
+            f.Call(f.Fs, {0x08080202U, 0U, f.Archive, 0U, 4U, size, 0U, 16U, 0U, (size << 14U) | 2U,
+                          FsFixture::Buffer});
+            Require(f.Word(1) == 0U, "slot CreateFile");
+            f.Call(f.Fs, {0x080201C2U, 0U, f.Archive, 0U, 4U, size, 2U, 0U, (size << 14U) | 2U,
+                          FsFixture::Buffer});
+            const uint32_t file = f.Word(3);
+            Require(file && f.Word(1) == 0U, "slot OpenFile");
+            Require(f.Memory.Fill(data, 16U, 0x5AU), "slot bytes");
+            f.Call(file, {0x08030102U, 0U, 0U, 16U, 1U, (16U << 4U) | 0xAU, data});
+            Require(f.Word(1) == 0U && f.Word(2) == 16U, "slot Write");
+            f.Call(file, {0x08080000U});
+            Require(f.Word(1) == 0U, "slot Close");
+        }
+        Require(fs::file_size("savedata/save00.bin") == 16U && fs::exists("savedata/save01.bin"),
+                "slots on disk");
+        const uint32_t size = writePath(u"/save00.bin");
+        const auto erase = [&] {
+            f.Call(f.Fs, {0x08040142U, 0U, f.Archive, 0U, 4U, size, (size << 14U) | 2U, FsFixture::Buffer});
+            Require(f.Word(0) == 0x08040040U, "DeleteFile reply");
+            return f.Word(1);
+        };
+        Require(erase() == 0U && !fs::exists("savedata/save00.bin") && fs::exists("savedata/save01.bin"),
+                "erasing a file slot failed under a save root std::filesystem cannot make absolute");
+        Require(erase() == 0xC8804470U, "erasing a missing slot did not report it missing");
+        f.Call(f.Fs, {0x080D0144U, f.Archive, 0U, 0U, 1U, 1U, 0x1AU, data, 0x1CU, data + 4U});
+        Require(f.Word(1) == 0U, "commit after the erase");
+        f.Call(f.Fs, {0x080E0080U, f.Archive, 0U});
+        Require(f.Word(1) == 0U, "unmount after the erase");
+    }
+    fs::current_path(start);
+    RemoveDeepTree(base);
+}
+#endif
 } // namespace
 
 

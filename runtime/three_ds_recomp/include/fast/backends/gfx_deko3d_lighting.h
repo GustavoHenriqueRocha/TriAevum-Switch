@@ -1,0 +1,463 @@
+#pragma once
+
+// Lighting of the deko3d backend (Switch), per-pixel by default since 0.2.3
+// (config/lighting, L3+R3 > Video > "Lighting"):
+//
+// - Toon: upstream's Toon "PICA material" banding (pica_toon_shader.cpp,
+//   default ToonStyleSettings, constants baked in, no extra uniform block) as
+//   a text mutation of each PICA fragment shader. Fragment stage only.
+// - PerPixel: a trimmed copy of upstream's per-pixel surface lighting
+//   (pica_surface_lighting.cpp): native lights, ambient, the sun (scene and
+//   environment directionals), at most four scene point lights and the baked
+//   surface branch; no placed lights, water, rim, GI or shadows. The fragment
+//   reads upstream's 2992-byte PicaSurfaceLighting block, bound at
+//   kSurfaceLightingBinding instead of upstream's 16 (deko3d has 0-15); the
+//   vertex stage gets upstream's surface normal and tint outputs
+//   (BuildPicaVertexSurfaceShader, locations 9 and 10).
+//
+// Nothing is compiled on the console: a variant is the deterministic mutation
+// of the GLSL 4.3 text the native draw would use, looked up by its own
+// ShaderTextKey in deko3d.pack. The pack tool applies the same fragment
+// mutation offline to every known text (oot3d_deko3d_lighting_variants,
+// tools/oot3d/deko3d_shader_pack.py --lighting-variants). A variant missing
+// from the pack is recorded like any missing stage (logs/deko3d_shaders/) and
+// that draw keeps its native shaders. With the mode off nothing here runs and
+// the native keys are untouched.
+//
+// Pure code, tested on the host (oot3d_deko3d_lighting_tests).
+
+#include "fast/backends/gfx_deko3d_programs.h"
+#include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/oot3d/graphics_settings.h"
+#include "fast/renderer3ds/pica_shader_hooks.h"
+#include "fast/renderer3ds/pica_surface_lighting.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+
+namespace Fast::Renderer3ds {
+struct PicaDrawView;
+}
+
+namespace Fast::Deko3d {
+
+enum class LightingMode : uint8_t {
+    Off = 0,
+    Toon = 1,
+    PerPixel = 2,
+};
+
+// sdmc:/switch/oot3dre/config/lighting: first word `native` (or `off`),
+// `toon` or `perpixel`; absent, empty or anything else = per-pixel, the
+// default since 0.2.3 (before, no file meant native).
+inline constexpr const char* kLightingConfigName = "lighting";
+inline constexpr LightingMode kDefaultLightingMode = LightingMode::PerPixel;
+
+[[nodiscard]] inline LightingMode ParseLightingMode(std::string_view text) noexcept {
+    const size_t end = text.find_first_of("\r\n");
+    if (end != std::string_view::npos) {
+        text = text.substr(0, end);
+    }
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1U);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.remove_suffix(1U);
+    std::string word(text);
+    std::transform(word.begin(), word.end(), word.begin(),
+                   [](char c) { return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c); });
+    if (word == "native" || word == "off") return LightingMode::Off;
+    if (word == "toon") return LightingMode::Toon;
+    if (word == "perpixel" || word == "per-pixel" || word == "per_pixel") return LightingMode::PerPixel;
+    return kDefaultLightingMode;
+}
+
+[[nodiscard]] constexpr const char* LightingModeName(LightingMode mode) noexcept {
+    switch (mode) {
+        case LightingMode::Toon: return "toon";
+        case LightingMode::PerPixel: return "perpixel";
+        case LightingMode::Off: break;
+    }
+    return "off";
+}
+
+[[nodiscard]] inline LightingMode LoadLightingMode(const std::filesystem::path& config) {
+    std::ifstream file(config / kLightingConfigName);
+    if (!file) return kDefaultLightingMode;
+    std::string line;
+    std::getline(file, line);
+    return ParseLightingMode(line);
+}
+
+// The file exists only while the mode is not the default: `native` or
+// `toon`. Empty on success, otherwise the file name that failed.
+[[nodiscard]] inline std::string SaveLightingMode(const std::filesystem::path& config, LightingMode mode) {
+    std::error_code error;
+    if (mode == kDefaultLightingMode) {
+        std::filesystem::remove(config / kLightingConfigName, error);
+        return error ? kLightingConfigName : "";
+    }
+    std::filesystem::create_directories(config, error);
+    std::ofstream file(config / kLightingConfigName, std::ios::trunc);
+    file << (mode == LightingMode::Off ? "native" : LightingModeName(mode)) << '\n';
+    return file ? "" : kLightingConfigName;
+}
+
+// The lighting model lives in the graphics settings (one source of truth,
+// the same the scene environment tab reads): per-pixel is the Modern model
+// (Effects.SurfaceLighting PerPixel, validated to PerPixelPbr), toon is
+// Effects.Toon PicaMaterial. config/lighting persists it on the Switch: the
+// renderer applies the file at start, the Video tab writes both.
+[[nodiscard]] inline LightingMode LightingModeOf(const Oot3d::GraphicsSettings& settings) noexcept {
+    if (Oot3d::UsesFullSceneLighting(settings.Effects.SurfaceLighting)) return LightingMode::PerPixel;
+    if (settings.Effects.Toon == Oot3d::ToonMode::PicaMaterial) return LightingMode::Toon;
+    return LightingMode::Off;
+}
+
+// `settings` with the model of `mode`. A mode needs a non-Authentic preset
+// (Authentic is native presentation by definition): Custom then.
+[[nodiscard]] inline Oot3d::GraphicsSettings WithLightingMode(Oot3d::GraphicsSettings settings, LightingMode mode) {
+    settings.Effects.SurfaceLighting =
+        mode == LightingMode::PerPixel ? Oot3d::SurfaceLightingMode::PerPixel : Oot3d::SurfaceLightingMode::Native;
+    settings.Effects.Toon = mode == LightingMode::Toon ? Oot3d::ToonMode::PicaMaterial : Oot3d::ToonMode::Off;
+    if (mode != LightingMode::Off && settings.Preset == Oot3d::GraphicsPreset::Authentic)
+        settings.Preset = Oot3d::GraphicsPreset::Custom;
+    return settings;
+}
+
+// Fragment uniform slots in use: 4 (PICA fragment uniforms). Upstream binds
+// PicaSurfaceLighting at 16, past deko3d's 16 slots per stage.
+inline constexpr uint32_t kUpstreamSurfaceLightingBinding = 16U;
+inline constexpr uint32_t kSurfaceLightingBinding = 5U;
+inline constexpr uint32_t kSurfaceLightingBytes = sizeof(Renderer3ds::PicaSurfaceLightingUniforms);
+static_assert(kSurfaceLightingBytes == 2992U);
+// Scene point lights the trimmed shader reads (upstream: 32).
+inline constexpr uint32_t kMaximumSurfacePointLights = 4U;
+
+// Markers the mutations leave in a variant (and test for: a text that already
+// has one is its own variant).
+inline constexpr std::string_view kToonVariantMarker = "oot3d_toon_parameters()";
+inline constexpr std::string_view kPerPixelVariantMarker = "// OOT3D_DEKO3D_PER_PIXEL";
+
+// The GLSL the per-pixel fragment variant inserts before main().
+[[nodiscard]] std::string_view PerPixelFragmentDeclarations() noexcept;
+// The lines it inserts after the lighting extension point.
+[[nodiscard]] std::string_view PerPixelFragmentBody() noexcept;
+// The lines it puts before and after the native fog line (when the text has
+// one): the environment's fog contribution.
+[[nodiscard]] std::string_view PerPixelFragmentFogBefore() noexcept;
+[[nodiscard]] std::string_view PerPixelFragmentFogAfter() noexcept;
+
+// The per-pixel fragment variant's path (the GLSL constant pica_surface_path):
+// a variant for any block, and two whose compile-time constants settle the
+// block tests of the shipped scene profiles (environment on, no native direct
+// light, no scene directionals, no rim from the scene lights; not baked and lit
+// through the environment model, or baked). Same output as Generic on the
+// blocks ClassifyPerPixelSurface gives them; fewer instructions and registers.
+enum class PerPixelPath : uint8_t {
+    Generic = 0,
+    Environment = 1,
+    Baked = 2,
+    Count,
+};
+
+[[nodiscard]] const char* PerPixelPathName(PerPixelPath path) noexcept;
+// The path a draw's (trimmed, rim-assigned) block may use.
+[[nodiscard]] PerPixelPath ClassifyPerPixelSurface(const Renderer3ds::PicaSurfaceLightingUniforms& block) noexcept;
+
+// The variant of a GLSL 4.3 PICA fragment text, or nothing when the text has
+// no place for it (and for LightingMode::Off). A text that already is this
+// mode's variant is returned unchanged (idempotent); a per-pixel variant text
+// gets the requested path.
+[[nodiscard]] std::optional<std::string> ToonFragmentVariant(std::string_view text);
+[[nodiscard]] std::optional<std::string> PerPixelFragmentVariant(std::string_view text,
+                                                                 PerPixelPath path = PerPixelPath::Generic);
+[[nodiscard]] std::optional<std::string> LightingFragmentVariant(LightingMode mode, std::string_view text,
+                                                                 PerPixelPath path = PerPixelPath::Generic);
+
+// The per-pixel vertex variant of a canonical (pre-translation) PICA vertex
+// text: the surface normal and tint outputs at the hooks' main-body end. The
+// caller translates it to GLSL 4.3 like the native text.
+[[nodiscard]] std::optional<std::string> PerPixelVertexVariant(std::string_view canonical,
+                                                               const Renderer3ds::PicaVertexShaderHookLayout& hooks);
+
+// The trimmed shader reads at most kMaximumSurfacePointLights scene points;
+// the block is cut to match (the selector's order: the first ones win). The
+// rim (AssignPicaSurfaceRim) is kept; placed lights, GI, shadows and water go.
+inline void TrimSurfaceLighting(Renderer3ds::PicaSurfaceLightingUniforms& uniforms) noexcept {
+    uniforms.Control[1] = std::min(uniforms.Control[1], kMaximumSurfacePointLights);
+    for (uint32_t slot = uniforms.Control[1]; slot < uniforms.ScenePoints.size(); ++slot) {
+        uniforms.ScenePoints[slot] = {};
+    }
+    uniforms.Control[3] &= ~0xFF00U; // placed lights: none
+    uniforms.GlobalIlluminationSources = {};
+    uniforms.PointShadow = uniforms.PointShadowAtlas = {};
+    uniforms.WaterViewTranslation = {};
+}
+
+// Variants resolved (once per distinct shader) and draws drawn with them;
+// logs/deko3d.txt "lighting" lines.
+struct LightingCounters {
+    uint64_t VariantsFound = 0;       // in the pack
+    uint64_t VariantsMissing = 0;     // not in the pack: recorded, native shaders used
+    uint64_t VariantsUnsupported = 0; // the text has no place for the mutation
+    uint64_t DrawsLit = 0;            // drawn with the variant
+    uint64_t DrawsNative = 0;         // eligible, drawn native (missing/unsupported variant)
+    uint64_t DrawsIneligible = 0;     // not a draw the mode changes
+    // Kept native for cost (also counted as ineligible): the base fragment
+    // program spills (its variants would too), per-pixel on the parametric
+    // (uber) fallback (RefuseLightingBase), and per-pixel on a draw that
+    // writes no depth (shaded again under what covers it).
+    uint64_t DrawsSpillingBase = 0;
+    uint64_t DrawsParametricBase = 0;
+    uint64_t DrawsNoDepthWrite = 0;
+};
+
+// Which draws a mode may relight, by the class of their base fragment program
+// (ResolvePicaProgram, before any variant is resolved):
+// - a spilling base never (its variants spill too);
+// - under per-pixel, not the parametric (uber) program a draw falls back to
+//   while the pack lacks its specialized text. That program evaluates the
+//   whole TEV and fragment pipeline from uniforms and always writes
+//   gl_FragDepth (no early depth test); its per-pixel variant adds the surface
+//   body and its registers on top. logs26 (0.2.0, Phantom Ganon): 22-28
+//   parametric draws a frame, 23 of them per-pixel lit, while ten of the
+//   boss's texts were missing. The fallback lasts until the pack holds the
+//   texts (logs/deko3d_shaders/); meanwhile those draws shade natively, as a
+//   draw whose variant the pack lacks already does. Toon keeps it (its
+//   mutation is a few instructions).
+enum class LightingBaseRefusal : uint8_t { None, SpillingBase, ParametricBase };
+
+[[nodiscard]] constexpr LightingBaseRefusal RefuseLightingBase(LightingMode mode, PicaBaseClass base) noexcept {
+    if (base == PicaBaseClass::Spilling) return LightingBaseRefusal::SpillingBase;
+    if (mode == LightingMode::PerPixel && base == PicaBaseClass::Parametric) return LightingBaseRefusal::ParametricBase;
+    return LightingBaseRefusal::None;
+}
+
+// Why a draw keeps its native shading under per-pixel lighting (the first
+// rule it fails, in the order the backend checks them).
+enum class PerPixelRefusal : uint8_t {
+    None = 0,
+    NotSceneWorld,      // not a scene draw of a layer that takes surface lighting
+    NoSurfaceProgram,   // its vertex program has no typed surface/transform hooks
+    NoDepthWrite,       // PerPixelCostAdmits
+    FragmentOperation,  // not the ordinary colour/depth fragment operation
+    NoUniforms,         // its packed vertex uniforms are too short
+    NotPerspective,     // UsesPicaPerspectiveProjection refused its projection
+    NotRelightable,     // authored appearance (unlit, additive)
+    NativeLights,       // its native light uniforms could not be read
+    NoCamera,           // the block needs the world-to-view and has none (or a singular one)
+    Block,              // BuildPicaSurfaceLightingUniforms refused it otherwise
+    Count,
+};
+
+[[nodiscard]] const char* PerPixelRefusalName(PerPixelRefusal refusal) noexcept;
+
+// A world model per-pixel lighting refused as not_scene_world although it
+// has a typed surface program and writes depth: what its composition says
+// instead. UiList: the whole command list was submitted while the frame was
+// in its HUD phase (the frontend tags every draw of it UI); UiSpan: a UI
+// scope's span holds it; NoSpan: no span covered it (provenance unknown);
+// ControlFlow: a primitive packet outside a CMB pass; Atmosphere; Other.
+enum class LostWorldComposition : uint8_t { UiList, UiSpan, NoSpan, ControlFlow, Atmosphere, Other, Count };
+inline constexpr size_t kLostWorldCompositions = static_cast<size_t>(LostWorldComposition::Count);
+
+[[nodiscard]] const char* LostWorldCompositionName(LostWorldComposition lost) noexcept;
+
+// The class of a refused draw that is a lost world model, else nothing.
+[[nodiscard]] std::optional<LostWorldComposition> ClassifyLostWorldComposition(const Renderer3ds::PicaDrawView& draw,
+                                                                              PerPixelRefusal refusal) noexcept;
+
+// Per-pixel draws of one frame kind: real (step and native) frames and
+// fps60 in-between frames (PublishPicaFrameTemporalSample's Synthetic), so
+// logs/deko3d.txt shows whether the in-between frames light like the real ones.
+struct FrameKindLighting {
+    uint64_t Samples = 0; // temporal samples published (frames of this kind)
+    uint64_t Lit = 0;
+    uint64_t Native = 0;
+    uint64_t Ineligible = 0;
+    std::array<uint64_t, static_cast<size_t>(PerPixelRefusal::Count)> Refusals{};
+    PerPixelRefusal FirstRefusal = PerPixelRefusal::None;
+    // The block of the first lit draw (what the variant's body branches on):
+    // control (native lit, points, directionals, flags), environment
+    // enabled (w), rim intensity, baked reference (w).
+    struct BlockSummary {
+        std::array<uint32_t, 4> Control{};
+        float Environment = 0.0F;
+        float Rim = 0.0F;
+        float Baked = 0.0F;
+    };
+    std::optional<BlockSummary> FirstLit;
+
+    void Refuse(PerPixelRefusal refusal) noexcept {
+        ++Ineligible;
+        ++Refusals[static_cast<size_t>(refusal)];
+        if (FirstRefusal == PerPixelRefusal::None) FirstRefusal = refusal;
+    }
+    // Lit draws whose block has the scene environment off (w = 0) or no rim:
+    // a frame lit like native shading counts here whatever its kind.
+    uint64_t LitWithoutEnvironment = 0;
+    uint64_t LitWithoutRim = 0;
+    void Light(const Renderer3ds::PicaSurfaceLightingUniforms& block) noexcept {
+        ++Lit;
+        if (block.EnvironmentParameters[3] == 0.0F) ++LitWithoutEnvironment;
+        if (block.Rim[0] <= 0.0F) ++LitWithoutRim;
+        if (!FirstLit)
+            FirstLit = BlockSummary{block.Control, block.EnvironmentParameters[3], block.Rim[0],
+                                    block.BakedReferenceUp[3]};
+    }
+    // Lost world models (ClassifyLostWorldComposition) and one-frame
+    // transients (LightingTransientWatch) whose sample was of this kind.
+    std::array<uint64_t, kLostWorldCompositions> LostWorld{};
+    uint64_t Transients = 0;
+};
+
+// "frames=F lit=L (no env E, no rim R) native=N ineligible=I first=<reason>
+// (reason=count ...) lost world=W (class=count ...) transients=T block
+// control=a/b/c/d env=E rim=R baked=B" (the first lit draw's block).
+[[nodiscard]] std::string FormatFrameKindLighting(const FrameKindLighting& kind);
+
+// The per-pixel decisions of one temporal sample: one presented frame
+// (PublishPicaFrameTemporalSample opens it).
+struct LightingSample {
+    uint64_t DeviceFrame = 0;
+    bool InBetween = false;
+    uint32_t Lit = 0;
+    uint32_t LitWithoutEnvironment = 0;
+    uint32_t LitWithoutRim = 0;
+    uint32_t Native = 0;
+    std::array<uint32_t, kLostWorldCompositions> Lost{};
+    // The first world model lost to its composition (ui_list, ui_span,
+    // no_span, control_flow; not the steady atmosphere draws): its
+    // composition, command-list place and geometry.
+    uint8_t LostDomain = 0;
+    uint8_t LostLayer = 0;
+    uint8_t LostProvenance = 0;
+    uint32_t LostSourcePc = 0;
+    uint64_t LostActor = 0;
+    uint32_t LostCommandList = 0;
+    uint32_t LostOffsetWords = 0;
+    uint32_t LostVertices = 0;
+    uint64_t LostGeometry = 0;
+
+    [[nodiscard]] uint32_t LostTotal() const noexcept;
+    // Lost to the composition's timing or spans (not atmosphere/other).
+    [[nodiscard]] uint32_t LostToComposition() const noexcept;
+};
+
+// A sample whose per-pixel draws differ from both neighbours' where the
+// neighbours agree: fewer lit draws (under 3/4 of both), more lit draws
+// without environment or rim, more native draws or more world models lost to
+// their composition. Both neighbours must light at least 4 draws. This is
+// the one-frame per-pixel blink as the CPU sees it; a blink with no such
+// sample is on the GPU side.
+[[nodiscard]] bool IsLightingTransient(const LightingSample& before, const LightingSample& sample,
+                                       const LightingSample& after) noexcept;
+
+struct LightingTransient {
+    LightingSample Before;
+    LightingSample Sample;
+    LightingSample After;
+};
+
+// "frame F (real|in-between) lit b/s/a, no env b/s/a, no rim b/s/a, native
+// b/s/a, lost world b/s/a (class=count ...[; first domain=D layer=L
+// provenance=P pc=X actor=X list=X+N vertices=V geometry=X])" (first: the
+// first draw lost to its composition, when there is one).
+[[nodiscard]] std::string FormatLightingTransient(const LightingTransient& transient);
+
+// The last three samples of each frame kind, compared within their kind: a
+// real frame with the real frames around it, an in-between frame with the
+// in-between frames around it. At 60 FPS an in-between frame repeats its
+// real frame's draws, so a game frame that loses a draw loses it in both
+// presented frames; compared across kinds that pair hid every such blink.
+// Draws of another render target namespace than the sample's first draw
+// (the game thread's dependency flushes, never presented) are not counted.
+class LightingTransientWatch {
+  public:
+    // Closes the open sample and opens the next; returns the middle sample
+    // of the closed sample's kind when it was a transient.
+    std::optional<LightingTransient> Begin(uint64_t deviceFrame, bool inBetween);
+    void Lit(const Renderer3ds::PicaDrawView& draw, const Renderer3ds::PicaSurfaceLightingUniforms& block);
+    void Native(const Renderer3ds::PicaDrawView& draw);
+    void Refused(const Renderer3ds::PicaDrawView& draw, PerPixelRefusal refusal);
+
+  private:
+    [[nodiscard]] bool Counts(const Renderer3ds::PicaDrawView& draw) noexcept;
+
+    struct History {
+        std::array<LightingSample, 2> Closed{}; // [0] older
+        size_t Count = 0;
+    };
+    std::array<History, 2> mHistory{}; // [0] real, [1] in-between
+    LightingSample mOpen{};
+    bool mOpened = false;
+    std::optional<uint64_t> mNamespace;
+};
+
+// The per-pixel admission of a draw before its variants are resolved
+// (upstream's surfaceCandidate: scene domain, world layer, typed surface
+// program; then PerPixelCostAdmits).
+[[nodiscard]] PerPixelRefusal AdmitPerPixelDraw(const Renderer3ds::PicaDrawView& draw) noexcept;
+
+// The surface block of an admitted draw (upstream's per-pixel admission and
+// block, trimmed, with the rim on the draws PicaDrawReceivesRimLight admits),
+// or why it keeps native shading. `view` caches the camera of the last draw
+// (rebuilt when the draw's world-to-view differs).
+[[nodiscard]] PerPixelRefusal BuildPerPixelSurface(const Renderer3ds::PicaDrawView& draw,
+                                                   const Renderer3ds::PicaEnvironmentLighting& environment,
+                                                   std::optional<Renderer3ds::PicaSurfaceLightingView>& view,
+                                                   Renderer3ds::PicaSurfaceLightingUniforms& block);
+
+// Per-pixel shading only for draws that write depth: a depth-less draw
+// (translucency, effects) is shaded again under what covers it. The blend
+// flag alone does not decide: the game enables blending on most solid world
+// geometry, and excluding it left per-pixel lighting 0 draws (logs14: 81% of
+// the draws were blended).
+[[nodiscard]] constexpr bool PerPixelCostAdmits(bool depthWrite) noexcept {
+    return depthWrite;
+}
+
+// One variant stage, looked up by the key of its own text. `lookup(key,
+// text)` returns the shader or nullptr (the store then records the text as
+// missing, like any stage the pack lacks). Unsupported texts are never
+// looked up. Runs once per distinct native stage (the caller caches it).
+template <typename T, typename Lookup>
+const T* ResolveLightingVariant(ShaderStage stage, const std::optional<std::string>& variant, Lookup&& lookup,
+                                LightingCounters& counters) {
+    if (!variant) {
+        ++counters.VariantsUnsupported;
+        return nullptr;
+    }
+    const T* shader = lookup(ShaderTextKey(stage, *variant), std::string_view(*variant));
+    ++(shader != nullptr ? counters.VariantsFound : counters.VariantsMissing);
+    return shader;
+}
+
+// The shaders of a draw the mode applies to: the variants when every one it
+// needs is there (toon has no vertex variant: pass the native vertex), else
+// both native shaders. Never a mixed pair: the per-pixel fragment reads
+// outputs only its vertex variant writes.
+template <typename T> struct LightingProgramChoice {
+    const T* Vertex = nullptr;
+    const T* Fragment = nullptr;
+    bool Lit = false;
+};
+
+template <typename T>
+[[nodiscard]] LightingProgramChoice<T> ChooseLightingProgram(const T* nativeVertex, const T* nativeFragment,
+                                                             const T* variantVertex, const T* variantFragment,
+                                                             LightingCounters& counters) noexcept {
+    if (variantVertex != nullptr && variantFragment != nullptr) {
+        ++counters.DrawsLit;
+        return {variantVertex, variantFragment, true};
+    }
+    ++counters.DrawsNative;
+    return {nativeVertex, nativeFragment, false};
+}
+
+} // namespace Fast::Deko3d

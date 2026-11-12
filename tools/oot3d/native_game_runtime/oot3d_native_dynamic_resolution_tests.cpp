@@ -1,15 +1,20 @@
 // Dynamic resolution controller (oot3d_native_dynamic_resolution.h):
-// limits, hysteresis, settling after a change, bounce backoff and the
-// config parser.
+// limits, hysteresis, settling after a change, bounce backoff, the config
+// parser and the deko3d calibration replayed on log16's perf.txt windows.
 #include "oot3d_native_dynamic_resolution.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
 namespace {
 
 using Oot3dNativeGame::DynamicResolutionConfig;
+using Oot3dNativeGame::UseDeko3dDynamicResolutionTiming;
 using Oot3dNativeGame::DynamicResolutionController;
 using Oot3dNativeGame::ParseDynamicResolutionMinScale;
 
@@ -49,6 +54,47 @@ double PairAt(const DynamicResolutionController &c, double pairAt3) {
 void Run(DynamicResolutionController &c, double pairAt3, int steps) {
   for (int i = 0; i < steps; ++i)
     (void)c.ObservePair(PairAt(c, pairAt3));
+}
+
+// Resolution at 60 FPS (config/drs_60): Full holds 3.00 at 60 in a heavy
+// scene (no down, shedding or not), a docked 4.5 likewise; Dynamic and 30
+// FPS keep their levels.
+void TestFullAtSixty() {
+  using Oot3dNativeGame::ApplyDynamicResolutionSixtyMode;
+  using Oot3dNativeGame::DynamicResolutionSixtyMode;
+  using Oot3dNativeGame::ParseDynamicResolutionSixtyMode;
+  CHECK(ParseDynamicResolutionSixtyMode("full") == DynamicResolutionSixtyMode::Full);
+  CHECK(ParseDynamicResolutionSixtyMode(" Full\r\n") == DynamicResolutionSixtyMode::Full);
+  CHECK(ParseDynamicResolutionSixtyMode("") == DynamicResolutionSixtyMode::Dynamic);
+  CHECK(ParseDynamicResolutionSixtyMode("dynamic") == DynamicResolutionSixtyMode::Dynamic);
+  CHECK(ParseDynamicResolutionSixtyMode("fullx") == DynamicResolutionSixtyMode::Dynamic);
+  for (const float maxScale : {3.0F, 4.5F}) {
+    DynamicResolutionConfig config;
+    config.MaxScale = maxScale;
+    config.MinScale = maxScale - 0.75F;
+    UseDeko3dDynamicResolutionTiming(config);
+    auto full = config;
+    ApplyDynamicResolutionSixtyMode(60U, DynamicResolutionSixtyMode::Full, full);
+    DynamicResolutionController c;
+    c.Configure(full, kPair, config.MinScale);
+    CHECK(Near(c.Scale(), maxScale));
+    for (int i = 0; i < 2000; ++i)
+      (void)c.ObservePair(1.5 * kPair, i % 2 == 0);
+    CHECK(Near(c.Scale(), maxScale));
+    CHECK(c.Stats().Downs == 0U && c.Stats().Changes == 0U);
+    // Dynamic: the same scene goes down.
+    auto dynamic = config;
+    ApplyDynamicResolutionSixtyMode(60U, DynamicResolutionSixtyMode::Dynamic, dynamic);
+    DynamicResolutionController d;
+    d.Configure(dynamic, kPair);
+    for (int i = 0; i < 2000; ++i)
+      (void)d.ObservePair(1.5 * kPair);
+    CHECK(d.Stats().Downs > 0U && Near(d.Scale(), config.MinScale));
+    // 30 FPS: Full changes nothing.
+    auto thirty = config;
+    ApplyDynamicResolutionSixtyMode(30U, DynamicResolutionSixtyMode::Full, thirty);
+    CHECK(Near(thirty.MinScale, config.MinScale));
+  }
 }
 
 void TestParser() {
@@ -335,9 +381,245 @@ void TestBackendAppliesAtFirstDraw() {
   CHECK(applied == 6);
 }
 
+// ---- log16 (0.1.2-test.8, 07/11): the deko3d calibration ----
+
+struct Log16Window {
+  int Stretch;
+  int HostFrames;
+  const char *Scene;
+  int Room;
+  int Steps;
+  float Scale;
+  double StepMs;
+  double MaxMs;
+};
+
+constexpr Log16Window kLog16[] = {
+#include "oot3d_native_dynamic_resolution_log16.inc"
+};
+
+// Deterministic jitter: the same sequence in every run.
+struct Lcg {
+  uint64_t State = 12345U;
+  explicit Lcg(uint64_t seed = 12345U) : State(seed) {}
+  double Next() {
+    State = (State * 1103515245U + 12345U) & 0x7FFFFFFFU;
+    return static_cast<double>(State) / 0x7FFFFFFF;
+  }
+};
+
+// The real cost of a step frame at `scale` against 2.25. realFixed: its
+// fixed share, as measured in log16 between the same spot at 30 FPS (3.00)
+// and 60 FPS (2.25): 0 in the Temple of Time (scene x1.81 for area x1.78),
+// 0.3 in Forest Temple room 8 (x1.55). The controller keeps its own 0.35.
+double RealRatio(double realFixed, double scale) {
+  const double area = scale / 2.25;
+  return realFixed + (1.0 - realFixed) * area * area;
+}
+
+DynamicResolutionConfig Deko3dConfig() {
+  DynamicResolutionConfig config;
+  config.MaxScale = 3.0F;
+  config.MinScale = 2.25F;
+  UseDeko3dDynamicResolutionTiming(config);
+  return config;
+}
+
+DynamicResolutionConfig GlConfig() {
+  DynamicResolutionConfig config;
+  config.MaxScale = 3.0F;
+  config.MinScale = 2.25F;
+  return config;
+}
+
+struct Log16Replay {
+  std::vector<std::vector<float>> Scales; // per window, each step frame's
+  int OverBudget = 0; // step frames whose real pair passed 33.3 ms
+  int Steps = 0;
+  Oot3dNativeGame::DynamicResolutionStats Stats{};
+};
+
+// Every 60 FPS window of log16 in order, at its step_frames: the window's
+// gpu_ms_step (taken back to 2.25 when the window ran at 2.5) with +-4%
+// jitter and one step frame at the window's busy_max; the controller starts
+// over at each stretch (the user's switches to 30 and back), and the
+// governor sheds whenever the real pair passes the budget. config nullptr:
+// held at 2.25.
+Log16Replay ReplayLog16(const DynamicResolutionConfig *config,
+                        double realFixed) {
+  Log16Replay replay;
+  Lcg random;
+  DynamicResolutionController controller;
+  int stretch = -1;
+  for (const auto &window : kLog16) {
+    if (window.Stretch != stretch) {
+      stretch = window.Stretch;
+      if (config != nullptr)
+        controller.Configure(*config, kPair);
+    }
+    const double measured = RealRatio(realFixed, window.Scale);
+    const double stepMs = window.StepMs / measured;
+    const double maxMs = window.MaxMs / measured;
+    auto &scales = replay.Scales.emplace_back();
+    for (int k = 0; k < window.Steps; ++k) {
+      double cost = stepMs * (0.96 + 0.08 * random.Next());
+      if (k == window.Steps / 2)
+        cost = std::max(cost, maxMs);
+      const double scale = config != nullptr ? controller.Scale() : 2.25;
+      const double pair = 2.0 * cost * RealRatio(realFixed, scale);
+      ++replay.Steps;
+      if (pair > kPair)
+        ++replay.OverBudget;
+      if (config != nullptr)
+        (void)controller.ObservePair(pair, pair > kPair);
+      scales.push_back(static_cast<float>(scale));
+    }
+  }
+  replay.Stats = controller.Stats();
+  return replay;
+}
+
+// Mean scale of the step frames in the windows firstFrames..lastFrames.
+double MeanScale(const Log16Replay &replay, int firstFrames, int lastFrames) {
+  double sum = 0.0;
+  int count = 0;
+  for (size_t i = 0; i < std::size(kLog16); ++i) {
+    if (kLog16[i].HostFrames < firstFrames || kLog16[i].HostFrames > lastFrames)
+      continue;
+    for (const float scale : replay.Scales[i]) {
+      sum += scale;
+      ++count;
+    }
+  }
+  return count > 0 ? sum / count : 0.0;
+}
+
+// The test.8 bug: with the GL calibration (3 ms hidden, down at 85%, up at
+// 80%) the deko3d pairs of the title screen (11.1-11.4 ms a step frame at
+// 2.25) and the Temple of Time (10.5-11.9) never climb.
+void TestLog16GlCalibrationStaysAtFloor() {
+  for (const double realFixed : {0.0, 0.3}) {
+    const auto config = GlConfig();
+    const auto replay = ReplayLog16(&config, realFixed);
+    CHECK(MeanScale(replay, 450, 900) < 2.26);
+    CHECK(MeanScale(replay, 4950, 6150) < 2.26);
+    CHECK(MeanScale(replay, 22800, 23250) < 2.26);
+  }
+}
+
+// The deko3d calibration on the same windows: the light areas climb to 2.5
+// (600 lines; 3.00 costs 16-20 ms a frame there, more than a refresh), room
+// 8 stays at 2.25 once in it, and the real pairs over budget (in-between
+// frames the governor drops) barely move against the floor log16 ran at.
+void TestLog16Deko3dReplay() {
+  for (const double realFixed : {0.0, 0.3}) {
+    const auto config = Deko3dConfig();
+    const auto replay = ReplayLog16(&config, realFixed);
+    const auto floor = ReplayLog16(nullptr, realFixed);
+    std::printf("log16 replay (real fixed %.1f): title %.3f, Temple of Time "
+                "%.3f / %.3f, all %.3f; over budget %d (floor %d) of %d; "
+                "changes %llu ups %llu bounces %llu\n",
+                realFixed, MeanScale(replay, 450, 900),
+                MeanScale(replay, 4950, 6150), MeanScale(replay, 22800, 23250),
+                MeanScale(replay, 0, 1 << 30), replay.OverBudget,
+                floor.OverBudget, replay.Steps,
+                static_cast<unsigned long long>(replay.Stats.Changes),
+                static_cast<unsigned long long>(replay.Stats.Ups),
+                static_cast<unsigned long long>(replay.Stats.Bounces));
+    CHECK(MeanScale(replay, 450, 900) >= 2.45);
+    CHECK(MeanScale(replay, 4950, 6150) >= 2.45);
+    CHECK(MeanScale(replay, 22800, 23250) >= 2.45);
+    CHECK(MeanScale(replay, 0, 1 << 30) > 2.29);
+    // Forest Temple room 8 (busy 14-21 ms at 2.25): the floor, from the
+    // second window in the room on.
+    for (size_t i = 1; i < std::size(kLog16); ++i) {
+      const auto &window = kLog16[i];
+      const auto &before = kLog16[i - 1];
+      if (std::strcmp(window.Scene, "bmori1") != 0 || window.Room != 8 ||
+          std::strcmp(before.Scene, "bmori1") != 0 || before.Room != 8 ||
+          before.Stretch != window.Stretch)
+        continue;
+      for (const float scale : replay.Scales[i])
+        CHECK(Near(scale, 2.25));
+    }
+    CHECK(replay.OverBudget - floor.OverBudget <= 50);
+    CHECK(replay.OverBudget - floor.OverBudget <= replay.Steps / 300);
+    CHECK(replay.Stats.Bounces <= 6U);
+  }
+}
+
+// No oscillation: a steady area (step frame 8-17 ms at 2.25, real fixed
+// share 0-0.5, +-4-8% jitter and a 15% spike every 75 step frames) settles
+// in 20 s and then changes the scale at most once in 80 s, never bouncing;
+// the level it holds fits the budget.
+void TestDeko3dSteadyAreasHoldOneLevel() {
+  const auto config = Deko3dConfig();
+  struct Noise {
+    uint64_t Seed;
+    double Jitter;
+  };
+  for (const double realFixed : {0.0, 0.15, 0.3, 0.5}) {
+    for (int i = 0; i <= 36; ++i) {
+      const double stepMs = 8.0 + 0.25 * i;
+      for (const Noise noise : {Noise{1U, 0.04}, Noise{99U, 0.06},
+                                Noise{5U, 0.08}}) {
+        DynamicResolutionController c;
+        c.Configure(config, kPair);
+        Lcg random(noise.Seed);
+        float last = c.Scale();
+        int changes = 0;
+        uint64_t bounces = 0;
+        for (int k = 0; k < 3000; ++k) {
+          double cost =
+              stepMs * (1.0 - noise.Jitter + 2.0 * noise.Jitter * random.Next());
+          if (k % 75 == 37)
+            cost *= 1.15;
+          const double pair = 2.0 * cost * RealRatio(realFixed, c.Scale());
+          (void)c.ObservePair(pair, pair > kPair);
+          if (k == 600)
+            bounces = c.Stats().Bounces;
+          if (k > 600 && !Near(c.Scale(), last))
+            ++changes;
+          last = c.Scale();
+        }
+        const double settled = 2.0 * stepMs * RealRatio(realFixed, c.Scale());
+        const bool ok = changes <= 1 && c.Stats().Bounces == bounces &&
+                        (Near(c.Scale(), 2.25) || settled <= 0.92 * kPair);
+        if (!ok)
+          std::fprintf(stderr,
+                       "  steady %.2f ms fixed %.2f jitter %.2f: scale %.2f "
+                       "changes %d pair %.1f\n",
+                       stepMs, realFixed, noise.Jitter, c.Scale(), changes,
+                       settled);
+        CHECK(ok);
+      }
+    }
+  }
+  // The areas of log16 at their typical step frame: title 11.2 ms -> 2.5 or
+  // 2.75, room 8 14.2 / 16.6 ms -> 2.25; a light 8 ms area reaches 3.00.
+  const auto settle = [&](double stepMs, double realFixed) {
+    DynamicResolutionController c;
+    c.Configure(config, kPair);
+    for (int k = 0; k < 2000; ++k)
+      (void)c.ObservePair(2.0 * stepMs * RealRatio(realFixed, c.Scale()));
+    return c.Scale();
+  };
+  // From 3.00 (a start) the descent stops at the first level under 92%:
+  // with a fixed share of 0.3 the title's 2.75 (pair 30.1) holds.
+  CHECK(Near(settle(11.2, 0.0), 2.5));
+  CHECK(Near(settle(11.2, 0.3), 2.75));
+  CHECK(Near(settle(14.2, 0.3), 2.25));
+  CHECK(Near(settle(16.6, 0.3), 2.25));
+  CHECK(Near(settle(8.0, 0.0), 3.0));
+}
+
 } // namespace
 
 int main() {
+  TestFullAtSixty();
+  TestLog16GlCalibrationStaysAtFloor();
+  TestLog16Deko3dReplay();
+  TestDeko3dSteadyAreasHoldOneLevel();
   TestTour19WaterTempleHiddenGpu();
   TestTour19FittingAreasStay();
   TestGovernorSheddingGoesDown();

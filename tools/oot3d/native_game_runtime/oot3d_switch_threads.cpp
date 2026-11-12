@@ -28,6 +28,7 @@
 #include <string>
 
 #include "oot3d_switch_threads.h"
+#include "oot3d_switch_code_pages.h"
 #include "oot3d_hang_watchdog.h"
 
 extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
@@ -59,8 +60,9 @@ struct ThreadEntry {
     void* Argument;
 };
 
-// Before any static constructor of instrumented code runs on the main thread.
-__attribute__((constructor(101))) void MirrorMainThreadTlsPointer() {
+// Before any static constructor of instrumented code runs on the main thread,
+// and after the code moved to 2 MB blocks (oot3d_switch_code_pages.cpp, 101).
+__attribute__((constructor(102))) void MirrorMainThreadTlsPointer() {
     MirrorTlsPointer();
 }
 
@@ -104,7 +106,11 @@ const SwitchThreadLayoutConfig& Layout() {
 struct ThreadRecord {
     Handle ThreadHandle = INVALID_HANDLE;  // INVALID_HANDLE: free slot
     SwitchThreadRole Role = SwitchThreadRole::Service;
-    uint64_t LastTicks = 0;   // summary reader only
+    // CPU ticks of the thread and the system tick when they were read, from
+    // its registration on, so its first perf window already has a share
+    // (before, every thread printed "na" in the first window of a session).
+    uint64_t LastTicks = 0;
+    uint64_t LastSampleTick = 0;
     bool HasLastTicks = false;
     // Written only by the owning thread (load + store, no RMW); read by the
     // summary. Reset by the summary under the registry lock is not needed:
@@ -115,8 +121,13 @@ struct ThreadRecord {
 
 std::mutex gRegistryMutex;
 std::array<ThreadRecord, 48> gRecords;
-uint64_t gLastSummaryTick = 0;
 thread_local ThreadRecord* tRecord = nullptr;
+
+// CPU time of a thread in system ticks, on all cores.
+bool ReadThreadTicks(Handle thread, uint64_t* ticks) {
+    return R_SUCCEEDED(svcGetInfo(ticks, InfoType_ThreadTickCount, thread, UINT64_MAX)) ||
+           R_SUCCEEDED(svcGetInfo(ticks, InfoType_ThreadTickCountDeprecated, thread, UINT64_MAX));
+}
 
 void RegisterCurrentThread(SwitchThreadRole role) {
     const Handle self = threadGetCurHandle();
@@ -125,7 +136,8 @@ void RegisterCurrentThread(SwitchThreadRole role) {
         for (auto& record : gRecords) {
             if (record.ThreadHandle == INVALID_HANDLE) {
                 record.ThreadHandle = self;
-                record.HasLastTicks = false;
+                record.LastSampleTick = armGetSystemTick();
+                record.HasLastTicks = ReadThreadTicks(self, &record.LastTicks);
                 for (size_t core = 0; core < 3; ++core) {
                     record.CoreSeen[core].store(0, std::memory_order_relaxed);
                     record.LastCoreSeen[core] = 0;
@@ -138,8 +150,8 @@ void RegisterCurrentThread(SwitchThreadRole role) {
     if (tRecord != nullptr) {
         tRecord->Role = role;
     }
-    // Slot do watchdog de travamento (oot3d_hang_watchdog.h) para os papéis
-    // que ele acompanha.
+    // Hang watchdog slot (oot3d_hang_watchdog.h) for the roles
+    // it tracks.
     switch (role) {
     case SwitchThreadRole::Game: HangWatch::Bind(HangWatch::Thread::Game, self); break;
     case SwitchThreadRole::Render: HangWatch::Bind(HangWatch::Thread::Render, self); break;
@@ -244,8 +256,6 @@ std::string SwitchThreadPerfSummary() {
     const uint64_t now = armGetSystemTick();
     {
         std::lock_guard lock(gRegistryMutex);
-        const uint64_t window = gLastSummaryTick != 0 ? now - gLastSummaryTick : 0;
-        gLastSummaryTick = now;
         for (auto& record : gRecords) {
             if (record.ThreadHandle == INVALID_HANDLE) {
                 continue;
@@ -253,19 +263,16 @@ std::string SwitchThreadPerfSummary() {
             auto& role = totals[static_cast<size_t>(record.Role)];
             ++role.Threads;
             uint64_t ticks = 0;
-            Result result = svcGetInfo(&ticks, InfoType_ThreadTickCount, record.ThreadHandle,
-                                       UINT64_MAX);
-            if (R_FAILED(result)) {
-                result = svcGetInfo(&ticks, InfoType_ThreadTickCountDeprecated,
-                                    record.ThreadHandle, UINT64_MAX);
-            }
-            if (R_SUCCEEDED(result)) {
+            if (ReadThreadTicks(record.ThreadHandle, &ticks)) {
+                // 0 for a thread registered after `now` was read.
+                const uint64_t window = now > record.LastSampleTick ? now - record.LastSampleTick : 0;
                 if (record.HasLastTicks && window != 0 && ticks >= record.LastTicks) {
                     role.Percent += static_cast<double>(ticks - record.LastTicks) * 100.0 /
                                     static_cast<double>(window);
                     ++role.Measured;
                 }
                 record.LastTicks = ticks;
+                record.LastSampleTick = now;
                 record.HasLastTicks = true;
             }
             for (size_t core = 0; core < 3; ++core) {
@@ -280,7 +287,10 @@ std::string SwitchThreadPerfSummary() {
     text.setf(std::ios::fixed);
     text.precision(1);
     text << "threads: layout=" << SwitchThreadLayoutName(layout.Layout)
-         << (layout.Valid ? "" : "(invalid)") << " pacer_spin_us=" << layout.PacerSpinMicroseconds;
+         << (layout.Valid ? "" : "(invalid)") << " pacer_spin_us=" << layout.PacerSpinMicroseconds
+         // 1 = the code runs on 2 MB blocks (oot3d_switch_code_pages.cpp), for
+         // A/B against config/no_code_hugepages.
+         << " code_2mb=" << CodePagesPerfFlag(CurrentCodePagesStatus());
     // Per role: CPU % of one core over the window (sum over its threads),
     // "/nN" when several threads share the role, "@c0:c1:c2" commands or
     // batches seen on each core (threads that note it).

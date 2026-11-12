@@ -1,5 +1,6 @@
-"""TopScreen 3.0 import into the existing O3TU v2 profile-texture contract."""
+"""TopScreen 3.x (3.0, 3.2.1, 3.2.2) import into the O3TU v2 profile-texture contract."""
 
+import contextlib
 import hashlib
 import os
 import struct
@@ -204,23 +205,53 @@ class TopScreen30PackTests(unittest.TestCase):
         (self.romfs / "message/us/ltn16.qbf").write_bytes(b"QBF1")
         write_original_menus(self.romfs)
 
-    def write_archive(self, region="USA", target="Emulator/load/mods"):
+    def write_archive(self, region="USA", target="Emulator/load/mods",
+                      root="SingleScreen_3.0"):
         title = builder.TOPSCREEN_30_TITLE_IDS[region]
-        base = f"SingleScreen_3.0/{region}/{target}/{title}/"
-        archive = self.root / f"singlescreen_30_{region}.zip"
+        base = f"{root}/{region}/{target}/{title}/"
+        archive = self.root / f"singlescreen_{root}_{region}.zip"
         with zipfile.ZipFile(archive, "w") as output:
             output.writestr(base + "romfs/menu/custom_ui01.ctxb", self.atlas)
             output.writestr(base + "exefs/code.ips", b"PATCH DO NOT IMPORT")
             output.writestr(base + "romfs/stage_grid.bin", b"NOT A TEXTURE")
         return archive
 
-    def contract(self, archive):
+    def contract(self, archive, root="SingleScreen_3.0"):
         data = archive.read_bytes()
-        return patch.multiple(
-            builder,
-            TOPSCREEN_30_ARCHIVE_BYTES=len(data),
-            TOPSCREEN_30_ARCHIVE_SHA256=hashlib.sha256(data).hexdigest(),
-            TOPSCREEN_30_UI_ATLAS_SHA256=hashlib.sha256(self.atlas).hexdigest())
+        archives = patch.dict(builder.TOPSCREEN_3X_ARCHIVES, {
+            root: (len(data), hashlib.sha256(data).hexdigest())})
+        atlas = patch.object(builder, "TOPSCREEN_30_UI_ATLAS_SHA256",
+                             hashlib.sha256(self.atlas).hexdigest())
+        stack = contextlib.ExitStack()
+        stack.enter_context(archives)
+        stack.enter_context(atlas)
+        return stack
+
+    def test_32x_layouts_build_the_same_pack_as_30(self):
+        packs = []
+        for root in ("SingleScreen_3.0", "SingleScreen_3.2.1", "SingleScreen_3.2.2"):
+            archive = self.write_archive(root=root)
+            if root != "SingleScreen_3.0":
+                # 3.2.x adds a rupee texture the original game does not have.
+                with zipfile.ZipFile(archive, "a") as output:
+                    output.writestr(
+                        f"{root}/USA/Emulator/load/mods/0004000000033500/"
+                        "romfs/menu/hud_rupee00.ctxb", b"RUPEE NOT IMPORTED")
+            with self.contract(archive, root):
+                packs.append(builder.build_texture_pack(
+                    archive=archive, original_romfs=self.romfs))
+        self.assertEqual(packs[0], packs[1])
+        self.assertEqual(packs[0], packs[2])
+        self.assertNotIn(b"RUPEE NOT IMPORTED", packs[1])
+        self.assertNotIn(b"RUPEE NOT IMPORTED", packs[2])
+
+    def test_archive_mixing_3x_roots_is_rejected(self):
+        archive = self.write_archive()
+        with zipfile.ZipFile(archive, "a") as output:
+            output.writestr("SingleScreen_3.2.1/readme.txt", b"")
+        with self.assertRaisesRegex(ValueError, "mixes TopScreen 3.x roots"):
+            builder.build_texture_pack(archive=archive,
+                                       original_romfs=self.romfs)
 
     def test_builds_v2_pack_with_211_layout_and_30_atlas(self):
         archive = self.write_archive()
@@ -298,13 +329,13 @@ class TopScreen30PackTests(unittest.TestCase):
         self.assertEqual((top_alpha(440, 201), top_alpha(456, 211)), (0, 255))
 
     def test_extra_romfs_covers_patched_spanish_menu_top_parts(self):
-        """Regressão: com o patch PT-BR (slot espanhol), menu_top_parts00
-        muda e o override não casava: o HUD perdia molduras/rótulos de
-        X/Y/I/II e a cruz do D-pad (itens soltos na tela de cima)."""
+        """Regression: with the PT-BR patch (Spanish slot), menu_top_parts00
+        changes and the override did not match: the HUD lost the frames/labels of
+        X/Y/I/II and the D-pad cross (loose items on the top screen)."""
         patched = self.root / "romfs-ptbr"
         write_original_menus(patched)
         top = bytearray(original_menu_ctxb(512, 256))
-        # Texto PT-BR redesenhado fora dos retângulos do 2.1.1 (texel 1).
+        # PT-BR text redrawn outside the 2.1.1 rectangles (texel 1).
         struct.pack_into("<H", top, builder.CTXB_HEADER_SIZE + 2, 0xF00F)
         for language in ("06_EU_SPANISH", "07_US_SPANISH"):
             (patched / "menu" / language /
@@ -324,8 +355,8 @@ class TopScreen30PackTests(unittest.TestCase):
         alpha = lambda x, y: rgba[(y * 512 + x) * 4 + 3]
         self.assertTrue(all(alpha(432 + c, 218 + r) == 255
                             for c in range(30) for r in range(30)))
-        self.assertEqual(alpha(441, 190), 255)  # rótulo ZR do item I
-        self.assertEqual(rgba[4:8], bytes((255, 0, 0, 255)))  # PT-BR mantido
+        self.assertEqual(alpha(441, 190), 255)  # ZR label of item I
+        self.assertEqual(rgba[4:8], bytes((255, 0, 0, 255)))  # PT-BR kept
 
     def test_original_romfs_without_menu_textures_is_rejected(self):
         archive = self.write_archive()
@@ -357,9 +388,8 @@ class TopScreen30PackTests(unittest.TestCase):
             builder.build_texture_pack(archive=archive,
                                        original_romfs=self.romfs)
         data = archive.read_bytes()
-        with patch.multiple(
-                builder, TOPSCREEN_30_ARCHIVE_BYTES=len(data),
-                TOPSCREEN_30_ARCHIVE_SHA256=hashlib.sha256(data).hexdigest()):
+        with patch.dict(builder.TOPSCREEN_3X_ARCHIVES, {"SingleScreen_3.0": (
+                len(data), hashlib.sha256(data).hexdigest())}):
             with self.assertRaisesRegex(ValueError, "unexpected TopScreen 3.0"):
                 builder.build_texture_pack(archive=archive,
                                            original_romfs=self.romfs)
@@ -380,7 +410,8 @@ class TopScreen30PackTests(unittest.TestCase):
 @unittest.skipUnless(
     os.environ.get("OOT3D_TOPSCREEN_30_ARCHIVE") and
     os.environ.get("OOT3D_ORIGINAL_ROMFS_IMAGE"),
-    "set OOT3D_TOPSCREEN_30_ARCHIVE and OOT3D_ORIGINAL_ROMFS_IMAGE")
+    "set OOT3D_TOPSCREEN_30_ARCHIVE (a verified 3.0, 3.2.1 or 3.2.2 zip) and "
+    "OOT3D_ORIGINAL_ROMFS_IMAGE")
 class TopScreen30RealArchiveTests(unittest.TestCase):
     def test_real_archive_sprites_land_on_211_rectangles(self):
         archive = Path(os.environ["OOT3D_TOPSCREEN_30_ARCHIVE"])

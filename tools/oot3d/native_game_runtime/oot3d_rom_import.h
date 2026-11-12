@@ -1,34 +1,34 @@
 #pragma once
 
-// Prepara o game/ (code.bin, exheader.bin, romfs.bin e o manifesto do processo
-// nativo) a partir do dump decriptado do cartucho do próprio jogador, no console.
+// Prepares game/ (code.bin, exheader.bin, romfs.bin and the native process
+// manifest) from the player's own decrypted cartridge dump, on the console.
 //
-// É o port em C++ do pipeline de entrada do TriAevum no PC:
-// - tools/triaevum_release/ctr_rom.py (layout NCSD/NCCH, .code em LZSS reverso);
-// - tools/triaevum_release/input_copy_adapter.py com a receita só de COPY
-//   input_coverage/recipes/adapters/oot3d-usa-ef210566-copies.json (code da USA
-//   remontado na imagem EUR canônica; só offsets, compilados em
+// This is the C++ port of TriAevum's PC input pipeline:
+// - tools/triaevum_release/ctr_rom.py (NCSD/NCCH layout, backwards-LZSS .code);
+// - tools/triaevum_release/input_copy_adapter.py with the COPY-only recipe
+//   input_coverage/recipes/adapters/oot3d-usa-ef210566-copies.json (USA code
+//   rebuilt into the canonical EUR image; offsets only, compiled into
 //   oot3d_rom_import_usa_copies.inc);
-// - tools/triaevum_release/oot3d_region_assets.py (algoritmo de recursos
-//   oot3d_usa_resources_to_eur_v2: a RomFS da USA vira uma visão de serviço
-//   Level-3 com nomes us -> eu, cadeias de hash refeitas e slots de idioma do QM);
-// - tools/oot3d/native_a32_runtime/build_process_manifest.py (JSON do manifesto,
-//   mesmos bytes de json.dumps(indent=2, sort_keys=True) + "\n").
-// As revisões são identificadas só por hash (tools/triaevum_release/
-// supported_revisions.json e input_coverage/coverage.json). Só dumps
-// decriptados; não há chave nem decriptação.
+// - tools/triaevum_release/oot3d_region_assets.py (resource algorithm
+//   oot3d_usa_resources_to_eur_v2: the USA RomFS becomes a Level-3 service
+//   view with us -> eu names, rebuilt hash chains and QM language slots);
+// - tools/oot3d/native_a32_runtime/build_process_manifest.py (manifest JSON,
+//   same bytes as json.dumps(indent=2, sort_keys=True) + "\n").
+// Revisions are identified by hashes only (tools/triaevum_release/
+// supported_revisions.json and input_coverage/coverage.json). Only decrypted
+// dumps are accepted; there is no key or decryption support.
 //
-// Procedência: ctr_rom.py (Copyright Citra Emulator Project / Azahar Emulator
-// Project, Copyright TriAevum contributors) e oot3d_region_assets.py
-// (Copyright TriAevum contributors) são GPL-2.0-or-later, assim como as partes
-// de oot3d_rom_import.cpp portadas deles. O ctr_rom.py adapta os limites e o
-// LZSS reverso do src/core/file_sys/ncch_container.cpp do Azahar
-// (LZSS_Decompress); o hash de nome da RomFS do oot3d_region_assets.py segue o
-// src/core/file_sys/layered_fs.cpp do Azahar (CalcHash, que vem do 3dbrew),
-// ambos na revisão beb5681ee7f85586501b16b083a961b707092cd7 do Azahar
-// (https://github.com/azahar-emu/azahar). Ver THIRD_PARTY_NOTICES.md.
+// Provenance: ctr_rom.py (Copyright Citra Emulator Project / Azahar Emulator
+// Project, Copyright TriAevum contributors) and oot3d_region_assets.py
+// (Copyright TriAevum contributors) are GPL-2.0-or-later, and so are the parts
+// of oot3d_rom_import.cpp ported from them. ctr_rom.py adapts the bounds and
+// backwards-LZSS decode of Azahar's src/core/file_sys/ncch_container.cpp
+// (LZSS_Decompress); the RomFS name hash of oot3d_region_assets.py follows
+// Azahar's src/core/file_sys/layered_fs.cpp (CalcHash, itself from 3dbrew),
+// both at Azahar revision beb5681ee7f85586501b16b083a961b707092cd7
+// (https://github.com/azahar-emu/azahar). See THIRD_PARTY_NOTICES.md.
 //
-// Só C++ padrão (std::filesystem e stdio): compila no host.
+// Pure standard C++ (std::filesystem and stdio), so it builds on the host.
 
 #include <array>
 #include <cstdint>
@@ -37,7 +37,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace Oot3dNativeGame::RomImport {
@@ -49,7 +48,7 @@ public:
 
 using Digest = std::array<std::uint8_t, 32>;
 
-// SHA-256 em fluxo (instruções SHA-2 do ARMv8 quando o alvo tem).
+// Streaming SHA-256 (ARMv8 SHA-2 instructions when the target has them).
 class Sha256 {
 public:
     Sha256();
@@ -68,62 +67,56 @@ private:
 
 struct FileIdentity {
     std::uint64_t Bytes;
-    const char* Sha256; // hex minúsculo
+    const char* Sha256; // lowercase hex
 };
 
 [[nodiscard]] bool Matches(const FileIdentity& identity, std::uint64_t bytes,
                            const Digest& digest);
 
 enum class Adaptation {
-    None,     // as entradas já são as entradas de execução EUR canônicas
-    UsaToEur, // receita COPY no code, oot3d_usa_resources_to_eur_v2 na RomFS
+    None,     // inputs are already the canonical EUR execution inputs
+    UsaToEur, // COPY recipe for code, oot3d_usa_resources_to_eur_v2 for RomFS
 };
 
 struct Revision {
-    const char* Id;   // id da receita do TriAevum
-    const char* Name; // mostrado ao jogador
+    const char* Id;   // TriAevum recipe id
+    const char* Name; // shown to the player
     FileIdentity SourceCode, SourceExheader, SourceRomFs;
-    FileIdentity Code, Exheader, RomFs; // entradas de execução gravadas no game/
+    FileIdentity Code, Exheader, RomFs; // execution inputs written to game/
     Adaptation Adapt;
 };
 
 [[nodiscard]] std::span<const Revision> SupportedRevisions();
-// Uma linha por revisão suportada, para as telas de erro.
+// One line per supported revision, for error screens.
 [[nodiscard]] std::string SupportedRevisionsText();
 
-// Texto para o console do libnx: o con_write desenha byte a byte com a fonte
-// padrão de 256 glifos, então um caractere UTF-8 acentuado viraria dois glifos
-// errados. Letras acentuadas do português (e do espanhol/francês dos nomes de
-// arquivo) perdem o acento; outro caractere fora do ASCII vira '?'.
-[[nodiscard]] std::string ConsoleAscii(std::string_view utf8);
-
 enum class SourceKind {
-    Cartridge, // um arquivo .3ds/.cci (NCSD) ou um NCCH solto
-    Extracted, // uma pasta com code.bin (descomprimido), exheader.bin, romfs.bin (IVFC)
+    Cartridge, // a .3ds/.cci file (NCSD) or a bare NCCH
+    Extracted, // a folder with code.bin (decompressed), exheader.bin, romfs.bin (IVFC)
 };
 
 struct Source {
     SourceKind Kind;
-    std::filesystem::path Path; // o arquivo ou a pasta
+    std::filesystem::path Path; // the file, or the folder
 };
 
-// Dumps decriptados em `root` (*.3ds/*.cci, ordenados pelo nome) e depois
-// root/import/, quando ela tem algum de code.bin, exheader.bin ou romfs.bin.
+// Decrypted dumps in `root` (*.3ds/*.cci, sorted by name), then root/import/
+// when it holds any of code.bin, exheader.bin or romfs.bin.
 [[nodiscard]] std::vector<Source> FindSources(const std::filesystem::path& root);
 
 struct Plan {
     Source Input;
     const Revision* Recipe = nullptr;
     std::uint64_t ProgramId = 0;
-    std::vector<std::uint8_t> Code;     // .code de origem descomprimido
+    std::vector<std::uint8_t> Code;     // decompressed source .code
     std::vector<std::uint8_t> Exheader; // 2048 bytes
-    std::filesystem::path RomFsPath;    // arquivo que contém a imagem RomFS (IVFC)
+    std::filesystem::path RomFsPath;    // file holding the RomFS (IVFC) image
     std::uint64_t RomFsOffset = 0;
     std::uint64_t RomFsSize = 0;
 };
 
-// Lê o contêiner, o ExHeader e o .code e acha a revisão suportada. O hash da
-// RomFS só é conferido durante a importação (uma passada só).
+// Parses the container, reads ExHeader and .code and matches a supported
+// revision. The RomFS hash is only checked while importing (one pass).
 [[nodiscard]] Plan Identify(const Source& source);
 
 struct Progress {
@@ -148,27 +141,27 @@ struct Result {
 inline constexpr const char* kManifestName = "oot3d_native_process_manifest.json";
 inline constexpr const char* kReceiptName = "rom_import.json";
 
-// Grava o game/ por arquivos *.partial, confere cada um (relido do
-// armazenamento) contra a receita e só então substitui os anteriores. O
-// manifesto anterior sai antes do primeiro rename: um commit interrompido
-// deixa o game/ sem manifesto e o próximo boot importa de novo. A origem nunca
-// é alterada. Lança ImportError; os parciais são apagados na falha.
+// Writes game/ through *.partial files, verifies them (re-read from storage)
+// against the recipe and only then replaces the previous files. The previous
+// manifest is removed before the first rename, so an interrupted commit
+// leaves no manifest and the next boot imports again. The source is never
+// modified. Throws ImportError; partial files are removed on failure.
 [[nodiscard]] Result Import(const Plan& plan, const std::filesystem::path& gameDirectory,
                             const ProgressCallback& progress = {});
 
-// Verdadeiro quando o game/ tem uma importação completa exatamente desta
-// origem (mesmos nomes, tamanhos e datas de modificação): o boot pula a importação.
+// True when game/ holds a completed import of exactly this source (same
+// file names, sizes and modification times), so boot can skip the import.
 [[nodiscard]] bool ImportIsCurrent(const Source& source,
                                    const std::filesystem::path& gameDirectory);
 
-// Apaga o dump do jogador depois de uma importação bem-sucedida (só se ele pedir).
+// Deletes the player's dump after a successful import (player opt-in only).
 void RemoveSource(const Source& source);
 
-// ---- Peças usadas pelos testes de host ----
+// ---- Building blocks, exercised by the host tests ----
 
 [[nodiscard]] std::vector<std::uint8_t> DecompressExeFsCode(std::span<const std::uint8_t> compressed);
 
-// Programa COPY: pares LEB128 (offset na origem, tamanho), `count` pares.
+// COPY program: LEB128 pairs (source offset, length), `count` pairs.
 [[nodiscard]] std::vector<std::uint8_t> ApplyCopyProgram(std::span<const std::uint8_t> source,
                                                          std::span<const std::uint8_t> program,
                                                          std::size_t count,
@@ -181,24 +174,24 @@ void RemoveSource(const Source& source);
                                                      std::uint64_t fileSize);
 
 struct RomFsPatch {
-    std::uint64_t Offset; // na imagem de saída (Level-3)
+    std::uint64_t Offset; // in the output (Level-3) image
     std::vector<std::uint8_t> Bytes;
 };
 
 struct RomFsAdaptation {
-    std::uint64_t Base = 0; // bytes da imagem de origem antes do Level 3 (superbloco IVFC)
-    std::uint64_t Size = 0; // tamanho da saída
+    std::uint64_t Base = 0; // bytes of the source image before Level 3 (IVFC superblock)
+    std::uint64_t Size = 0; // output size
     std::vector<RomFsPatch> Patches;
     RomFsAdaptationStats Stats;
 };
 
-// Lê `count` bytes em `offset` da imagem RomFS de origem (a partir do primeiro byte).
+// Reads `count` bytes at `offset` of the source RomFS image (from its first byte).
 using RomFsReader = std::function<void(std::uint64_t offset, std::size_t count, std::uint8_t* out)>;
 
-// oot3d_usa_resources_to_eur_v2 como patches sobre a imagem de origem.
+// oot3d_usa_resources_to_eur_v2 as patches over the source image.
 [[nodiscard]] RomFsAdaptation PlanUsaToEurRomFs(const RomFsReader& read, std::uint64_t imageSize);
 
-// O JSON do manifesto do game/ (caminhos relativos ao manifesto).
+// The manifest JSON for game/ (SD-relative paths).
 [[nodiscard]] std::string BuildProcessManifest(std::span<const std::uint8_t> exheader,
                                                std::span<const std::uint8_t> code,
                                                std::uint64_t romfsFileSize,

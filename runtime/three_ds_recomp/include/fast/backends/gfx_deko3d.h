@@ -1,9 +1,9 @@
 #pragma once
 
-// deko3d rendering backend (Switch): selected at run time by
-// sdmc:/switch/oot3dre/config/renderer containing "deko3d". Without the file
-// (or with "gl") the OpenGL/Mesa backend stays in use, unchanged.
-// docs/DEKO3D_PROGRESSO.md has the design and the package status.
+// deko3d rendering backend (Switch): the default since 11/11. The first line of
+// sdmc:/switch/oot3dre/config/renderer saying "gl" or "opengl" selects the
+// OpenGL/Mesa backend instead; no file, or any other content, means deko3d.
+// docs/DEKO3D_PROGRESS.md has the design and the package status.
 
 #include <cctype>
 #include <cstdint>
@@ -16,7 +16,8 @@ namespace Fast {
 class GfxRenderingAPI;
 
 // Pure: the selection rule for the content of config/renderer (first line,
-// surrounding blanks ignored, case-insensitive). Unit-tested on the host.
+// surrounding blanks ignored, case-insensitive): false only for "gl" and
+// "opengl". Unit-tested on the host.
 inline bool Deko3dRendererConfigSelects(std::string_view content) {
     const size_t newline = content.find_first_of("\r\n");
     if (newline != std::string_view::npos) {
@@ -28,16 +29,18 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
     while (!content.empty() && std::isspace(static_cast<unsigned char>(content.back()))) {
         content.remove_suffix(1);
     }
-    constexpr std::string_view kName = "deko3d";
-    if (content.size() != kName.size()) {
-        return false;
-    }
-    for (size_t index = 0; index < kName.size(); ++index) {
-        if (std::tolower(static_cast<unsigned char>(content[index])) != kName[index]) {
+    const auto is = [content](std::string_view name) {
+        if (content.size() != name.size()) {
             return false;
         }
-    }
-    return true;
+        for (size_t index = 0; index < name.size(); ++index) {
+            if (std::tolower(static_cast<unsigned char>(content[index])) != name[index]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return !is("gl") && !is("opengl");
 }
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
@@ -84,6 +87,19 @@ struct Deko3dGpuFrame {
 };
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds);
 
+// Render-thread waits at a frame's start for a scene's entry work
+// (config/texture_pack_hold, config/grass_hold): the frame waited, it did no
+// work. Render thread only: the holds add their wait, the pacing governor
+// takes the frame's total before Deko3dTagFrame and leaves it out of the
+// frame's cost (config/pacer_entry_recover). Nothing elsewhere.
+void Deko3dNoteRenderHold(uint64_t micros);
+uint64_t Deko3dTakeRenderHoldMicros();
+// A scene's entry work still running (render thread): HD pack decodes queued
+// or running, grass placements requested and not made. The pacing governor
+// probes 60 again soon after it ends (config/pacer_entry_recover). False
+// elsewhere.
+bool Deko3dEntryWorkPending();
+
 // Render-thread CPU time of the last swap (FinishRender) and of its parts, for
 // logs/spikes.txt (p6o: the swap took 12.7 ms in the frames that missed a
 // refresh while fence, acquire and present were short). Zero elsewhere.
@@ -92,19 +108,31 @@ struct Deko3dSwapTimes {
     float FenceMs = 0.0F;   // waiting for the frame in flight (BeginFrame)
     float SubmitMs = 0.0F;  // the frame's last submit (dkQueueSubmitCommands + flush)
     float PresentMs = 0.0F; // dkQueuePresentImage
-    // Antes do acquire da janela: espera pelo present thread (o
-    // nwindowQueueBuffer do quadro anterior), o acquire em si e quanto aquele
-    // nwindowQueueBuffer levou (p6v: picos de render_wait).
+    // Before the window acquire: wait for the present thread (the
+    // previous frame's nwindowQueueBuffer), the acquire itself and how long that
+    // nwindowQueueBuffer took (p6v: render_wait spikes).
     float WaitPresentMs = 0.0F;
     float AcquireMs = 0.0F;
     float QueueBufferMs = 0.0F;
 };
 Deko3dSwapTimes Deko3dLastSwapTimes();
 
-// config/grass (mod, off without the file): grass sources and placements on
-// the Switch from the Graphics JSON the game hands at start (the product
-// preset, triaevum_product_graphics.inc). p7a: CPU side only, logged to
-// logs/deko3d.txt; nothing is drawn yet.
-void Deko3dConfigureGrass(std::string_view graphicsJson);
+// config/grass (off without the file; SWITCH_PORT.md "Grass on deko3d"):
+// grass sources and placements on the Switch from the Graphics JSON the game
+// hands at start (the product preset, triaevum_product_graphics.inc), with
+// the Switch profile of the frame rate (fps60: 60 FPS presented at start).
+// "draw" in the file also draws the tufts; anything else only logs the
+// placements.
+void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60);
+// L3+R3 > Video > FPS while the game runs: the other rate's profile
+// (distances, visible cap), as Deko3dConfigureGrass would set it at a start
+// at that rate. Render thread, between frames; nothing without grass.
+void Deko3dSetGrassFrameRate(bool fps60);
+// config/grass = draw: the game thread reads Link's and Epona's colliders for
+// the bend (CollectNativeGrassColliders). False in every other case.
+bool Deko3dGrassWantsColliders();
+// The game's scene and room (game thread, once per host frame, only while
+// Deko3dGrassWantsColliders): grass culled in another scene is never drawn.
+void Deko3dSetGrassArea(int scene, int room);
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);
 } // namespace Fast

@@ -87,6 +87,77 @@ inline NativeOffloadOptions ReadNativeOffloadOptions() {
     return options;
 }
 
+// config/capture_delta (SWITCH_PORT.md "Capture delta"): the per-draw state
+// capture records only what changed since the previous draw and the plan
+// builder fills the rest off the game thread. Switch: the file absent = on,
+// "0" = the full copy per draw. Desktop: TRIAEVUM_CAPTURE_DELTA=1 (off
+// otherwise).
+inline bool ReadNativeCaptureDelta() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/capture_delta");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_CAPTURE_DELTA");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
+// config/list_walk_fast (SWITCH_PORT.md "Command-list walk"): the GSP
+// command-list walk dispatches per register from a table and batches
+// consecutive-mode commands. Switch: the file absent = on, "0" = the
+// per-word walk. Desktop: TRIAEVUM_LIST_WALK_FAST=1 (off otherwise).
+inline bool ReadNativeListWalkFast() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/list_walk_fast");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_LIST_WALK_FAST");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
+// config/vertex_snapshot_fast (SWITCH_PORT.md "Vertex snapshot hit path"):
+// index and vertex snapshots certified page by page, only the pages written
+// since compared with the cached bytes. Switch: the file absent = on, "0" =
+// one certificate per range and a compare of every byte. Desktop:
+// TRIAEVUM_VERTEX_SNAPSHOT_FAST=1 (off otherwise).
+inline bool ReadNativeVertexSnapshotFast() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/vertex_snapshot_fast");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_VERTEX_SNAPSHOT_FAST");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
+// config/texture_snapshot_fast (SWITCH_PORT.md "Texture snapshot and packet
+// stages"): textures viewed and certified directly, found through a front
+// table, compared page by page; the next draw's packet prefetched. Switch:
+// the file absent = on, "0" = the previous path. Desktop:
+// TRIAEVUM_TEXTURE_SNAPSHOT_FAST=1 (off otherwise).
+inline bool ReadNativeTextureSnapshotFast() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/texture_snapshot_fast");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_TEXTURE_SNAPSHOT_FAST");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
 // Appends lines to one file from a service thread, in submission order.
 // Push never waits for the file: it takes a mutex the writer holds only to
 // pop (never during the write) and drops the line when the queue is full.

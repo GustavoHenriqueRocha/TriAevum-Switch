@@ -1,4 +1,5 @@
 #include "oot3d_top_screen_pause_transaction.h"
+#include "oot3d_top_screen_page_layout.h"
 
 #include <stdexcept>
 
@@ -319,12 +320,23 @@ bool TopScreenSystemPageRuntime::Execute(oot3d::recomp::a32::GuestState &state,
     return handled;
   }
   // 0x005D32B4 / 0x005D3C68: before the draw and after its writer completes.
+  // 2.1.1 draws System in the full (0, 0, 480, 400) with the wide projection
+  // (0.8: page X + 40), for its Mod Options affordance in the margin, which
+  // this port leaves out. Here System is drawn as the centred pages are: the
+  // page viewport (0, 40, 480, 320) and the page's own projection (the
+  // projection upload is not widened while Drawing()), the same placement
+  // clipped to the lower screen's 320 columns. What the System menu draws
+  // beyond them (0.2.1 report: a piece of a button at the left edge once
+  // Save or Quit is chosen) stays off screen, as on the 3DS, instead of
+  // showing in the 40 columns beside the page. The scene pass gets its full
+  // viewport back after the draw.
   state = mResume;
   state.r[13] -= kCallStackReservation;
+  const bool beforeDraw = mPhase == 2U;
   state.r[0] = 0U;
-  state.r[1] = 0U;
+  state.r[1] = beforeDraw ? kTopScreenCentredPageX : 0U;
   state.r[2] = 480U;
-  state.r[3] = 400U;
+  state.r[3] = beforeDraw ? kTopScreenPageWidthPixels : kTopScreenPresentedWidthPixels;
   return branch(0x002FEABCU);
 }
 

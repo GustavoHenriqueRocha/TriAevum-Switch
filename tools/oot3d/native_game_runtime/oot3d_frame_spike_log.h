@@ -1,26 +1,26 @@
 #pragma once
 
-// Medição por pico (logs/spikes.txt; config/frame_spikes ou config/gpu_timing).
+// Per-spike measurement (logs/spikes.txt; config/frame_spikes or config/gpu_timing).
 //
-// Médias de janela escondem o que importa para a fluidez: o Switch não tem
-// VRR, e um quadro que perde o vsync deixa a imagem anterior mais um refresh
-// de 16,7 ms na tela. Aqui cada quadro apresentado vira uma amostra (POD, sem
-// alocação); só os que perderam o vsync entram num anel SPSC de tamanho fixo
-// (produtor: render thread; consumidor: a janela do perf.txt na thread do
-// jogo, que formata em lote e manda ao AsyncLineWriter).
+// Window averages hide what matters for smoothness: the Switch has no
+// VRR, and a frame that misses vsync leaves the previous image on screen for one
+// more 16.7 ms refresh. Here every presented frame becomes a sample (POD, no
+// allocation); only the ones that missed vsync go into a fixed-size SPSC ring
+// (producer: render thread; consumer: the perf.txt window on the game
+// thread, which formats in batch and sends to the AsyncLineWriter).
 //
-// Refreshes de um quadro = refreshes entre a imagem anterior e esta (1 = em
-// dia; 2 = a anterior ficou um refresh a mais, este quadro perdeu o vsync).
-// Com o relógio de vsync (oot3d_vsync_clock.h) usa o modelo de latch FIFO:
-// o buffer entregue em t aparece no primeiro vsync depois de t e nunca antes
-// do vsync seguinte ao do buffer anterior (fila da swapchain). Sem ele,
-// arredonda o intervalo entre swaps pelo período nominal.
+// Refreshes of a frame = refreshes between the previous image and this one (1 = on
+// time; 2 = the previous one stayed one extra refresh, this frame missed vsync).
+// With the vsync clock (oot3d_vsync_clock.h) uses the FIFO latch model:
+// the buffer delivered at t appears at the first vsync after t and never before
+// the vsync following the previous buffer's (swapchain queue). Without it,
+// rounds the interval between swaps by the nominal period.
 //
-// Etapa culpada (missed_by_stage_*): guest = a thread do jogo ocupada passou
-// do orçamento (refreshes esperados x período); render = a render thread
-// ocupada (sem as esperas) passou; gpu = o último resultado da GPU passou;
-// pacer = nada passou (fase/deriva do pacer, espera da swapchain, acordar
-// tarde). A ordem é essa: a primeira etapa estourada leva a culpa.
+// Blamed stage (missed_by_stage_*): guest = the busy game thread exceeded
+// the budget (expected refreshes x period); render = the busy render thread
+// (excluding waits) exceeded it; gpu = the last GPU result exceeded it;
+// pacer = nothing exceeded it (pacer phase/drift, swapchain wait, late
+// wakeup). The order is this: the first stage over budget takes the blame.
 
 #include <algorithm>
 #include <array>
@@ -54,46 +54,46 @@ inline const char *SpikeStageName(SpikeStage stage) {
   }
 }
 
-// Contexto do quadro (bits): o que aconteceu desde o quadro anterior.
+// Frame context (bits): what happened since the previous frame.
 enum SpikeContext : uint16_t {
-  kSpikeLoad = 1U << 0,      // troca de cena nos últimos ~2 s (warp/carregamento)
-  kSpikeTexUpload = 1U << 1, // texturas criadas
-  kSpikeShader = 1U << 2,    // compilação GLSL / tradução nvc0 (Mesa)
-  kSpikeProgram = 1U << 3,   // programa GL novo (ProgramsLive subiu)
-  kSpikeGlOom = 1U << 4,     // falha de alocação GL
-  kSpikeEvict = 1U << 5,     // despejo de residência (texturas)
-  kSpikeDrs = 1U << 6,       // resolução dinâmica trocou de escala
+  kSpikeLoad = 1U << 0,      // scene change in the last ~2 s (warp/loading)
+  kSpikeTexUpload = 1U << 1, // textures created
+  kSpikeShader = 1U << 2,    // GLSL compilation / nvc0 translation (Mesa)
+  kSpikeProgram = 1U << 3,   // new GL program (ProgramsLive went up)
+  kSpikeGlOom = 1U << 4,     // GL allocation failure
+  kSpikeEvict = 1U << 5,     // residency eviction (textures)
+  kSpikeDrs = 1U << 6,       // dynamic resolution changed scale
 };
 
 inline constexpr std::array<const char *, 7> kSpikeContextNames{
     "load", "tex", "shader", "program", "gl_oom", "evict", "drs"};
 
 struct FrameSpikeSample {
-  uint64_t HostFrame = 0U;  // quadro de host apresentado (série da render thread)
-  uint64_t GuestFrame = 0U; // quadros do jogo concluídos até este
-  double TimeSeconds = 0.0; // fim do swap, relógio monotônico
+  uint64_t HostFrame = 0U;  // presented host frame (render thread series)
+  uint64_t GuestFrame = 0U; // game frames completed up to this one
+  double TimeSeconds = 0.0; // end of swap, monotonic clock
   SpikeFrameKind Kind = SpikeFrameKind::Hold;
-  uint8_t Expected = 1U;  // refreshes esperados (2: passo do 30 travado)
-  uint8_t Refreshes = 1U; // medidos
-  uint8_t TopStage = 0xFFU; // GlPerf::Stage mais cara na CPU (0xFF: sem glperf)
+  uint8_t Expected = 1U;  // expected refreshes (2: locked-30 step)
+  uint8_t Refreshes = 1U; // measured
+  uint8_t TopStage = 0xFFU; // most expensive GlPerf::Stage on CPU (0xFF: no glperf)
   uint16_t Context = 0U;
   uint16_t TexturesNew = 0U;
   uint16_t ProgramsNew = 0U;
   uint16_t ShadersNew = 0U;
-  float GuestMs = 0.0F;       // lógica do jogo no último quadro de host
-  float GameBusyMs = 0.0F;    // thread do jogo ocupada (sem esperar o renderer)
-  float RenderBusyMs = 0.0F;  // render thread trabalhando no quadro
-  float RenderWaitMs = 0.0F;  // render thread esperando a swapchain (acquire)
-  float PacerWaitMs = 0.0F;   // espera do pacer antes do swap
-  float GpuMs = 0.0F;         // último resultado da GPU (atrasa 1-3 quadros; 0 = nenhum)
+  float GuestMs = 0.0F;       // game logic in the last host frame
+  float GameBusyMs = 0.0F;    // game thread busy (not waiting for the renderer)
+  float RenderBusyMs = 0.0F;  // render thread working on the frame
+  float RenderWaitMs = 0.0F;  // render thread waiting on the swapchain (acquire)
+  float PacerWaitMs = 0.0F;   // pacer wait before the swap
+  float GpuMs = 0.0F;         // last GPU result (lags 1-3 frames; 0 = none)
   float TopStageMs = 0.0F;
   float SwapMs = 0.0F;        // swap (eglSwapBuffers)
-  // deko3d (p6o): partes do swap no render thread (Fast::Deko3dLastSwapTimes).
+  // deko3d (p6o): parts of the swap on the render thread (Fast::Deko3dLastSwapTimes).
   float DkFinishMs = 0.0F;
   float DkFenceMs = 0.0F;
   float DkSubmitMs = 0.0F;
   float DkPresentMs = 0.0F;
-  // p6v: espera pelo present thread, acquire e o último nwindowQueueBuffer.
+  // p6v: wait for the present thread, acquire and the last nwindowQueueBuffer.
   float DkWaitPresentMs = 0.0F;
   float DkAcquireMs = 0.0F;
   float DkQueueBufferMs = 0.0F;
@@ -113,16 +113,16 @@ struct FrameSpikeRecord {
   return SpikeStage::Pacer;
 }
 
-// Refreshes de cada quadro apresentado (ver o topo). Tempos em ns no mesmo
-// relógio do vsync.
+// Refreshes of each presented frame (see the top). Times in ns on the same
+// clock as vsync.
 class SpikeRefreshCounter {
 public:
-  // vsyncValid: lastVsyncNs/periodNs vêm do relógio de vsync.
+  // vsyncValid: lastVsyncNs/periodNs come from the vsync clock.
   uint32_t Observe(int64_t presentNs, bool vsyncValid, int64_t lastVsyncNs,
                    double periodNs, double nominalPeriodNs) {
     double refreshes = 1.0;
     if (vsyncValid && periodNs > 0.0) {
-      // Primeiro vsync depois do swap; com fila, o seguinte ao do anterior.
+      // First vsync after the swap; with queueing, the one after the previous one's.
       const double since = static_cast<double>(presentNs - lastVsyncNs);
       double latch = static_cast<double>(lastVsyncNs) +
                      (std::floor(since / periodNs) + 1.0) * periodNs;
@@ -156,10 +156,10 @@ private:
   double mPreviousLatchNs = 0.0;
 };
 
-// Anel SPSC de tamanho fixo: Push só na render thread, Drain só no
-// consumidor. Cheio: descarta e conta.
+// Fixed-size SPSC ring: Push only on the render thread, Drain only on the
+// consumer. Full: drops and counts.
 template <size_t Capacity> class FrameSpikeRing {
-  static_assert((Capacity & (Capacity - 1U)) == 0U, "potência de 2");
+  static_assert((Capacity & (Capacity - 1U)) == 0U, "power of 2");
 
 public:
   bool Push(const FrameSpikeRecord &record) {
@@ -191,8 +191,8 @@ private:
   std::atomic<uint64_t> mDropped{0U};
 };
 
-// Totais acumulados (escritos pela render thread, lidos pela janela do
-// perf.txt): refreshes perdidos e quadros que perderam, por etapa culpada.
+// Accumulated totals (written by the render thread, read by the perf.txt
+// window): missed refreshes and frames that missed, per blamed stage.
 struct FrameSpikeTotals {
   std::atomic<uint64_t> Presents{0U};
   std::atomic<uint64_t> MissedFrames{0U};
@@ -219,8 +219,8 @@ inline void AddOwner(std::atomic<uint64_t> &counter, uint64_t value) {
                 std::memory_order_relaxed);
 }
 
-// Uma amostra por quadro apresentado (render thread). Devolve true quando o
-// quadro perdeu o vsync (e foi para o anel).
+// One sample per presented frame (render thread). Returns true when the
+// frame missed vsync (and went into the ring).
 template <size_t Capacity>
 bool ObserveFrameSpike(const FrameSpikeSample &sample, double periodMs,
                        FrameSpikeTotals &totals, FrameSpikeRing<Capacity> &ring) {
@@ -238,7 +238,7 @@ bool ObserveFrameSpike(const FrameSpikeSample &sample, double periodMs,
   return true;
 }
 
-// Nomes das etapas do GlPerf (gl_frame_profiler.h, mesma ordem).
+// GlPerf stage names (gl_frame_profiler.h, same order).
 inline const char *SpikeTopStageName(uint8_t stage) {
   static constexpr std::array<const char *, 15> kNames{
       "begin", "clear", "pica_top", "pica_bottom", "pica_off", "pica_canon",
@@ -247,7 +247,7 @@ inline const char *SpikeTopStageName(uint8_t stage) {
   return stage < kNames.size() ? kNames[stage] : "-";
 }
 
-// Uma linha de logs/spikes.txt (com '\n'); devolve o tamanho escrito.
+// One line of logs/spikes.txt (with '\n'); returns the size written.
 inline int FormatFrameSpike(const FrameSpikeRecord &record, char *out, size_t size) {
   const auto &s = record.Sample;
   char context[64] = "-";

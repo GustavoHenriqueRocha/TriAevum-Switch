@@ -216,8 +216,11 @@ void ReplayCpu(const a32::GuestState& input, const Route& route, const std::stri
                 clocks = QueryThreadCycleTime(GetCurrentThread(), &cyclesEnd) != 0 && clocks;
                 const bool fullMemoryCheck = trial < 0 || trial == 15;
                 const auto fingerprint = fullMemoryCheck ? memory.ContentFingerprint() : 0;
+                // The generation steps once per observation that saw writes:
+                // a batch that writes moves it by one here (no observation
+                // between invocations), one that does not leaves it.
                 const auto expectedBatchGeneration = trialGeneration +
-                    (expectedGeneration - originalGeneration) * count;
+                    (expectedGeneration != originalGeneration ? 1U : 0U);
                 const bool match = stateMatch && resets.MatchesOutput() &&
                     (!fullMemoryCheck || fingerprint == expectedMemory) &&
                     (useJit && pair == 2 || memory.WriteGeneration() == expectedBatchGeneration);

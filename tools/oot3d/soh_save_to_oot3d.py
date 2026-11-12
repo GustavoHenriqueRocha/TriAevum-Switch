@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Converte um save do Ship of Harkinian (file1.sav, JSON do SaveContext do N64) num save00.bin do OoT3D.
+"""Converts a Ship of Harkinian save (file1.sav, JSON of the N64 SaveContext) into an OoT3D save00.bin.
 
-Uso: soh_save_to_oot3d.py <file1.sav> <save00.bin base do OoT3D> <saída>
+Usage: soh_save_to_oot3d.py <file1.sav> <base OoT3D save00.bin> <output>
 
-O save00.bin do OoT3D é o SaveContext até o checksum (0x14DC bytes, little-endian, layout do z3D.h do
-OoT3D Randomizer); o checksum (+0x14D8) é CRC-16/ARC do arquivo inteiro com o campo zerado, o mesmo do
-system.dat (oot3d_native_master_quest_unlock.h). O arquivo base guarda o que só o 3DS tem (opções de
-controle, câmera, estatísticas dos chefes); o resto vem do SoH. Os IDs de item do OoT3D são os do N64.
-Save Master Quest vai num slot do MQ: save03.bin a save05.bin (os slots 0-2 são do modo normal;
-FUN_002e63c8, oot3d_native_master_quest_unlock.h). Ficam de fora: músicas do espantalho, recordes (pesca, cavalo, Big Poe) e as marcas de item novo do menu.
+The OoT3D save00.bin is the SaveContext up to the checksum (0x14DC bytes, little-endian, layout from the
+OoT3D Randomizer's z3D.h); the checksum (+0x14D8) is CRC-16/ARC of the whole file with the field zeroed, the same as
+system.dat (oot3d_native_master_quest_unlock.h). The base file keeps what only the 3DS has (control
+options, camera, boss statistics); the rest comes from SoH. OoT3D item IDs are the N64 ones.
+A Master Quest save goes into an MQ slot: save03.bin to save05.bin (slots 0-2 are normal mode;
+FUN_002e63c8, oot3d_native_master_quest_unlock.h). Left out: scarecrow songs, records (fishing, horse, Big Poe) and the menu's new-item marks.
 """
 import json
 import struct
@@ -33,7 +33,7 @@ def store_checksum(save):
 
 
 def n64_name(chars):
-    """Fonte do N64 (0-9, A-Z, a-z, 0x3E espaço) para texto."""
+    """N64 font (0-9, A-Z, a-z, 0x3E space) to text."""
     out = ""
     for c in chars:
         if c <= 0x09:
@@ -48,8 +48,8 @@ def n64_name(chars):
 
 
 def put_equips(save, offset, equips, inventory):
-    # N64: B, C-esq., C-baixo, C-dir. → 3DS: B, Y, X, I, II (o II fica vazio). Um botão mostra o item que
-    # está no slot dele (o SoH guardou a Ocarina das Fadas num C com a do Tempo no slot).
+    # N64: B, C-left, C-down, C-right → 3DS: B, Y, X, I, II (II stays empty). A button shows the item that
+    # is in its slot (SoH stored the Fairy Ocarina on a C with the Ocarina of Time in the slot).
     items = (equips["buttonItems"] + [255] * 4)[:4] + [255]
     slots = (equips["cButtonSlots"] + [255] * 3)[:3] + [255]
     for button, slot in enumerate(slots[:3], start=1):
@@ -61,8 +61,8 @@ def put_equips(save, offset, equips, inventory):
 
 
 def item_menu(items, has_bow):
-    """Grade de itens da tela de toque: os slots que o Link tem, em ordem (como o randomizer, as
-    flechas mágicas só entram sem arco: com arco elas vão junto dele)."""
+    """Touch screen item grid: the slots Link has, in order (like the randomizer, the
+    magic arrows only go in without the bow: with the bow they go along with it)."""
     arrows = {0x04, 0x0A, 0x10}
     owned = [slot for slot, item in enumerate(items) if item != 0xFF and not (has_bow and slot in arrows)]
     return bytes((owned + [0xFF] * 24)[:24])
@@ -70,9 +70,9 @@ def item_menu(items, has_bow):
 
 def convert(soh, base):
     if len(base) != SAVE_SIZE or base[0x30:0x36] != b"ZELDAZ":
-        raise SystemExit("o save base não é um save00.bin do OoT3D")
+        raise SystemExit("the base save is not an OoT3D save00.bin")
     if struct.unpack_from("<H", base, CHECKSUM)[0] != crc16_arc(base[:CHECKSUM] + b"\0\0" + base[CHECKSUM + 2:]):
-        raise SystemExit("checksum do save base não confere")
+        raise SystemExit("base save checksum doesn't match")
     d = soh["sections"]["base"]["data"]
     inv = d["inventory"]
     s = bytearray(base)
@@ -91,7 +91,7 @@ def convert(soh, base):
     s[0x52] = d["bgsFlag"] & 0xFF
     items = [v & 0xFF for v in inv["items"][:24]]
     equipment = inv["equipment"]
-    # O OoT3D põe as botas de ferro e as de levitar no menu de itens (slots 24 e 25).
+    # OoT3D puts the iron boots and the hover boots in the item menu (slots 24 and 25).
     items += [0x45 if equipment & 0x2000 else 0xFF, 0x46 if equipment & 0x4000 else 0xFF]
     put_equips(s, 0x54, d["childEquips"], items)
     put_equips(s, 0x60, d["adultEquips"], items)
@@ -111,7 +111,7 @@ def convert(soh, base):
     struct.pack_into("<8i", s, 0xE7C, fw["pos"]["x"], fw["pos"]["y"], fw["pos"]["z"], fw["yaw"],
                      fw["playerParams"], fw["entranceIndex"], fw["roomIndex"], fw["set"])
     struct.pack_into("<II", s, 0xE9C, fw["tempSwchFlags"] & 0xFFFFFFFF, fw["tempCollectFlags"] & 0xFFFFFFFF)
-    # N64: gsFlags[6] u32, um byte por área (máscaras 0xFF << 8 * (área & 3)); 3DS: um byte por área.
+    # N64: gsFlags[6] u32, one byte per area (masks 0xFF << 8 * (area & 3)); 3DS: one byte per area.
     gs = [((d["gsFlags"][area >> 2] & 0xFFFFFFFF) >> (8 * (area & 3))) & 0xFF for area in range(22)]
     s[0xEB4:0xEB4 + 22] = bytes(gs)
     struct.pack_into("<14H", s, 0xEEC, *(v & 0xFFFF for v in d["eventChkInf"][:14]))
@@ -137,10 +137,10 @@ def main(argv):
     out, name, gs = convert(soh, base)
     open(argv[3], "wb").write(out)
     d = soh["sections"]["base"]["data"]
-    print(f"{argv[3]}: {name.strip()}, {'criança' if d['linkAge'] else 'adulto'}, "
-          f"{d['healthCapacity'] // 16} corações, {d['inventory']['gsTokens']} skulltulas "
+    print(f"{argv[3]}: {name.strip()}, {'child' if d['linkAge'] else 'adult'}, "
+          f"{d['healthCapacity'] // 16} hearts, {d['inventory']['gsTokens']} skulltulas "
           f"({sum(bin(b).count('1') for b in gs)} flags), MQ={1 if d.get('isMasterQuest') else 0}, "
-          f"cena {d['savedSceneNum']}, CRC {struct.unpack_from('<H', out, CHECKSUM)[0]:04x}")
+          f"scene {d['savedSceneNum']}, CRC {struct.unpack_from('<H', out, CHECKSUM)[0]:04x}")
 
 
 if __name__ == "__main__":

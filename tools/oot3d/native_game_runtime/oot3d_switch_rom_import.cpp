@@ -23,19 +23,19 @@ namespace ri = RomImport;
 
 constexpr const char* kRoot = "sdmc:/switch/oot3dre";
 constexpr const char* kGame = "sdmc:/switch/oot3dre/game";
-// Arquivo presente desliga a importação: o boot lê o game/ como antes.
+// A file here turns the import off: the boot reads game/ as before.
 constexpr const char* kDisabled = "sdmc:/switch/oot3dre/config/no_rom_import";
 
 class ImportCancelled : public std::exception {};
 
 std::string Where() {
-    return "Copie o dump decriptado do seu cartucho (.3ds ou .cci) para\n"
+    return "Copy your own decrypted cartridge dump (.3ds or .cci) to\n"
            "  sdmc:/switch/oot3dre/\n"
-           "ou code.bin, exheader.bin e romfs.bin (de um dump decriptado) para\n"
+           "or code.bin, exheader.bin and romfs.bin (from a decrypted dump) to\n"
            "  sdmc:/switch/oot3dre/import/\n"
-           "e abra o jogo de novo.\n\n"
-           "Dumps aceitos:\n" + ri::SupportedRevisionsText() +
-           "\nDumps encriptados e arquivos .cia não são aceitos.\n";
+           "and start the game again.\n\n"
+           "Supported dumps:\n" + ri::SupportedRevisionsText() +
+           "\nEncrypted dumps and .cia files are not supported.\n";
 }
 
 void Log(const std::string& line) {
@@ -73,20 +73,18 @@ bool RunSwitchRomImport() {
     if (sources.empty() && haveGame)
         return true;
 
-    // Local: o destrutor fecha o console (e devolve stdout/stderr) antes de
-    // o SDL/deko3d assumir a janela.
-    SwitchConsoleScreen screen("Ocarina of Time 3D - importação dos dados do jogo");
+    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - game data import");
     if (sources.empty()) {
-        screen.Show("Nenhum dado do jogo encontrado.\n\n" + Where() + "\nAperte + para sair.\n");
+        screen.Show("No game data was found.\n\n" + Where() + "\nPress + to exit.\n");
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
 
-    // O primeiro dump que bate com uma revisão suportada.
+    // The first dump that matches a supported revision.
     std::optional<ri::Plan> plan;
     std::string rejected;
     for (const ri::Source& source : sources) {
-        screen.Show("Conferindo " + source.Path.filename().string() + "...\n");
+        screen.Show("Checking " + source.Path.filename().string() + "...\n");
         try {
             plan = ri::Identify(source);
             break;
@@ -95,22 +93,22 @@ bool RunSwitchRomImport() {
         }
     }
     if (!plan) {
-        Log("rejeitado: " + rejected);
-        const std::string message = "Este dump não pode ser usado:\n\n" + rejected + Where();
+        Log("rejected: " + rejected);
+        const std::string message = "This dump cannot be used:\n\n" + rejected + Where();
         if (haveGame) {
-            screen.Show(message + "\nAperte A para jogar com os dados que já existem, + para sair.\n");
+            screen.Show(message + "\nPress A to start with the existing game data, + to exit.\n");
             const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_Plus);
             return button && (*button & HidNpadButton_A);
         }
-        screen.Show(message + "\nAperte + para sair.\n");
+        screen.Show(message + "\nPress + to exit.\n");
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
 
-    const std::string header = "Preparando o jogo a partir de " + plan->Input.Path.filename().string() +
+    const std::string header = "Preparing the game from " + plan->Input.Path.filename().string() +
                                "\n(" + plan->Recipe->Name + ")\n\n"
-                               "Isso acontece uma vez só e leva cerca de um minuto.\n"
-                               "Não tire o cartão SD nem feche o app.\n\n";
+                               "This happens once and takes about a minute.\n"
+                               "Do not remove the SD card or close the app.\n\n";
     screen.Show(header);
     appletSetAutoSleepDisabled(true);
     const auto started = std::chrono::steady_clock::now();
@@ -127,12 +125,12 @@ bool RunSwitchRomImport() {
         });
         const double seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-        Log(std::string("importado ") + plan->Input.Path.string() + " receita=" + result.Recipe->Id +
+        Log(std::string("imported ") + plan->Input.Path.string() + " recipe=" + result.Recipe->Id +
             " code=" + ri::Hex(result.Code) + " romfs=" + ri::Hex(result.RomFs) +
-            " segundos=" + std::to_string(seconds));
+            " seconds=" + std::to_string(seconds));
     } catch (const ImportCancelled&) {
         appletSetAutoSleepDisabled(false);
-        Log("cancelado");
+        Log("cancelled");
         return false;
     } catch (const std::exception& ex) {
         failure = ex.what();
@@ -141,36 +139,36 @@ bool RunSwitchRomImport() {
 
     const bool haveGameNow = fs::is_regular_file(game / ri::kManifestName, error);
     if (!failure.empty()) {
-        Log("falhou: " + failure);
-        const std::string message = "A importação falhou:\n\n" + failure + "\n\n" + Where();
+        Log("failed: " + failure);
+        const std::string message = "The import failed:\n\n" + failure + "\n\n" + Where();
         if (haveGameNow) {
-            screen.Show(message + "\nAperte A para jogar com os dados que já existem, + para sair.\n");
+            screen.Show(message + "\nPress A to start with the existing game data, + to exit.\n");
             const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_Plus);
             return button && (*button & HidNpadButton_A);
         }
-        screen.Show(message + "\nAperte + para sair.\n");
+        screen.Show(message + "\nPress + to exit.\n");
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
 
-    // Manter o dump é o padrão; apagar é escolha do jogador.
+    // Keeping the dump is the default; deleting it is the player's choice.
     const bool cartridge = plan->Input.Kind == ri::SourceKind::Cartridge;
-    screen.Show(header + "Pronto. Os dados do jogo estão em sdmc:/switch/oot3dre/game/.\n\n" +
-                (cartridge ? "Manter " + plan->Input.Path.filename().string() + "?\n"
-                           : std::string("Manter os arquivos de import/?\n")) +
-                "  A: manter e abrir o jogo\n"
-                "  Y: apagar para liberar espaço e abrir o jogo\n");
+    screen.Show(header + "Done. The game data is in sdmc:/switch/oot3dre/game/.\n\n" +
+                (cartridge ? "Keep " + plan->Input.Path.filename().string() + "?\n"
+                           : std::string("Keep the files in import/?\n")) +
+                "  A: keep it and start the game\n"
+                "  Y: delete it to free space and start the game\n");
     const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_B | HidNpadButton_Plus | HidNpadButton_Y);
     if (!button)
         return false;
     if (*button & HidNpadButton_Y) {
         try {
             ri::RemoveSource(plan->Input);
-            Log("apagado " + plan->Input.Path.string());
+            Log("deleted " + plan->Input.Path.string());
         } catch (const std::exception& ex) {
-            Log(std::string("falha ao apagar: ") + ex.what());
-            screen.Show(std::string("Não foi possível apagar o dump: ") + ex.what() +
-                        "\n\nAperte A para abrir o jogo.\n");
+            Log(std::string("delete failed: ") + ex.what());
+            screen.Show(std::string("Could not delete the dump: ") + ex.what() +
+                        "\n\nPress A to start the game.\n");
             if (!screen.Wait(HidNpadButton_A))
                 return false;
         }

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Suíte de regressão do port Switch. Rodar antes de cada versão enviada ao console.
+# Switch port regression suite. Run before every version sent to the console.
 #
-#   tests/switch/run.sh            guardas + testes de unidade no PC + DSP em AArch64 (qemu)
-#   tests/switch/run.sh --quick    só as guardas estáticas (segundos)
-#   tests/switch/run.sh --eden NRO também abre o .nro no Eden da Ryzen (teste de fumaça)
+#   tests/switch/run.sh            guards + unit tests on PC + DSP on AArch64 (qemu)
+#   tests/switch/run.sh --quick    only the static guards (seconds)
+#   tests/switch/run.sh --eden NRO also opens the .nro in Eden on the Ryzen (smoke test)
 #
-# Pré-requisitos (uma vez): build de host configurado em $HOST_BUILD (ver README.md desta pasta).
+# Prerequisites (once): host build configured in $HOST_BUILD (see this folder's README.md).
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,31 +14,59 @@ HOST_BUILD="${HOST_BUILD:-$HOME/oot3d-work/build-host-tests}"
 HOST_DEPS="${HOST_DEPS:-$HOME/oot3d-work/host-deps}"
 JOBS="${JOBS:-3}"
 
-# Testes de unidade do runtime do Switch (alvos do CMake de host).
+# Switch runtime unit tests (host CMake targets).
 UNIT_TESTS=(
     oot3d_config_file_replace_tests
     oot3d_deko3d_backend_tests
+    oot3d_deko3d_clear_draw_tests
+    oot3d_deko3d_lighting_tests
+    oot3d_deko3d_inbetween_lighting_tests
+    oot3d_native_pica_composition_tests
+    oot3d_native_pica_list_walk_tests
+    oot3d_native_pica_frontend_tests
     oot3d_graphics_settings_schedule_tests
+    oot3d_grass_switch_tests
+    oot3d_config_file_replace_tests
     oot3d_debug_menu_tests
     oot3d_fps_counter_tests
+    oot3d_game_log_tests
     oot3d_frame_spike_tests
     oot3d_guest_spike_profile_tests
     oot3d_hang_watchdog_tests
     oot3d_hitch_recorder_tests
+    oot3d_switch_launch_environment_tests
     oot3d_input_bench_tests
+    oot3d_landing_roll_tests
+    oot3d_damage_multiplier_tests
+    oot3d_quick_put_away_tests
+    oot3d_master_quest_mirror_tests
+    oot3d_gameplay_options_log_tests
+    oot3d_simple_shadow_tests
+    oot3d_player_shadow_tests
     oot3d_native_a32_ctr_fs_tests
     oot3d_native_a32_ctr_host_tests
+    oot3d_native_a32_romfs_overlay_tests
+    oot3d_native_a32_second_core_tests
     oot3d_native_a32_input_tests
     oot3d_native_pica_transfer_tests
     oot3d_native_audio_interpolation_tests
     oot3d_native_audio_storage_tests
     oot3d_native_audio_tests
+    oot3d_native_block_entry_hooks_tests
     oot3d_native_cadence_governor_tests
     oot3d_native_dynamic_resolution_tests
+    oot3d_native_guest_fault_report_tests
+    oot3d_native_guest_profile_tests
     oot3d_native_interpolation_pacing_tests
     oot3d_native_offload_tests
+    oot3d_native_status_file_tests
+    oot3d_native_capture_delta_tests
+    oot3d_native_vertex_snapshot_tests
+    oot3d_native_texture_snapshot_tests
+    oot3d_native_perf_diagnostics_tests
     oot3d_native_pica_deferred_plan_tests
     oot3d_native_pica_vulkan_bridge_tests
+    oot3d_native_pica_plan_build_tests
     oot3d_native_pica_visual_cull_tests
     oot3d_native_pica_visual_frame_equivalence_tests
     oot3d_native_render_command_stream_tests
@@ -46,28 +74,45 @@ UNIT_TESTS=(
     oot3d_native_status_file_tests
     oot3d_pica_etc1_transcode_tests
     oot3d_pica_texture_predecode_tests
-    oot3d_switch_motion_tests
+    oot3d_host_menu_touch_tests
+    oot3d_n64_ui_renderer_tests
+    oot3d_native_ui_lifecycle_bridge_tests
+    oot3d_native_ui_texture_provider_tests
     oot3d_rom_import_tests
+    oot3d_romfs_mods_tests
+    oot3d_switch_code_pages_tests
+    oot3d_switch_guest_window_tests
+    oot3d_switch_motion_tests
+    oot3d_switch_performance_tests
     oot3d_switch_thread_layout_tests
+    oot3d_texture_pack_scale_tests
+    oot3d_top_screen_hud_touch_tests
     oot3d_top_screen_mod_profile_tests
+    oot3d_top_screen_menu_cadence_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
+    oot3d_top_screen_wide_items_runtime_tests
+    oot3d_top_screen_link_ext_tests
+    oot3d_roll_dash_runtime_tests
+    oot3d_topscreen_import_tests
+    oot3d_update_release_tests
     triaevum_audio_service_tests
+    triaevum_presentation_clock_tests
     three_ds_recomp_input_tests
 )
 
 pass=0; fail=0; skip=0; failed=()
-result() { # nome código
+result() { # name code
     case "$2" in
         0) pass=$((pass + 1)); echo "  ok    $1" ;;
-        77) skip=$((skip + 1)); echo "  pulou $1" ;;
-        *) fail=$((fail + 1)); failed+=("$1"); echo "  FALHA $1 (código $2)" ;;
+        77) skip=$((skip + 1)); echo "  skip  $1" ;;
+        *) fail=$((fail + 1)); failed+=("$1"); echo "  FAIL  $1 (code $2)" ;;
     esac
 }
 
-echo "== guardas dos bugs corrigidos"
+echo "== guards for fixed bugs"
 python3 "$here/test_bug_guards.py" > /tmp/switch-guards.$$ 2>&1; code=$?
-grep -E '^FAIL|guardas ok' /tmp/switch-guards.$$ | sed 's/^/  /'; rm -f /tmp/switch-guards.$$
+grep -E '^FAIL|guards ok' /tmp/switch-guards.$$ | sed 's/^/  /'; rm -f /tmp/switch-guards.$$
 result test_bug_guards "$code"
 python3 "$here/test_perf_tools.py" > /tmp/switch-perf-tools.$$ 2>&1; code=$?
 grep -E '^FAIL' /tmp/switch-perf-tools.$$ | sed 's/^/  /'; rm -f /tmp/switch-perf-tools.$$
@@ -81,14 +126,32 @@ result test_backup_saves "$code"
 (cd "$here/../.." && python3 -m unittest tools.triaevum_release.test_topscreen_30_pack) > /tmp/switch-topscreen.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-topscreen.$$ | sed 's/^/  /'; rm -f /tmp/switch-topscreen.$$
 result test_topscreen_30_pack "$code"
-[[ "${1:-}" == "--quick" ]] && { echo "passaram $pass, falharam $fail"; exit $((fail > 0)); }
+python3 "$here/test_perpixel_lighting.py" > /tmp/switch-perpixel.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-perpixel.$$ | sed 's/^/  /'; rm -f /tmp/switch-perpixel.$$
+result test_perpixel_lighting "$code"
+python3 "$here/test_tev_passthrough.py" > /tmp/switch-tevskip.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-tevskip.$$ | sed 's/^/  /'; rm -f /tmp/switch-tevskip.$$
+result test_tev_passthrough "$code"
+python3 "$here/test_grass_lod.py" > /tmp/switch-grasslod.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-grasslod.$$ | sed 's/^/  /'; rm -f /tmp/switch-grasslod.$$
+result test_grass_lod "$code"
+python3 "$repo/tools/switch/test_shrink_texture_pack.py" > /tmp/switch-shrink.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-shrink.$$ | sed 's/^/  /'; rm -f /tmp/switch-shrink.$$
+result test_shrink_texture_pack "$code"
+# PGO: session streams merged into .gcda, hot list from them (the gcov-tool
+# end-to-end case runs where devkitA64 is installed), indirect call censuses.
+(cd "$repo/tools/oot3d/native_a32_runtime" && python3 -m unittest test_whole_aot_pgo_merge \
+    test_whole_aot_hot_from_gcda test_whole_aot_indirect_census) > /tmp/switch-pgo.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-pgo.$$ | sed 's/^/  /'; rm -f /tmp/switch-pgo.$$
+result test_whole_aot_pgo "$code"
+[[ "${1:-}" == "--quick" ]] && { echo "passed $pass, failed $fail"; exit $((fail > 0)); }
 
-echo "== testes de unidade (host: $HOST_BUILD)"
+echo "== unit tests (host: $HOST_BUILD)"
 if [[ ! -f "$HOST_BUILD/build.ninja" ]]; then
-    echo "  build de host não configurado; ver tests/switch/README.md"; result host_build 1
+    echo "  host build not configured; see tests/switch/README.md"; result host_build 1
 else
     nice -n 10 ninja -C "$HOST_BUILD" -j "$JOBS" "${UNIT_TESTS[@]}" > "$HOST_BUILD/switch-tests-build.log" 2>&1 \
-        || echo "  aviso: algum alvo não compilou (ver $HOST_BUILD/switch-tests-build.log)"
+        || echo "  warning: some target didn't compile (see $HOST_BUILD/switch-tests-build.log)"
     for test in "${UNIT_TESTS[@]}"; do
         binary="$(find "$HOST_BUILD" -type f -executable -name "$test" -print -quit)"
         [[ -z "$binary" ]] && { result "$test" 1; continue; }
@@ -96,19 +159,39 @@ else
             > "$HOST_BUILD/$test.log" 2>&1
         result "$test" $?
     done
+    # config/deko3d_clear_draw: the constant-colour proof against the GLSL (binary32, glsl_eval.py).
+    binary="$(find "$HOST_BUILD" -type f -executable -name oot3d_deko3d_clear_draw_tests -print -quit)"
+    if [[ -n "$binary" ]]; then
+        python3 "$here/test_clear_draw_tev.py" "$binary" > "$HOST_BUILD/test_clear_draw_tev.log" 2>&1
+        result test_clear_draw_tev $?
+    else
+        result test_clear_draw_tev 1
+    fi
+    # N4 hook gates: whole_aot_hook_gates.json (the gate list of
+    # --sparse-block-entries) must be the census of the block-entry hook list.
+    nice -n 10 ninja -C "$HOST_BUILD" -j "$JOBS" oot3d_block_entry_hook_census \
+        > "$HOST_BUILD/hook-census-build.log" 2>&1
+    binary="$(find "$HOST_BUILD" -type f -executable -name oot3d_block_entry_hook_census -print -quit)"
+    if [[ -n "$binary" ]]; then
+        "$binary" --check "$repo/tools/oot3d/native_a32_runtime/whole_aot_hook_gates.json" \
+            > "$HOST_BUILD/whole_aot_hook_gates_census.log" 2>&1
+        result whole_aot_hook_gates_census $?
+    else
+        result whole_aot_hook_gates_census 1
+    fi
 fi
 
-echo "== mixagem DSP com as flags do Switch (devkitA64 + qemu-aarch64)"
+echo "== DSP mixing with the Switch flags (devkitA64 + qemu-aarch64)"
 NLOHMANN_JSON_INCLUDE="${NLOHMANN_JSON_INCLUDE:-$HOST_DEPS/include}" \
     bash "$repo/tools/oot3d/native_game_runtime/run_audio_dsp_mix_tests_qemu.sh" \
     "${TMPDIR:-/tmp}/oot3d-audio-dsp-mix-aarch64" > "${TMPDIR:-/tmp}/oot3d-dsp-mix.log" 2>&1
 result oot3d_native_audio_dsp_mix_aarch64 $?
 
 if [[ "${1:-}" == "--eden" ]]; then
-    echo "== teste de fumaça no Eden (Ryzen)"
-    bash "$here/eden_smoke.sh" "${2:?caminho do .nro}"; result eden_smoke $?
+    echo "== smoke test on Eden (Ryzen)"
+    bash "$here/eden_smoke.sh" "${2:?path to the .nro}"; result eden_smoke $?
 fi
 
-echo "passaram $pass, falharam $fail, pulados $skip"
-((fail)) && printf '  falhou: %s\n' "${failed[@]}"
+echo "passed $pass, failed $fail, skipped $skip"
+((fail)) && printf '  failed: %s\n' "${failed[@]}"
 exit $((fail > 0))

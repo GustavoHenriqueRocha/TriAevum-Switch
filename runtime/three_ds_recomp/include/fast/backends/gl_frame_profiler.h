@@ -1,20 +1,20 @@
 #pragma once
 
-// Perfil por etapa da render thread do backend OpenGL (Switch: Mesa/nouveau).
+// Per-step profile of the OpenGL backend's render thread (Switch: Mesa/nouveau).
 //
-// Ligado só pelo arquivo sdmc:/switch/oot3dre/config/gpu_timing (desktop:
-// TRIAEVUM_GL_GPU_TIMING). O conteúdo opcional é N, a amostragem da GPU
-// (1 quadro a cada N, padrão 30). Sem o arquivo, cada ponto de marcação é uma
-// carga atômica e um desvio; os contadores de chamadas GL nem existem
-// (são ganchos instalados nos ponteiros do glad só quando ligado).
+// Enabled only by the file sdmc:/switch/oot3dre/config/gpu_timing (desktop:
+// TRIAEVUM_GL_GPU_TIMING). The optional content is N, the GPU sampling
+// (1 frame every N, default 30). Without the file, each marker point is an
+// atomic load and a branch; the GL call counters don't even exist
+// (they are hooks installed on the glad pointers only when enabled).
 //
-// Mede, por quadro de host (passo, interpolado ou repetido):
-//  - GPU: glQueryCounter(GL_TIMESTAMP) a cada troca de etapa num quadro
-//    amostrado; resultado lido quadros depois com GL_QUERY_RESULT_AVAILABLE
-//    (nunca bloqueia; sem resultado a tempo, a amostra é descartada);
-//  - CPU da render thread por etapa (relógio monotônico a cada troca);
-//  - contadores de chamadas GL (draws, clears, FBOs, uploads, sincronizações).
-// O relatório (TakeReport) vira uma linha "glperf" no logs/perf.txt.
+// Measures, per host frame (step, interpolated or repeated):
+//  - GPU: glQueryCounter(GL_TIMESTAMP) on every step change in a sampled
+//    frame; result read frames later with GL_QUERY_RESULT_AVAILABLE
+//    (never blocks; with no result in time, the sample is dropped);
+//  - render thread CPU per step (monotonic clock on every change);
+//  - GL call counters (draws, clears, FBOs, uploads, syncs).
+// The report (TakeReport) becomes a "glperf" line in logs/perf.txt.
 
 #include <atomic>
 #include <cstddef>
@@ -26,22 +26,22 @@
 namespace Fast::GlPerf {
 
 enum class Stage : uint8_t {
-    Begin,          // início do quadro até a primeira etapa
-    Clear,          // limpezas (janela, alvos PICA, fills)
-    PicaTop,        // draws PICA no alvo da tela de cima (amostra exibida)
-    PicaBottom,     // draws PICA no alvo da tela de baixo
-    PicaOffscreen,  // draws PICA em outros alvos (sombras, render-to-texture)
-    PicaCanonical,  // draws da execução canônica (não exibida) de um quadro novo
-    Transfer,       // display transfers (blit alvo -> imagem de display)
-    PostAa,         // FXAA/SMAA numa imagem intermediária
-    PostEasu,       // FSR EASU numa imagem intermediária
-    Scanout,        // último passe na janela (RCAS, EASU/FXAA direto ou cópia)
-    Ui,             // UI integrada (HUD/menus TopScreen)
-    Present,        // EndFrame até depois do swap
-    // Só CPU (não mudam a etapa da GPU):
-    Other,          // comandos da render thread fora das etapas acima
-    Pacing,         // espera do pacer antes do swap
-    Idle,           // render thread sem comando
+    Begin,          // frame start until the first step
+    Clear,          // clears (window, PICA targets, fills)
+    PicaTop,        // PICA draws in the top-screen target (displayed sample)
+    PicaBottom,     // PICA draws in the bottom-screen target
+    PicaOffscreen,  // PICA draws in other targets (shadows, render-to-texture)
+    PicaCanonical,  // draws of the canonical (non-displayed) execution of a new frame
+    Transfer,       // display transfers (target blit -> display image)
+    PostAa,         // FXAA/SMAA into an intermediate image
+    PostEasu,       // FSR EASU into an intermediate image
+    Scanout,        // last pass into the window (RCAS, direct EASU/FXAA or copy)
+    Ui,             // integrated UI (TopScreen HUD/menus)
+    Present,        // EndFrame until after the swap
+    // CPU only (they don't change the GPU step):
+    Other,          // render thread commands outside the steps above
+    Pacing,         // pacer wait before the swap
+    Idle,           // render thread with no command
     Count
 };
 inline constexpr size_t kStageCount = static_cast<size_t>(Stage::Count);
@@ -63,8 +63,8 @@ struct Hooks {
 };
 inline Hooks gHooks{};
 inline std::atomic<bool> gEnabled{false};
-// Último quadro fechado (FrameEnd): etapa mais cara na CPU da render thread
-// (sem pacing/idle) << 24 | microssegundos (até 2^24-1). ~0: nenhum.
+// Last closed frame (FrameEnd): most expensive step on the render thread CPU
+// (excluding pacing/idle) << 24 | microseconds (up to 2^24-1). ~0: none.
 inline std::atomic<uint32_t> gLastFrameTop{0xFFFFFFFFU};
 } // namespace detail
 
@@ -72,8 +72,8 @@ inline bool Enabled() {
     return detail::gEnabled.load(std::memory_order_acquire);
 }
 
-// Etapa mais cara (CPU) do último quadro fechado, para logs/spikes.txt;
-// false com o perfil desligado ou antes do primeiro quadro.
+// Most expensive step (CPU) of the last closed frame, for logs/spikes.txt;
+// false with the profile off or before the first frame.
 inline bool LastFrameTopStage(uint8_t* stage, float* milliseconds) {
     if (!Enabled()) return false;
     const uint32_t packed = detail::gLastFrameTop.load(std::memory_order_relaxed);
@@ -83,7 +83,7 @@ inline bool LastFrameTopStage(uint8_t* stage, float* milliseconds) {
     return true;
 }
 
-// Lê a configuração uma vez (contexto GL corrente). Sem o arquivo: nada.
+// Reads the configuration once (current GL context). Without the file: nothing.
 void Init();
 
 inline void Mark(Stage stage) {
@@ -92,9 +92,9 @@ inline void Mark(Stage stage) {
 inline void MarkPicaDraw(uint32_t framebufferWidth, uint32_t framebufferHeight) {
     if (Enabled()) detail::gHooks.MarkPicaDraw(framebufferWidth, framebufferHeight);
 }
-// Contadores do caminho PICA (bits PicaGlGpuLean::CountBit): draws com
-// discard / gl_FragDepth / imagem, com blend, logic op COPY e blend
-// identidade desligados, draws sem efeito pulados, limpezas de depth+stencil.
+// PICA path counters (PicaGlGpuLean::CountBit bits): draws with
+// discard / gl_FragDepth / image, with blend, logic op COPY and identity
+// blend off, no-effect draws skipped, depth+stencil clears.
 inline void CountPica(uint32_t bits) {
     if (bits != 0U && Enabled()) detail::gHooks.CountPica(bits);
 }
@@ -105,7 +105,7 @@ inline void FrameEnd() {
     if (Enabled()) detail::gHooks.FrameEnd();
 }
 
-// Fases de CPU do draw PICA (gl_pica_draw_phases.h); so chamar com Enabled().
+// CPU phases of the PICA draw (gl_pica_draw_phases.h); only call with Enabled().
 using Phase = PicaDrawPhases::Phase;
 using Section = PicaDrawPhases::Section;
 using DrawCount = PicaDrawPhases::Count;
@@ -125,7 +125,7 @@ inline void PhaseCount(DrawCount what, uint64_t value = 1U) {
     if (Enabled()) Phases().Add(what, value);
 }
 
-// Tempo de parede de um trecho da render thread (glperf step_sec_<nome>_ms).
+// Wall time of a render thread section (glperf step_sec_<name>_ms).
 class SectionScope {
 public:
     explicit SectionScope(Section section)
@@ -147,7 +147,7 @@ private:
     uint64_t mStart = 0U;
 };
 
-// Etapa aninhada: volta à etapa anterior no fim do escopo.
+// Nested step: returns to the previous step at scope end.
 class Scope {
 public:
     explicit Scope(Stage stage) : mArmed(Enabled()) {
@@ -167,7 +167,7 @@ private:
     Stage mPrevious = Stage::Other;
 };
 
-// Um comando da render thread: Other durante, Idle depois.
+// A render thread command: Other during, Idle after.
 class CommandScope {
 public:
     CommandScope() : mArmed(Enabled()) {
@@ -183,11 +183,11 @@ private:
     bool mArmed;
 };
 
-// Execução de uma amostra visual. authoritative = quadro novo do jogo
-// (execução nativa/atual); present = amostra exibida. Os draws de uma
-// execução não exibida contam como PicaCanonical; o quadro de host que
-// executa um quadro novo é "step", o que só exibe uma amostra repetida
-// (interpolada entre dois quadros já vistos) é "interp", o resto é "hold".
+// Execution of a visual sample. authoritative = new game frame
+// (native/current execution); present = displayed sample. The draws of a
+// non-displayed execution count as PicaCanonical; the host frame that
+// executes a new frame is "step", one that only displays a repeated sample
+// (interpolated between two frames already seen) is "interp", the rest is "hold".
 class SampleScope {
 public:
     SampleScope(bool authoritative, bool present) : mArmed(Enabled()) {
@@ -203,8 +203,8 @@ private:
     bool mArmed;
 };
 
-// Linha "glperf ..." (sem '\n') com médias por quadro desde o último
-// relatório; vazia quando desligado. Chamável de outra thread.
+// "glperf ..." line (no '\n') with per-frame averages since the last
+// report; empty when off. Callable from another thread.
 std::string TakeReport(uint64_t hostFrames);
 
 } // namespace Fast::GlPerf

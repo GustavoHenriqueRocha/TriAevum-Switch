@@ -269,6 +269,10 @@ NativeA32WindowSession::SaveState(const std::filesystem::path &path, bool withSe
   auto &presentationScheduler = *presentationSchedulerStorage;
   // Barrier: the savestate captures renderer-owned replay state.
   renderStream.Drain();
+  // config/second_core: the second core is held at a dispatch boundary for
+  // the whole capture (it cannot start another one or an SVC: the game
+  // thread holds the kernel lock); nothing while it is off.
+  const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;
   // Leaving the game: discarded render commands left that state incomplete.
   if (renderStream.ShutdownRequested()) return SaveStateOutcome::Deferred;
   // Host-owned continuation registers must never escape into a standalone savestate.
@@ -279,6 +283,10 @@ NativeA32WindowSession::SaveState(const std::filesystem::path &path, bool withSe
   if (itemDescriptionStorage->Pending()) return SaveStateOutcome::Deferred;
   if (Oot3dNativeGame::NativeActorVisibilityHasPendingRestore(widescreenProjection.ActorVisibility))
     return SaveStateOutcome::Deferred;
+  // Roll dash: a native call's caller is host-held until it returns.
+  if (rollDashStorage->Pending()) return SaveStateOutcome::Deferred;
+  // Simple shadow: the foot shadows run at alpha 0 until they return.
+  if (simpleShadow.Pending()) return SaveStateOutcome::Deferred;
   const auto started = std::chrono::steady_clock::now();
   Oot3dNativeGame::NativeA32SavestateRuntimeState runtime;
   runtime.FrameCount = frameCount;
@@ -431,6 +439,8 @@ bool NativeA32WindowSession::LoadState(const std::filesystem::path &path,
   auto &realtimePacer = *realtimePacerStorage;
   // Barrier: loading resets renderer-owned state.
   renderStream.Drain();
+  // config/second_core: as in SaveState, for the whole restore.
+  const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;
   const auto started = std::chrono::steady_clock::now();
   Oot3dNativeGame::NativeA32SavestateRuntimeState runtime;
   Oot3dNativeGame::NativeA32SavestateIoResult ioResult;
@@ -492,6 +502,12 @@ bool NativeA32WindowSession::LoadState(const std::filesystem::path &path,
   systemPageStorage->Reset();
   itemDescriptionStorage->Reset();
   wideItemsStorage->Reset();
+  // Simple shadow: the loaded memory holds the actor's own shadow alpha.
+  simpleShadow.Reset();
+  // Roll dash: host state goes; the loaded memory may lack (or hold other
+  // bytes in) its regions, mapped or refreshed again before guest code runs.
+  rollDashStorage->Reset();
+  UpdateRollDash();
   uiLifecycleBridge.SetTopScreenConfig(activeTopScreenConfig);
   widescreenProjection.TopScreenPauseDrawRouting = {};
   widescreenProjection.TopScreenPausePageRedraw = {};

@@ -115,7 +115,7 @@ int main() {
         }
         ++count;
     }
-    // The view preserves exact store counts, including mixed checked accesses.
+    // The view's stores, mixed with checked accesses, mark the memory written.
     NativeA32Memory memory;
     memory.MapRegion({"ram", 0x1000, 4096, true, false, {}});
     NativeA32RegionCounters counters;
@@ -128,7 +128,7 @@ int main() {
                 return 2;
         }
     }
-    if (memory.WriteGeneration() != generation + 10 || counters.WriteHits != 9 || counters.ReadHits != 9)
+    if (memory.WriteGeneration() != generation + 1 || counters.WriteHits != 9 || counters.ReadHits != 9)
         return 3;
     {
         NativeA32UnobservedMemory region(memory, &counters);

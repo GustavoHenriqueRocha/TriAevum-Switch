@@ -1,8 +1,8 @@
-// Pacote de texturas do TopScreen (config/atlas_overrides.o3tu).
-// Regressão de 2026-10-22: uma cópia do SD para o Eden corrompeu o .o3tu (mesmo
-// tamanho, bytes trocados) e o jogo parou com "payload hash mismatch". O carregador
-// precisa recusar qualquer byte trocado ou arquivo cortado com um erro claro, e o
-// pacote real (OOT3D_TEST_O3TU=caminho) precisa carregar.
+// TopScreen texture pack (config/atlas_overrides.o3tu).
+// Regression of 2026-10-22: a copy of the SD to Eden corrupted the .o3tu (same
+// size, bytes swapped) and the game stopped with "payload hash mismatch". The loader
+// must reject any swapped byte or truncated file with a clear error, and the
+// real pack (OOT3D_TEST_O3TU=path) must load.
 #include "oot3d_top_screen_texture_overrides.h"
 
 #include <cstdint>
@@ -45,8 +45,8 @@ std::uint64_t Fnv1a64(const Bytes &bytes) {
   return value;
 }
 
-// Pacote v1: "O3TU", versão, contagem; cada entrada = hash original, hash da
-// substituição, tamanho e os bytes da substituição.
+// Pack v1: "O3TU", version, count; each entry = original hash, replacement
+// hash, size and the replacement bytes.
 Bytes MakePack(const Bytes &original, const Bytes &replacement) {
   Bytes bytes{'O', '3', 'T', 'U'};
   PutU32(bytes, 1U);
@@ -61,7 +61,7 @@ Bytes MakePack(const Bytes &original, const Bytes &replacement) {
 std::string LoadError(const Bytes &bytes) {
   TopScreenTextureOverridePack pack;
   std::string error;
-  Require(!pack.LoadBytes(bytes, &error), "pacote inválido foi aceito");
+  Require(!pack.LoadBytes(bytes, &error), "invalid pack was accepted");
   return error;
 }
 
@@ -77,29 +77,29 @@ int main() {
   {
     TopScreenTextureOverridePack pack;
     std::string error;
-    Require(pack.LoadBytes(good, &error), "pacote válido: " + error);
+    Require(pack.LoadBytes(good, &error), "valid pack: " + error);
     Bytes texture = original;
     Require(pack.Apply(texture) == TopScreenTextureOverrideResult::Applied,
-            "substituição aplicada");
-    Require(texture == replacement, "bytes substituídos");
+            "replacement applied");
+    Require(texture == replacement, "bytes replaced");
   }
-  // Cada byte do payload trocado precisa ser pego (o caso do Eden).
+  // Every swapped payload byte must be caught (the Eden case).
   for (std::size_t index = good.size() - replacement.size(); index < good.size(); ++index) {
     Bytes corrupt = good;
     corrupt[index] ^= 0x5AU;
     Require(LoadError(corrupt) == "TopScreen texture override payload hash mismatch",
-            "byte " + std::to_string(index) + " trocado no payload");
+            "byte " + std::to_string(index) + " swapped in payload");
   }
-  // Cortado em qualquer ponto: erro claro, nunca leitura fora do buffer.
+  // Truncated at any point: clear error, never a read outside the buffer.
   for (std::size_t size = 0; size < good.size(); ++size) {
     const Bytes cut(good.begin(), good.begin() + static_cast<std::ptrdiff_t>(size));
-    Require(!LoadError(cut).empty(), "corte em " + std::to_string(size) + " bytes sem erro");
+    Require(!LoadError(cut).empty(), "cut at " + std::to_string(size) + " bytes without error");
   }
   {
     Bytes trailing = good;
     trailing.push_back(0U);
     Require(LoadError(trailing) == "TopScreen texture override pack has trailing data",
-            "lixo no fim");
+            "trailing garbage");
   }
   {
     Bytes header = good;
@@ -110,9 +110,9 @@ int main() {
   if (const char *real = std::getenv("OOT3D_TEST_O3TU"); real != nullptr && *real != '\0') {
     TopScreenTextureOverridePack pack;
     std::string error;
-    Require(pack.Load(real, &error), std::string("pacote real ") + real + ": " + error);
-    Require(!pack.Empty(), "pacote real vazio");
-    std::puts("texture overrides: pacote real carregou");
+    Require(pack.Load(real, &error), std::string("real pack ") + real + ": " + error);
+    Require(!pack.Empty(), "real pack empty");
+    std::puts("texture overrides: real pack loaded");
   }
   std::puts("texture overrides: PASS");
   return 0;

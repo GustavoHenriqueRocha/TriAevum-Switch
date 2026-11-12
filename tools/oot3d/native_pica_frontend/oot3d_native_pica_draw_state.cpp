@@ -203,7 +203,13 @@ std::optional<size_t> Oot3dPicaTextureMipChainByteSize(
 bool DecodeOot3dPicaDrawState(const Oot3dPicaDrawPacket& packet,
                               Oot3dPicaDecodedDrawState& state,
                               std::string* error) {
-    const auto& registers = packet.Registers;
+    return DecodeOot3dPicaDrawState(packet.Registers, packet.Indexed, state,
+                                    error);
+}
+
+bool DecodeOot3dPicaDrawState(const std::array<uint32_t, 0x300>& registers,
+                              bool indexed, Oot3dPicaDecodedDrawState& state,
+                              std::string* error) {
     Oot3dPicaDecodedDrawState decoded;
     auto& vertex = decoded.VertexInput;
     vertex.PhysicalBaseAddress =
@@ -253,7 +259,7 @@ bool DecodeOot3dPicaDrawState(const Oot3dPicaDrawPacket& packet,
                 static_cast<uint8_t>((componentMap >> (component * 4U)) & 0xFU);
         }
     }
-    vertex.Indexed = packet.Indexed;
+    vertex.Indexed = indexed;
     vertex.IndicesAre16Bit =
         (registers[kIndexArrayRegister] & 0x80000000U) != 0U;
     if (!AddAddress(vertex.PhysicalBaseAddress,

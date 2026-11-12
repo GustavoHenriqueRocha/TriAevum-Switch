@@ -7,6 +7,7 @@
 #include "fast/oot3d/graphics_settings.h"
 #include "fast/oot3d/pbr_material_editor.h"
 
+#include <chrono>
 #include <memory>
 #include <array>
 #include <initializer_list>
@@ -19,8 +20,10 @@ namespace Fast::Oot3d {
 void DrawDisplayConfirmation();
 
 // A short host notice (for example the result of a hotkey action) shown for a
-// few seconds outside F1. A later notice replaces the current one.
-void PostHostNotice(std::string text, bool failure = false);
+// few seconds outside F1 (3, a failure 8, or `duration`). A later notice
+// replaces the current one.
+void PostHostNotice(std::string text, bool failure = false,
+                    std::chrono::seconds duration = std::chrono::seconds::zero());
 [[nodiscard]] bool HostNoticeActive();
 void DrawHostNotice();
 

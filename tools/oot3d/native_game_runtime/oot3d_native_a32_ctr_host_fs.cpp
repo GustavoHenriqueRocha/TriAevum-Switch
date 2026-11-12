@@ -3,6 +3,7 @@
 #include "oot3d_native_master_quest_unlock.h"
 #include "oot3d_native_a32_ctr_system_archives.h"
 #include "oot3d_native_a32_ctr_save_safety.h"
+#include "oot3d_game_log.h"
 
 #include <array>
 #include <vector>
@@ -16,7 +17,7 @@ namespace Oot3dNativeGame {
 
 namespace {
 
-// gamecoin.dat padrão do extdata compartilhado 0xF000000B, como o PTM do
+// Default gamecoin.dat of shared extdata 0xF000000B, as the PTM of the
 // Azahar (default_game_coin): magic 0x4F00, 42 Play Coins, 0 moedas no dia,
 // passos 0/0, data 2014-12-29. 0x14 bytes, little-endian.
 constexpr uint16_t kDefaultPlayCoins = 42U;
@@ -31,19 +32,19 @@ bool CreateDefaultPlayCoinsExtData(const std::filesystem::path& directory) {
             data[offset + index] = static_cast<uint8_t>(value >> (8U * index));
     };
     put(0x00, 0x4F00U, 4);           // magic
-    put(0x04, kDefaultPlayCoins, 2); // total de moedas
+    put(0x04, kDefaultPlayCoins, 2); // total coins
     put(0x06, 0U, 2);                // moedas obtidas na data abaixo
-    put(0x08, 0U, 4);                // passos quando ganhou a última moeda
-    put(0x0C, 0U, 4);                // passos do dia da última moeda
+    put(0x08, 0U, 4);                // steps when the last coin was earned
+    put(0x0C, 0U, 4);                // steps on the day of the last coin
     put(0x10, 2014U, 2);             // ano
-    data[0x12] = 12U;                // mês
+    data[0x12] = 12U;                // month
     data[0x13] = 29U;                // dia
     std::ofstream output(directory / "gamecoin.dat", std::ios::binary | std::ios::trunc);
     output.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     return static_cast<bool>(output);
 }
 
-// Path binário de ExtSaveData/SharedExtSaveData: u32 mídia, u32 id baixo, u32 id alto.
+// ExtSaveData/SharedExtSaveData binary path: u32 media, u32 id low, u32 id high.
 bool ReadExtDataLowPath(NativeA32Memory& memory, uint32_t type, uint32_t size, uint32_t address,
                         uint32_t* media, uint32_t* low, uint32_t* high) {
     return type == 2U && size == 12U && memory.Read32(address, media) &&
@@ -56,9 +57,9 @@ CtrSaveJournal* NativeA32CtrHostServices::SaveJournal() {
     if (mConfig.Filesystem != nullptr || mConfig.SaveDataDirectory.empty()) return nullptr;
     if (!mSaveJournal) {
         mSaveJournal = std::make_shared<CtrSaveJournal>(mConfig.SaveDataDirectory);
-        // Primeiro acesso ao save da execução (OpenArchive, OpenFile, E/S,
-        // GetFormatInfo, restore de savestate): termina troca interrompida
-        // antes de qualquer leitura.
+        // First save access of the run (OpenArchive, OpenFile, I/O,
+        // GetFormatInfo, savestate restore): finishes an interrupted swap
+        // before any read.
         mSaveJournal->RecoverOnce();
     }
     return mSaveJournal.get();
@@ -265,7 +266,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             file.FileOffset > maximum - offset) {
             return fail(kFsOutOfRange, "offset-overflow", offset, length);
         }
-        // config/unlock_master_quest age só em /system.dat do arquivo de save
+        // config/unlock_master_quest acts only on /system.dat of the save archive
         // (oot3d_native_master_quest_unlock.h).
         // Só no perfil do OoT3D (NativeA32CtrHostConfig::MasterQuestUnlock).
         const bool masterQuestUnlock = mConfig.MasterQuestUnlock && !romfs &&
@@ -278,7 +279,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
                 return fail(kInvalidBufferDescriptor, "source-read-failed", offset, length);
             }
             if (masterQuestUnlock) {
-                // config/unlock_master_quest: o 0xBE da RAM não vai para o disco.
+                // config/unlock_master_quest: the 0xBE in RAM does not go to disk.
                 std::optional<uint8_t> diskFirstByte;
                 std::array<uint8_t, 1> first{};
                 uint32_t firstCount = 0U;
@@ -315,7 +316,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
                 const auto size = std::filesystem::file_size(target, error);
                 success = success && !error;
                 if (success) { file.FileSize = size; written = length; }
-                // SD cheio/erro no meio: a transação não pode ser confirmada.
+                // SD full/error midway: the transaction must not be committed.
                 if (!success && journal != nullptr) journal->MarkFailed(file.FilePath);
             }
             if (!success) return fail(kFsBackendFailure, "backend-write-failed", offset, length);
@@ -336,7 +337,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             success = file.FileBackend->Read(file.FileOffset + offset, bytes, &returned) &&
                       returned <= requested;
         } else if (romfs) {
-            if (!file.RomFsBacking) file.RomFsBacking = std::make_shared<RomFsBackingFile>(file.FilePath);
+            if (!file.RomFsBacking)
+                file.RomFsBacking = std::make_shared<RomFsBackingFile>(
+                    file.FilePath, mConfig.RomFsOverlay, mConfig.RomFsImageOffset);
             bool opened = false;
             success = file.RomFsBacking->Read(file.FileOffset + offset, bytes, &opened);
             returned = success ? requested : 0U;
@@ -388,7 +391,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     }
     if (event.Detail == kFileFlushRequest) {
         // RootedFilesystemBackendV1::Write flushes before returning success.
-        // Backend de pasta: confirma a transação do save (troca atômica).
+        // Directory backend: commit the save transaction (atomic swap).
         if (journal != nullptr && !journal->Flush(file.FilePath, file.SaveJournalWriter))
             return fail(kFsBackendFailure, "save-commit-failed");
         return reply(kFileFlushResponse, "Flush");
@@ -475,7 +478,8 @@ uint32_t NativeA32CtrHostServices::OpenTitleRomFsFile() {
     auto file = std::make_shared<KernelObject>();
     file->Type = "client_session:file:romfs";
     file->FileOffset = mConfig.RomFsImageOffset;
-    file->FileSize = mConfig.RomFsImageSize;
+    // A RomFS que o guest vê: a da imagem mais a cauda dos mods (overlay), como no fork do John.
+    file->FileSize = RomFsServiceViewSize();
     bool opened = false;
     if (mConfig.Filesystem != nullptr) {
         file->FilePath = mConfig.RomFsContentPath;
@@ -488,7 +492,8 @@ uint32_t NativeA32CtrHostServices::OpenTitleRomFsFile() {
                  file->FileSize <= file->FileBackend->Size() - file->FileOffset;
     } else {
         file->FilePath = mConfig.RomFsImagePath;
-        file->RomFsBacking = std::make_shared<RomFsBackingFile>(file->FilePath);
+        file->RomFsBacking = std::make_shared<RomFsBackingFile>(file->FilePath, mConfig.RomFsOverlay,
+                                                                mConfig.RomFsImageOffset);
         opened = true;
     }
     return opened ? CreateHandle(file) : 0U;
@@ -749,20 +754,41 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                     success = mConfig.Filesystem->RemoveFile(relative->generic_string(), &removed);
                 } else if (archive->Id == kFsSaveDataArchiveId ||
                            IsCtrExtDataArchiveId(archive->Id)) {
-                    // Contenção lexical: com raiz "sdmc:/..." canonical e
-                    // weakly_canonical concatenam o cwd no devkitA64 e o
-                    // Erase file respondia CommandNotAllowed no Switch.
+                    // archive->Root / *relative, as in OpenFile and CreateFile: the
+                    // decoded path has no root and no "..". No canonical() or
+                    // absolute(): the console's root "sdmc:/switch/oot3dre/savedata"
+                    // is relative to std::filesystem, which puts the cwd in front
+                    // of it and names a path that does not exist, so erasing a file
+                    // slot failed and the game called its fatal-error handler.
+                    // A symlink or other non-directory below the root is refused.
+                    // Lexical containment first (CtrArchivePathContained, ported from
+                    // GustavoHenriqueRocha/TriAevum-Switch 47c00ee2).
                     std::error_code error;
-                    const auto target = archive->Root / *relative;
-                    if (CtrArchivePathContained(archive->Root, *relative)) {
-                        const auto status = std::filesystem::symlink_status(target, error);
+                    auto target = archive->Root;
+                    bool missing = false;
+                    bool contained = CtrArchivePathContained(archive->Root, *relative);
+                    for (auto part = relative->begin(); contained && part != relative->end(); ++part) {
+                        target /= *part;
+                        const auto type = std::filesystem::symlink_status(target, error).type();
+                        if (type == std::filesystem::file_type::not_found) {
+                            missing = true;
+                            break;
+                        }
+                        const auto expected = std::next(part) == relative->end()
+                                                  ? std::filesystem::file_type::regular
+                                                  : std::filesystem::file_type::directory;
+                        if (error || type != expected) {
+                            contained = false;
+                            break;
+                        }
+                    }
+                    if (missing) {
+                        success = true;
+                    } else if (contained) {
+                        // The erased file goes to <save>-backups first (PrepareDelete);
+                        // when that copy fails the delete is refused.
                         auto* journal = archive->Id == kFsSaveDataArchiveId ? SaveJournal() : nullptr;
-                        if (status.type() == std::filesystem::file_type::not_found &&
-                            (!error || error == std::errc::no_such_file_or_directory)) {
-                            success = true;
-                        } else if (!error && std::filesystem::is_regular_file(status) &&
-                                   (journal == nullptr || journal->PrepareDelete(target))) {
-                            // O apagado fica em <save>-backups (PrepareDelete).
+                        if (journal == nullptr || journal->PrepareDelete(target)) {
                             removed = std::filesystem::remove(target, error);
                             success = !error;
                         }
@@ -958,9 +984,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                     }
                 } else {
                     const auto filePath = archive->Root / *relativePath;
-                    // Diário antes de olhar o disco: recupera troca
-                    // interrompida e enxerga o .triaevum-new que ainda não
-                    // entrou (nunca recria o arquivo vazio por cima dele).
+                    // Journal before looking at the disk: recovers an
+                    // interrupted swap and sees the .triaevum-new that has not
+                    // been installed yet (never recreates an empty file over it).
                     auto* journal = archive->Id == kFsSaveDataArchiveId ? SaveJournal() : nullptr;
                     if (journal != nullptr && !journal->Covers(filePath)) journal = nullptr;
                     const auto diskPath = journal != nullptr ? journal->ActivePath(filePath) : filePath;
@@ -1035,9 +1061,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             (descriptor & 0x3FFU) == 2U &&
             (descriptor >> 14U) == pathSize &&
             memory.IsMapped(pathAddress, pathSize);
-        // ExtSaveData / SharedExtSaveData: só no backend de pasta, uma pasta
-        // por (mídia, id). O 0xF000000B (Play Coins) nasce com o gamecoin.dat
-        // padrão, como o PTM faz no console/Azahar.
+        // ExtSaveData / SharedExtSaveData: directory backend only, one directory
+        // per (media, id). 0xF000000B (Play Coins) is created with the default
+        // gamecoin.dat, as the PTM does on console/Azahar.
         if (validStaticBuffer && IsCtrExtDataArchiveId(archiveId)) {
             const bool shared = archiveId == kFsSharedExtSaveDataArchiveId;
             event.Name += shared ? ":OpenArchive:SharedExtSaveData:" : ":OpenArchive:ExtSaveData:";
@@ -1094,8 +1120,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 std::filesystem::create_directories(
                     mConfig.SaveDataDirectory, directoryError);
                 openedSaveRoot = !directoryError;
-                // Primeira abertura da execução: termina troca interrompida e
-                // tira de dentro do save a escrita que não foi confirmada.
+                // First open of the run: finishes an interrupted swap and
+                // moves uncommitted writes out of the save.
                 if (openedSaveRoot) SaveJournal()->RecoverOnce();
             }
             if (openedSaveRoot) {
@@ -1183,8 +1209,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             uint32_t result = archive == mArchives.end()
                                   ? kFsInvalidArchiveHandle
                                   : kResultSuccess;
-            // ControlArchive no save (o OoT3D chama ao salvar): confirma as
-            // escritas pendentes do diário.
+            // ControlArchive on the save (OoT3D calls it when saving): commits the
+            // journal's pending writes.
             if (archive != mArchives.end() && archive->Id == kFsSaveDataArchiveId) {
                 if (auto* journal = SaveJournal(); journal != nullptr && !journal->CommitAll())
                     result = kFsBackendFailure;

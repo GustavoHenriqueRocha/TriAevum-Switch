@@ -22,6 +22,22 @@ SOURCE_NAME = "oot3d_whole_aot_generated.cpp"
 INTERNAL_HEADER_NAME = "oot3d_whole_aot_generated_internal.h"
 SHARD_PREFIX = "oot3d_whole_aot_shard_"
 MANIFEST_NAME = "whole_aot_cpp_manifest.json"
+HOOK_GATES_FORMAT = "oot3d_whole_aot_hook_gates_v1"
+HOOK_GATES_NAME = "whole_aot_hook_gates.json"
+
+
+def load_hook_gates(path: Path) -> frozenset[int]:
+    """PCs of whole_aot_hook_gates.json ("pcs": hex strings or integers), the
+    union of every runtime block-entry hook list, written by the host tool
+    oot3d_block_entry_hook_census (oot3d_native_block_entry_hooks.h)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("format") != HOOK_GATES_FORMAT:
+        raise ValueError(f"{path}: not an {HOOK_GATES_FORMAT} file")
+    pcs = frozenset(int(pc, 0) if isinstance(pc, str) else int(pc) for pc in data["pcs"])
+    misaligned = sorted(pc for pc in pcs if pc & 3)
+    if misaligned:
+        raise ValueError(f"{path}: hook gate 0x{misaligned[0]:08X} is not word aligned")
+    return pcs
 
 
 class LoweringError(ValueError):
@@ -76,27 +92,28 @@ class LiteralImage:
 # tests that call the emitters directly keep the original memory reads).
 _LITERAL_IMAGE: LiteralImage | None = None
 _FOLDED_LITERALS: set[int] = set()
+_FOLDED_VFP_LITERALS: set[int] = set()
 # Set by generate(): scalar binary32 VFP through native AArch64 instructions
 # with the guest FPSCR mode in FPCR (oot3d_native_a32_vfp_aarch64.h). Off by
 # default; the emitted code still compiles to the software operations on
 # other hosts.
 _NATIVE_VFP_AARCH64 = False
-# Promoção de registradores (generate(promote_registers=True)): GPRs, NZCV e
-# o orçamento de blocos ficam em variáveis locais em todas as funções comuns,
-# sincronizados com o estado arquitetural só onde ele é observável (ver
-# _promote_function_body). Desligado por padrão: o C++ gerado é o mesmo de antes.
+# Register promotion (generate(promote_registers=True)): GPRs, NZCV and
+# the block budget live in local variables in every ordinary function,
+# synchronized with the architectural state only where it is observable (see
+# _promote_function_body). Off by default: the generated C++ is the same as before.
 #
-# Medido (2026-10-17, GCC 16.1 devkitA64 -O3, flags dos shards do Switch):
-# piora. Shard 243: 114,2 mil -> 154,8 mil instruções, loads +77%, stores
-# +89% (pilha 13,5/15,8 mil -> 33,3/32,7 mil); FUN_0046c204: 81 mil -> 119 mil.
-# Com referências o próprio state é a "casa" de cada registrador: o GCC
-# guarda na escrita e recarrega só o que usa depois de uma chamada (inclusive
-# os caminhos lentos frios de memória). Com locais, (1) cada valor vivo através
-# de uma chamada fria (ReadFastSlow/WriteFastSlow) precisa de registrador
-# callee-saved ou derrame na pilha; (2) a entrada carrega todos os registros
-# promovidos de uma vez, porque as saídas gravam o conjunto "talvez sujo"
-# (estático); (3) o prólogo salva x19-x28. Sem os caminhos lentos
-# (experimento, não exato) ainda fica 19% pior. Por isso continua desligado.
+# Measured (2026-10-17, GCC 16.1 devkitA64 -O3, Switch shard flags):
+# worse. Shard 243: 114.2k -> 154.8k instructions, loads +77%, stores
+# +89% (stack 13.5k/15.8k -> 33.3k/32.7k); FUN_0046c204: 81k -> 119k.
+# With references, state itself is the "home" of each register: GCC
+# stores on write and reloads only what it uses after a call (including
+# the cold memory slow paths). With locals, (1) every value live across
+# a cold call (ReadFastSlow/WriteFastSlow) needs a callee-saved register
+# or a stack spill; (2) the entry loads all promoted registers at once,
+# because the exits store the "maybe dirty" set (static);
+# (3) the prologue saves x19-x28. Without the slow paths
+# (experiment, not exact) it is still 19% worse. Hence it stays off.
 _PROMOTE_REGISTERS = False
 # Set by generate() (--vfp-zero-aware, only with the native VFP): arithmetic
 # goes through Oot3dVfpZeroAware*, which keep exact zero results (x * 0,
@@ -110,16 +127,45 @@ _VFP_ZERO_AWARE = False
 # spanWords array of the single-page path never has its address taken and is
 # kept in registers. Same values, faults and order.
 _LEAN_STACK = False
-# Funções gigantes e frias marcadas com GIANT_COLD_ATTRIBUTE (ver generate).
+# Set by generate() (--sparse-block-entries, "N4"): the block budget and the
+# block-entry gate only where they are needed, instead of in every block.
+# Credit: ReXGlue/XenonRecomp-style recompilers emit loop barriers only at
+# loop headers (no per-block check); sa2-nx dropped the provably useless ones.
+# - Budget: kept at the function entry and at every target of a DFS back edge
+#   of the function's goto graph (each directed cycle contains such an edge,
+#   so every loop, irreducible ones included, passes a decrement), and charged
+#   once by the dispatch switch for every other block. Every nested call
+#   enters a callee at its entry, and every resume, indirect call into a block
+#   and re-dispatch of the registry loop goes through a dispatch switch, so
+#   the number of blocks a run executes stays bounded by the budget times the
+#   largest function, and the C++ call depth by the budget.
+# - Gate: only blocks whose PC is in _HOOK_GATES (whole_aot_hook_gates.json,
+#   the union of the runtime hook lists) call Oot3dAotEnterBlock; they charge
+#   the budget too. A run's first block is always charged (by itself or by the
+#   dispatch), so "first block" stays BlocksConsumed() == 1 after the gated
+#   block's own charge, as in the default lowering.
+# - Guest state is the same; BlockLimit exits (cooperative thread switches)
+#   happen only at charged blocks and dispatches, so run lengths change.
+_SPARSE_BLOCK_ENTRIES = False
+_HOOK_GATES: frozenset[int] = frozenset()
+# Block counts of the last sparse generation, for the manifest.
+_SPARSE_STATS: dict[str, int] = {}
+# Set by generate() (--fold-vfp-literals): VLDR Sd/Dd, [pc, #imm] from the
+# immutable text segment becomes a constant, like the LDR literal folding
+# above (same image, same host-written exclusions): no page-flag check, no
+# load and no fault path. Text is mapped read-only for the whole process, so
+# the read always yields the code.bin bytes and can never fault.
+_FOLD_VFP_LITERALS = False
+# Giant cold functions marked with GIANT_COLD_ATTRIBUTE (see generate).
 _GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
-# O escalonador pré-alocação (sched1, que no AArch64 o GCC só liga em -O3) e
-# o load CSE após a alocação (-fgcse-after-reload, só em -O3) custam 50-65% do
-# tempo de compilação das funções gigantes (milhares de instruções guest). O
-# atributo os desliga só nelas e mantém o inline forçado dos helpers quentes
-# (medido: mesmos símbolos externos, .text +0,02%). Vai na mesma linha da
-# assinatura, sem macro nem linhas novas: os números de linha do shard (e com
-# eles os checksums dos .gcda do PGO) não mudam. Outros compiladores ignoram
-# um atributo gnu:: desconhecido (só um aviso, e os shards usam -w).
+# The pre-allocation scheduler (sched1, which on AArch64 GCC enables only at -O3)
+# and post-allocation load CSE (-fgcse-after-reload, only at -O3) cost 50-65% of
+# the compile time of giant functions (thousands of guest instructions). The
+# attribute disables them only there and keeps forced inlining of the hot helpers
+# (measured: same external symbols, .text +0.02%). It goes on the same line as
+# the signature, with no macro or new lines: the shard line numbers (and with
+# them the PGO .gcda checksums) do not change. Other compilers ignore
+# an unknown gnu:: attribute (just a warning, and the shards use -w).
 GIANT_COLD_ATTRIBUTE = (
     '[[gnu::optimize("no-schedule-insns", "no-gcse-after-reload")]] '
 )
@@ -1554,6 +1600,41 @@ def _emit_native_vfp(
     return None
 
 
+def _vfp_word_span(
+    load: bool, first: int, words: int, per_word: list[str]
+) -> list[str]:
+    """VLDM/VSTM/VPUSH/VPOP of `words` S lanes from `first` at firstAddress.
+
+    Two or more words take one page check and one copy when the whole range
+    lies on a single untraced fast page (ReadWordsFast/WriteWordsFast: the
+    same bytes, generations and page stamps as the word-by-word transfer).
+    Otherwise `per_word`, the exact word-by-word lowering, runs unchanged in
+    its own scope, so fault order, partial stores and lane updates stay
+    identical. A store snapshots the lanes first; guest memory never aliases
+    the VFP registers, so the values are the same."""
+    if words < 2:
+        return per_word
+    if load:
+        return [
+            f"uint32_t spanWords[{words}];",
+            f"if (context.Memory.ReadWordsFast(firstAddress, spanWords, {words}U)) {{",
+            *(
+                f"    {_lane(first + offset)} = spanWords[{offset}];"
+                for offset in range(words)
+            ),
+            "} else {",
+            *(f"    {line}" for line in per_word),
+            "}",
+        ]
+    sources = ", ".join(_lane(first + offset) for offset in range(words))
+    return [
+        f"const uint32_t spanWords[{words}] = {{{sources}}};",
+        f"if (!context.Memory.WriteWordsFast(firstAddress, spanWords, {words}U)) {{",
+        *(f"    {line}" for line in per_word),
+        "}",
+    ]
+
+
 def _emit_vfp(item: Instruction) -> list[str]:
     raw = item.raw
     pc = item.pc
@@ -1581,30 +1662,34 @@ def _emit_vfp(item: Instruction) -> list[str]:
                     "const uint32_t firstAddress = frame.Guest.r[13];",
                 ]
             )
-            for offset in range(words):
-                body.extend(
-                    [
-                        "if (!context.Memory.WriteFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    "if (!context.Memory.WriteFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
                 )
+            ]
+            body.extend(_vfp_word_span(False, first, words, per_word))
         else:
             body.append("const uint32_t firstAddress = frame.Guest.r[13];")
-            for offset in range(words):
-                body.extend(
-                    [
-                        f"uint32_t value{offset} = 0;",
-                        "if (!context.Memory.ReadFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, &value{offset})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                        f"{_lane(first + offset)} = value{offset};",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    f"uint32_t value{offset} = 0;",
+                    "if (!context.Memory.ReadFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, &value{offset})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
+                    f"{_lane(first + offset)} = value{offset};",
                 )
+            ]
+            body.extend(_vfp_word_span(True, first, words, per_word))
             body.append(f"frame.Guest.r[13] += {byte_count}U;")
         return _conditional(raw, body)
     if (raw & 0x0FF00FD0) in {0x0C400B10, 0x0C500B10}:
@@ -1643,6 +1728,19 @@ def _emit_vfp(item: Instruction) -> list[str]:
         offset = (raw & 0xFF) * 4
         base = f"0x{(pc + 8) & ~3:08X}U" if rn == 15 else _reg(rn)
         operator = "+" if add_offset else "-"
+        if _FOLD_VFP_LITERALS and _LITERAL_IMAGE is not None and load and rn == 15:
+            # VLDR [pc, #imm]: a literal-pool read from the immutable text
+            # segment (see _FOLD_VFP_LITERALS), folded like LDR [pc, #imm].
+            address = (((pc + 8) & ~3) + (offset if add_offset else -offset)) & 0xFFFFFFFF
+            size = 8 if double_register else 4
+            literal = _LITERAL_IMAGE.word(address, size)
+            if literal is not None:
+                _FOLDED_VFP_LITERALS.add(address)
+                body.append(f"// VFP literal at 0x{address:08X}")
+                body.append(f"{_lane(lane)} = 0x{literal & 0xFFFFFFFF:08X}U;")
+                if double_register:
+                    body.append(f"{_lane(lane + 1)} = 0x{literal >> 32:08X}U;")
+                return _conditional(raw, body)
         body.append(f"const uint32_t address = {base} {operator} {offset}U;")
         if double_register:
             # D0-D15 alias consecutive pairs of S registers, including the high word.
@@ -1721,30 +1819,34 @@ def _emit_vfp(item: Instruction) -> list[str]:
             updated = first_address
         body.append(f"const uint32_t firstAddress = {first_address};")
         if load:
-            for offset in range(words):
-                body.extend(
-                    [
-                        f"uint32_t value{offset} = 0;",
-                        "if (!context.Memory.ReadFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, &value{offset})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    f"uint32_t value{offset} = 0;",
+                    "if (!context.Memory.ReadFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, &value{offset})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
                 )
-            for offset in range(words):
-                body.append(f"{_lane(first + offset)} = value{offset};")
+            ] + [
+                f"{_lane(first + offset)} = value{offset};"
+                for offset in range(words)
+            ]
         else:
-            for offset in range(words):
-                body.extend(
-                    [
-                        "if (!context.Memory.WriteFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    "if (!context.Memory.WriteFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
                 )
+            ]
+        body.extend(_vfp_word_span(load, first, words, per_word))
         if writeback:
             body.append(f"{_reg(rn)} = {updated};")
         return _conditional(raw, body)
@@ -2101,7 +2203,7 @@ def _emit_terminal(
                 call_prefix = ["commitState();"]
                 call_suffix = ["reloadState();"]
             elif target in external_entries and promote:
-                # Sem lambdas como argumento: os locais não podem escapar.
+                # No lambdas as arguments: the locals cannot escape.
                 call = (
                     f"Oot3dAotCallExternal(context, 0x{target:08X}U, frame, state)"
                 )
@@ -2295,6 +2397,70 @@ def _symbol(name: str, entry: int) -> str:
     return f"{sanitized}_{entry:08X}"
 
 
+def _sparse_charged_blocks(
+    function: Function, bodies: dict[int, list[str]]
+) -> frozenset[int]:
+    """--sparse-block-entries: the blocks that keep a budget decrement.
+
+    The function entry, every gated block (_HOOK_GATES) and every target of a
+    back edge of a depth-first search of the goto graph (the emitted
+    `goto block_X;`, which covers branches, fallthroughs, call returns and
+    internal PC tables). Every directed cycle contains a DFS back edge whose
+    target lies on the cycle, so no loop, irreducible or not, avoids a
+    decrement; the check below re-proves it on the result."""
+    successors = {
+        pc: sorted({int(target, 16) for line in body for target in _GOTO_BLOCK.findall(line)})
+        for pc, body in bodies.items()
+    }
+    for pc, targets in successors.items():
+        stray = [target for target in targets if target not in successors]
+        if stray:
+            raise LoweringError(
+                f"block 0x{pc:08X} jumps to 0x{stray[0]:08X} outside function 0x{function.entry:08X}")
+    charged = {function.entry} | {pc for pc in successors if pc in _HOOK_GATES}
+    on_stack: set[int] = set()
+    done: set[int] = set()
+    roots = [function.entry, *(block.pc for block in function.blocks if block.pc != function.entry)]
+    for root in roots:
+        if root in done:
+            continue
+        on_stack.add(root)
+        stack = [(root, iter(successors[root]))]
+        while stack:
+            node, pending = stack[-1]
+            target = next(pending, None)
+            if target is None:
+                stack.pop()
+                on_stack.discard(node)
+                done.add(node)
+            elif target in on_stack:
+                charged.add(target)  # back edge: target is on the cycle
+            elif target not in done:
+                on_stack.add(target)
+                stack.append((target, iter(successors[target])))
+    # Proof check: the blocks without a decrement form an acyclic graph.
+    free = {pc for pc in successors if pc not in charged}
+    indegree = {pc: 0 for pc in free}
+    for pc in free:
+        for target in successors[pc]:
+            if target in free:
+                indegree[target] += 1
+    ready = [pc for pc, count in indegree.items() if count == 0]
+    removed = 0
+    while ready:
+        pc = ready.pop()
+        removed += 1
+        for target in successors[pc]:
+            if target in free:
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+    if removed != len(free):
+        raise LoweringError(f"function 0x{function.entry:08X}: a loop has no budget decrement")
+    return frozenset(charged)
+
+
+
 def _render_function(
     function: Function,
     function_symbols: dict[int, str],
@@ -2321,8 +2487,8 @@ def _render_function(
     # Broad residency regressed the matched full-title workload. Keep local
     # state only at the existing explicitly selected callback-free boundaries.
     local_state = local_state or callback_free or memory_view
-    # Promoção ampla (ver _promote_function_body); as regiões e cópias acima
-    # mantêm o mecanismo próprio delas.
+    # Broad promotion (see _promote_function_body); the regions and copies above
+    # keep their own mechanism.
     promote = (_PROMOTE_REGISTERS and not local_state and not memory_copy)
     lines = [
         f"Oot3dWholeAotFlow Execute_{symbol}(",
@@ -2353,7 +2519,7 @@ def _render_function(
             lines.append("        state.Flags = flags;")
     if memory_view:
         lines.extend([
-            "        regionMemory.Commit();",
+            # Region stores mark their cards as they go: nothing to publish.
             # Consumed blocks are derived (BlockBudget - BlocksRemaining).
             "        context.BlocksRemaining = regionBlocksRemaining;",
         ])
@@ -2368,25 +2534,77 @@ def _render_function(
             lines.append("        flags = state.Flags;")
     if not promote:
         lines.append("    };")
+    # Instructions of each block (independent of its entry code).
+    bodies: dict[int, list[str]] = {}
+    for block in function.blocks:
+        body: list[str] = []
+        for item in block.instructions[:-1]:
+            live_flags = instruction_optimization[item.pc].required_flag_writes
+            for emitted in _emit_non_control(item, live_flags):
+                body.append("        " + emitted)
+        terminal_flags = instruction_optimization[
+            block.instructions[-1].pc
+        ].required_flag_writes
+        for emitted in _emit_terminal(
+            block,
+            block_pcs,
+            dict(function.direct_calls),
+            function_symbols,
+            external_entries,
+            terminal_flags,
+            promote=promote,
+        ):
+            body.append("        " + emitted)
+        bodies[block.pc] = body
+    dispatch = (function.entry, *_function_dispatch_entries(function))
     lines.append("    switch (entryPc) {")
-    lines.extend([
-        f"    case 0x{function.entry:08X}U:",
-        f"        goto block_{function.entry:08X};",
-    ])
-    for entry in _function_dispatch_entries(function):
-        lines.extend(
-            [
-                f"    case 0x{entry:08X}U:",
-                f"        goto block_{entry:08X};",
-            ]
-        )
-    lines.extend(
-        [
+    if _SPARSE_BLOCK_ENTRIES:
+        charged = _sparse_charged_blocks(function, bodies)
+        uncharged_dispatch = [entry for entry in dispatch if entry not in charged]
+        gated_blocks = sum(1 for pc in block_pcs if pc in _HOOK_GATES)
+        for key, value in (
+            ("blocks", len(block_pcs)),
+            ("gated_blocks", gated_blocks),
+            ("budget_only_blocks", len(charged) - gated_blocks),
+            ("blocks_without_entry_code", len(block_pcs) - len(charged)),
+        ):
+            _SPARSE_STATS[key] = _SPARSE_STATS.get(key, 0) + value
+        for entry in dispatch:
+            if entry in charged:
+                lines.extend([f"    case 0x{entry:08X}U:", f"        goto block_{entry:08X};"])
+        lines.extend(f"    case 0x{entry:08X}U:" for entry in uncharged_dispatch)
+        if uncharged_dispatch:
+            lines.append("        break;")
+        lines.extend([
             "    default:",
             "        return {Oot3dWholeAotFlowKind::Unsupported, entryPc, 0U};",
             "    }",
-        ]
-    )
+        ])
+        if uncharged_dispatch:
+            # A block without its own decrement is charged by its dispatch
+            # (resume, indirect call into the block, registry re-dispatch).
+            lines.extend([
+                "    if (!Oot3dAotConsumeBlock(context)) {",
+                "        return Oot3dAotBlockLimit(context, entryPc);",
+                "    }",
+                "    switch (entryPc) {",
+            ])
+            for entry in uncharged_dispatch:
+                lines.extend([f"    case 0x{entry:08X}U:", f"        goto block_{entry:08X};"])
+            lines.extend([
+                "    default:",
+                "        return {Oot3dWholeAotFlowKind::Unsupported, entryPc, 0U};",
+                "    }",
+            ])
+    else:
+        charged = frozenset(block_pcs)
+        for entry in dispatch:
+            lines.extend([f"    case 0x{entry:08X}U:", f"        goto block_{entry:08X};"])
+        lines.extend([
+            "    default:",
+            "        return {Oot3dWholeAotFlowKind::Unsupported, entryPc, 0U};",
+            "    }",
+        ])
     for block in function.blocks:
         lines.append(f"block_{block.pc:08X}:")
         lines.append("    {")
@@ -2405,27 +2623,28 @@ def _render_function(
                 "            }",
                 "        }",
             ])
+        gated = not _SPARSE_BLOCK_ENTRIES or block.pc in _HOOK_GATES
         enter = (
             "(regionBlocksRemaining != 0U)" if memory_view else
-            "Oot3dAotConsumeBlock(context)" if callback_free else
+            "Oot3dAotConsumeBlock(context)" if callback_free or not gated else
             f"Oot3dAotEnterBlock(context, frame, state, 0x{block.pc:08X}U, commitState, reloadState)"
         )
         if promote:
-            # Orçamento local; o gancho (raro) sincroniza tudo em volta da
-            # metade fria, que não recebe nenhum local.
+            # Local budget; the (rare) hook synchronizes everything around the
+            # cold half, which receives no locals.
             lines.extend([
                 "        if (blocksRemaining == 0U) [[unlikely]] {",
                 f"            return Oot3dAotBlockLimit(context, 0x{block.pc:08X}U);",
                 "        }",
                 "        --blocksRemaining;",
                 f"        if (context.BlockEntryGate->MayContain(0x{block.pc:08X}U)) [[unlikely]] {{",
-                # Vira as gravações do conjunto sujo (_promote_function_body).
+                # Becomes the dirty-set stores (_promote_function_body).
                 "            commitState();",
                 f"            Oot3dAotRunBlockEntryHook(context, frame, state, 0x{block.pc:08X}U);",
                 "            reloadState();",
                 "        }",
             ])
-        else:
+        elif block.pc in charged:
             lines.extend(
                 [
                     f"        if (!{enter}) {{",
@@ -2435,23 +2654,7 @@ def _render_function(
             )
         if memory_view:
             lines.append("        --regionBlocksRemaining;")
-        for item in block.instructions[:-1]:
-            live_flags = instruction_optimization[item.pc].required_flag_writes
-            for emitted in _emit_non_control(item, live_flags):
-                lines.append("        " + emitted)
-        terminal_flags = instruction_optimization[
-            block.instructions[-1].pc
-        ].required_flag_writes
-        for emitted in _emit_terminal(
-            block,
-            block_pcs,
-            dict(function.direct_calls),
-            function_symbols,
-            external_entries,
-            terminal_flags,
-            promote=promote,
-        ):
-            lines.append("        " + emitted)
+        lines.extend(bodies[block.pc])
         lines.append("    }")
     lines.extend(
         [
@@ -2508,10 +2711,10 @@ def _render_function(
 
 
 def _promoted_prologue(registers: tuple[int, ...], has_flags: bool) -> list[str]:
-    """Locais e sincronizações completas de uma função promovida.
+    """Locals and full synchronizations of a promoted function.
 
-    As lambdas são always_inline e só são chamadas diretamente: um local cujo
-    endereço escapasse para uma função não inline teria de morar na pilha.
+    The lambdas are always_inline and only called directly: a local whose
+    address escaped into a non-inline function would have to live on the stack.
     """
     attribute = "__attribute__((always_inline))"
     lines = [f"    uint32_t r{index} = state.R[{index}];" for index in registers]
@@ -2525,7 +2728,7 @@ def _promoted_prologue(registers: tuple[int, ...], has_flags: bool) -> list[str]
         *(["        state.Flags = flags;"] if has_flags else []),
         "        context.BlocksRemaining = blocksRemaining;",
         "    };",
-        # Nome usado pelos prólogos das substituições nativas.
+        # Name used by the native override prologues.
         f"    const auto commitState = [&]() noexcept {attribute} {{",
         "        commitAllState();",
         "    };",
@@ -2544,9 +2747,9 @@ _REGISTER_WRITE = re.compile(
     r"(?<![\w.>])r(\d+)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)"
     r"|(?:\+\+|--)\s*r(\d+)\b|(?<![\w.>])r(\d+)\s*(?:\+\+|--)")
 
-# Helpers que recebem registradores só por valor (oot3d_native_whole_aot_runtime.h,
-# oot3d_aot_architectural_state.h); qualquer outro recebendo um local promovido
-# é recusado por _promote_function_body.
+# Helpers that take registers only by value (oot3d_native_whole_aot_runtime.h,
+# oot3d_aot_architectural_state.h); any other one receiving a promoted local
+# is rejected by _promote_function_body.
 _BY_VALUE_REGISTER_CALLEES = frozenset({
     "static_cast", "Oot3dAotLsl", "Oot3dAotLsr", "Oot3dAotAsr", "Oot3dAotRor",
     "Oot3dAotShiftRegister", "Oot3dAotShiftImmediate", "Oot3dAotReturned",
@@ -2560,7 +2763,7 @@ _REGISTER_TOKEN = re.compile(r"(?<![\w.\[])r\d+\b")
 
 
 def _calls_with_register_argument(line: str) -> set[str]:
-    """Funções (e métodos) cujo parêntese de argumentos contém um rN na linha."""
+    """Functions (and methods) whose argument parentheses contain an rN on the line."""
     found: set[str] = set()
     stack: list[str | None] = []
     position = 0
@@ -2591,7 +2794,7 @@ _FLAGS_READ = re.compile(r"\bflags\.(?:N|Z|C|V)\(\)|\bflags\.Materialize\(")
 
 
 def _flags_written(line: str) -> bool:
-    """Conservador: qualquer uso de flags que não seja uma leitura conhecida."""
+    """Conservative: any use of flags that is not a known read."""
     stripped = _FLAGS_READ.sub("", line)
     return re.search(r"(?<![\w.])flags\b", stripped) is not None
 
@@ -2612,21 +2815,21 @@ def _promote_function_body(
     body_start: int,
     flag_helpers: tuple[str, ...],
 ) -> list[str]:
-    """Sincroniza os locais promovidos só onde o estado é observável.
+    """Synchronizes the promoted locals only where the state is observable.
 
-    Invariante: fora do conjunto "sujo" estático, cada local é igual ao
-    campo de state (carregado na entrada e recarregado depois de cada
-    chamada, gancho ou substituição). Chamadas e o gancho de bloco gravam só
-    o conjunto sujo do bloco; retornos e saídas (falta de memória, orçamento,
-    SVC, fluxo não retornado) vão para um rótulo compartilhado por conjunto,
-    que grava esse conjunto e o orçamento e retorna. Os conjuntos são
-    superconjuntos seguros: gravar um local limpo regrava o mesmo valor.
+    Invariant: outside the static "dirty" set, each local equals its
+    state field (loaded at entry and reloaded after every
+    call, hook or override). Calls and the block hook store only
+    the block's dirty set; returns and exits (memory fault, budget,
+    SVC, non-returned flow) go to a label shared per set,
+    which stores that set and the budget and returns. The sets are
+    safe supersets: storing a clean local rewrites the same value.
 
-    Escritas e usos vêm do próprio C++ emitido (exatos), não da análise do
-    IR, que é conservadora em várias codificações. Para que a varredura seja
-    completa, um local só pode ser escrito por atribuição, atribuição
-    composta ou ++/--: endereço tomado ou passagem para uma função fora da
-    lista de helpers por valor é recusada (LoweringError).
+    Writes and uses come from the emitted C++ itself (exact), not from the
+    IR analysis, which is conservative for several encodings. For the scan to be
+    complete, a local may only be written by assignment, compound
+    assignment or ++/--: taking its address or passing it to a function outside
+    the by-value helper list is rejected (LoweringError).
     """
     body = lines[body_start:]
     text = "\n".join(body)
@@ -2642,7 +2845,7 @@ def _promote_function_body(
         body[index] = line
     register_mask = sum(1 << index for index in registers)
     for line in body:
-        # & unário (endereço): depois de início, '(', ',', '=', '{', '?' ou ':'.
+        # Unary & (address): after start, '(', ',', '=', '{', '?' or ':'.
         if re.search(r"(?:^|[(,={?:])\s*&\s*r\d+\b", line.strip()):
             raise LoweringError(
                 f"function 0x{function.entry:08X}: address of a promoted register: {line.strip()}")
@@ -2652,7 +2855,7 @@ def _promote_function_body(
                     f"function 0x{function.entry:08X}: promoted register passed to {callee}")
     lines = [*lines[:body_start], *body]
     blocks_by_pc = {block.pc: block for block in function.blocks}
-    # Linhas de cada bloco (o trecho antes do primeiro rótulo é o despacho).
+    # Lines of each block (the stretch before the first label is the dispatch).
     owner: list[int | None] = []
     current: int | None = None
     for line in body:
@@ -2699,7 +2902,7 @@ def _promote_function_body(
                         merged = (dirty_in[target][0] | outgoing[0],
                                   dirty_in[target][1] or outgoing[1])
                         dirty_in[target] = merged
-    # Conjunto usado em todo o bloco: entrada mais tudo que o bloco escreve.
+    # Set used across the whole block: entry plus everything the block writes.
     block_sets = {
         pc: (dirty_in[pc][0] | writes[pc], dirty_in[pc][1] or flag_writes[pc])
         for pc in blocks_by_pc
@@ -2722,8 +2925,8 @@ def _promote_function_body(
     output = [*lines[:body_start], *_promoted_prologue(registers, has_flags)]
     pending_exit: str | None = None
     depth = 0
-    # Depois de chamada + recarga, state é a verdade: a saída por fluxo não
-    # retornado não precisa gravar nada (a não ser o orçamento).
+    # After call + reload, state is the truth: the non-returned flow exit
+    # need not store anything (except the budget).
     after_call: int | None = None
     for line, pc in zip(lines[body_start:], owner):
         if pc != after_call:
@@ -2761,8 +2964,8 @@ def _promote_function_body(
                 f"function 0x{function.entry:08X}: return must be standalone: {stripped}"
             )
         if stripped == "commitState();":
-            # Antes de uma chamada ou do gancho de bloco: só o que pode estar
-            # sujo neste bloco (os locais limpos já são iguais a state).
+            # Before a call or the block hook: only what may be
+            # dirty in this block (clean locals already equal state).
             output.extend(stores(dirty, indent))
             continue
         output.append(line)
@@ -2858,6 +3061,28 @@ def _render_region_function(
     return lines
 
 
+def _hook_gates_definition() -> list[str]:
+    """Oot3dWholeAotHookGates() of the registry: every block, or the sorted
+    PCs that --sparse-block-entries gated (the runtime refuses any other hook,
+    oot3d_native_compiled_functions.cpp)."""
+    if not _SPARSE_BLOCK_ENTRIES:
+        return [
+            "Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept {",
+            "    return {};",
+            "}",
+            "",
+        ]
+    gates = sorted(_HOOK_GATES)
+    values = ", ".join(f"0x{pc:08X}U" for pc in gates)
+    return [
+        "Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept {",
+        f"    static constexpr std::array<uint32_t, {len(gates)}> kHookGatePcs{{{values}}};",
+        "    return {false, kHookGatePcs};",
+        "}",
+        "",
+    ]
+
+
 def _native_vfp_entry_lines() -> list[str]:
     # Guest FPSCR mode in FPCR for the whole call; FPSR folded back into the
     # guest FPSCR on every exit, including an observable-exit unwind.
@@ -2877,6 +3102,9 @@ def _render_header() -> str:
 namespace Oot3dNativeGame {
 
 std::span<const uint32_t> Oot3dWholeAotEntryPoints() noexcept;
+// Blocks that test the block-entry gate (every block, or the sorted PCs of
+// --sparse-block-entries); see Oot3dWholeAotHookGateSet.
+Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept;
 bool ExecuteOot3dWholeAotFunction(
     uint32_t pc,
     oot3d::recomp::a32::GuestState& state,
@@ -2982,6 +3210,7 @@ def _render_source(
             "    return kEntryPoints;",
             "}",
             "",
+            *_hook_gates_definition(),
             "bool ExecuteOot3dWholeAotFunction(",
             "    uint32_t pc, a32::GuestState& state, NativeA32Memory& memory,",
             "    a32::ExecutionResult* result, Oot3dWholeAotStats* stats,",
@@ -3157,19 +3386,16 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
     }
     entry_owners = _entry_owners(functions)
     dispatch_entries = sorted(entry_owners)
-    dispatch_page_shift = 12
-    dispatch_base_page = dispatch_entries[0] >> dispatch_page_shift
-    dispatch_last_page = dispatch_entries[-1] >> dispatch_page_shift
-    dispatch_page_offsets: list[int] = []
-    dispatch_cursor = 0
-    for page in range(dispatch_base_page, dispatch_last_page + 2):
-        page_start = page << dispatch_page_shift
-        while (
-            dispatch_cursor < len(dispatch_entries)
-            and dispatch_entries[dispatch_cursor] < page_start
-        ):
-            dispatch_cursor += 1
-        dispatch_page_offsets.append(dispatch_cursor)
+    # Flat dispatch: one slot per instruction word from the first to the last
+    # entry. Every entry is an A32 instruction address, so a word index is
+    # exact.
+    misaligned = [entry for entry in dispatch_entries if entry & 3]
+    if misaligned:
+        raise LoweringError(
+            f"dispatch entry 0x{misaligned[0]:08X} is not word aligned"
+        )
+    dispatch_code_base = dispatch_entries[0]
+    dispatch_slot_count = ((dispatch_entries[-1] - dispatch_code_base) >> 2) + 1
     entries = ", ".join(
         f"0x{entry:08X}U" for entry in dispatch_entries
     )
@@ -3177,9 +3403,10 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
         f'#include "{HEADER_NAME}"',
         f'#include "{INTERNAL_HEADER_NAME}"',
         '#include "oot3d_native_a32_memory.h"',
+        '#include "oot3d_native_indirect_profile.h"',
         "",
-        "#include <algorithm>",
         "#include <array>",
+        "#include <bit>",
         "",
         "namespace Oot3dNativeGame {",
         "namespace a32 = oot3d::recomp::a32;",
@@ -3212,44 +3439,42 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
         [
             "}};",
             "",
-            f"constexpr uint32_t kDispatchPageShift = {dispatch_page_shift}U;",
-            f"constexpr uint32_t kDispatchBasePage = 0x{dispatch_base_page:08X}U;",
-            f"constexpr uint32_t kDispatchLastPage = 0x{dispatch_last_page:08X}U;",
-            "constexpr std::array<uint32_t, "
-            f"{len(dispatch_page_offsets)}> kDispatchPageOffsets{{{{",
-        ]
-    )
-    for start in range(0, len(dispatch_page_offsets), 16):
-        chunk = dispatch_page_offsets[start:start + 16]
-        lines.append("    " + ", ".join(f"{offset}U" for offset in chunk) + ",")
-    lines.extend(
-        [
-            "}};",
-            "",
-            "const DispatchEntry* FindDispatchEntry(uint32_t pc) noexcept {",
-            "    const uint32_t page = pc >> kDispatchPageShift;",
-            "    if (page < kDispatchBasePage || page > kDispatchLastPage) {",
-                "        return nullptr;",
+            "// Flat dispatch table: slot (pc - kDispatchCodeBase) / 4 holds one",
+            "// plus the index of the entry at that pc in kDispatchEntries, zero",
+            "// where no entry exists (the same set and the same null result as a",
+            "// search of kDispatchEntries). It is filled once during static",
+            "// initialization, in .bss: no relocations and no image growth.",
+            f"constexpr uint32_t kDispatchCodeBase = 0x{dispatch_code_base:08X}U;",
+            f"constexpr uint32_t kDispatchSlotCount = {dispatch_slot_count}U;",
+            "static uint32_t gDispatchSlots[kDispatchSlotCount];",
+            "[[maybe_unused]] const bool gDispatchSlotsReady = [] {",
+            "    for (uint32_t index = 0; index < kDispatchEntries.size(); ++index) {",
+            "        gDispatchSlots[(kDispatchEntries[index].Pc - kDispatchCodeBase) >> 2U] =",
+            "            index + 1U;",
             "    }",
-            "    const size_t pageIndex = page - kDispatchBasePage;",
-            "    const auto begin = kDispatchEntries.begin() +",
-            "                       kDispatchPageOffsets[pageIndex];",
-            "    const auto end = kDispatchEntries.begin() +",
-            "                     kDispatchPageOffsets[pageIndex + 1U];",
-            "    const auto found = std::lower_bound(",
-            "        begin, end, pc,",
-            "        [](const DispatchEntry& entry, uint32_t target) {",
-            "            return entry.Pc < target;",
-            "        });",
-            "    return found != end && found->Pc == pc",
-            "               ? &*found",
-            "               : nullptr;",
+            "    return true;",
+            "}();",
+            "",
+            "// Inline into the indirect call and the dispatcher loop: out of line",
+            "// it costs a call plus spills around it in ExecuteOot3dWholeAotIndirect.",
+            "OOT3D_AOT_HOT const DispatchEntry* FindDispatchEntry(uint32_t pc) noexcept {",
+            "    // A pc below the base wraps above the bound, and a pc that is not",
+            "    // word aligned rotates its low bits to the top: both miss.",
+            "    const uint32_t slot = std::rotr(pc - kDispatchCodeBase, 2);",
+            "    if (slot >= kDispatchSlotCount) {",
+            "        return nullptr;",
+            "    }",
+            "    const uint32_t index = gDispatchSlots[slot];",
+            "    return index != 0U ? &kDispatchEntries[index - 1U] : nullptr;",
             "}",
             "",
             "Oot3dWholeAotFlow ExecuteOot3dWholeAotIndirect(",
             "    uint32_t pc, Oot3dWholeAotFrame& frame,",
             "    Oot3dWholeAotContext& context, Oot3dAotArchitecturalState& state) {",
             "    const DispatchEntry* entry = FindDispatchEntry(pc);",
+            "    if (Oot3dIndirectProfile* profile = gOot3dIndirectProfile) [[unlikely]] {",
+            "        profile->Record(state.R[14], pc);",
+            "    }",
             "    if (entry == nullptr) {",
             "        return Oot3dAotCallExternal(context, pc, frame, state);",
             "    }",
@@ -3267,6 +3492,7 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "    return kEntryPoints;",
             "}",
             "",
+            *_hook_gates_definition(),
             "bool ExecuteOot3dWholeAotFunction(",
             "    uint32_t pc, a32::GuestState& state, NativeA32Memory& memory,",
             "    a32::ExecutionResult* result, Oot3dWholeAotStats* stats,",
@@ -3504,9 +3730,9 @@ def _shard_buckets(
     return buckets
 
 
-# Teto de peso (instruções) de um shard ao receber uma função nova no modo
-# affinity-incremental, relativo à média: evita que um shard cresça sem
-# limite por acumular vizinhos novos (a cauda do build paralelo).
+# Weight cap (instructions) of a shard when receiving a new function in
+# affinity-incremental mode, relative to the mean: keeps a shard from growing
+# without bound by accumulating new neighbors (the parallel build tail).
 AFFINITY_INCREMENTAL_WEIGHT_CAP = 1.25
 
 
@@ -3514,16 +3740,16 @@ def _affinity_incremental_buckets(
     functions: tuple[Function, ...], shard_count: int,
     existing_assignments: dict[int, int],
 ) -> list[list[Function]]:
-    """Afinidade estável: preserva a distribuição anterior.
+    """Stable affinity: preserves the previous distribution.
 
-    Sem distribuição anterior (primeira geração, outra contagem de shards),
-    o resultado é idêntico ao de ``affinity``. Com ela, cada função que já
-    existia fica no mesmo shard, de modo que uma mudança pequena na seleção
-    (uma função nova, removida ou que mudou de tamanho) só altera os shards
-    que de fato a contêm ou a chamam, e o ccache acerta os demais. Funções
-    novas vão para o shard com o qual têm mais chamadas diretas (para manter
-    o inline entre chamador e chamado), desde que caibam no teto de peso;
-    sem vizinhos colocados, vão para o shard mais leve.
+    Without a previous distribution (first generation, different shard count),
+    the result is identical to ``affinity``. With one, each function that already
+    existed stays in the same shard, so a small change in the selection
+    (a function that is new, removed or changed size) only alters the shards
+    that actually contain or call it, and ccache hits the rest. New
+    functions go to the shard with which they have the most direct calls (to keep
+    inlining between caller and callee), as long as they fit under the weight cap;
+    with no placed neighbors, they go to the lightest shard.
     """
     if not existing_assignments:
         return _shard_buckets(functions, shard_count, "affinity")
@@ -3589,7 +3815,7 @@ def _affinity_incremental_buckets(
 def _manifest_shard_assignments(
     output: Path, shard_count: int
 ) -> dict[int, int]:
-    """Distribuição anterior lida só do manifesto e só com a mesma contagem."""
+    """Previous distribution read only from the manifest and only with the same count."""
     manifest_path = output / MANIFEST_NAME
     if not manifest_path.is_file():
         return {}
@@ -3784,19 +4010,37 @@ def generate(
     promote_registers: bool = False,
     vfp_zero_aware: bool = False,
     lean_stack: bool = False,
+    sparse_block_entries: bool = False,
+    hook_gates: frozenset[int] | None = None,
+    fold_vfp_literals: bool = False,
 ) -> dict[str, object]:
-    """``giant_function_instructions`` > 0 marca as funções com pelo menos
-    tantas instruções guest, exceto as de ``hot_entries`` (perfil), com
-    GIANT_COLD_ATTRIBUTE. 0 (padrão) gera exatamente o mesmo C++ de antes."""
+    """``giant_function_instructions`` > 0 marks the functions with at least
+    that many guest instructions, except those in ``hot_entries`` (profile), with
+    GIANT_COLD_ATTRIBUTE. 0 (default) generates exactly the same C++ as before.
+
+    ``sparse_block_entries`` (N4, see _SPARSE_BLOCK_ENTRIES) needs
+    ``hook_gates``, the PCs that may carry a runtime block-entry hook
+    (whole_aot_hook_gates.json). ``fold_vfp_literals``: see _FOLD_VFP_LITERALS."""
     global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
     global _VFP_ZERO_AWARE, _LEAN_STACK, _PROMOTE_REGISTERS
+    global _SPARSE_BLOCK_ENTRIES, _HOOK_GATES, _FOLD_VFP_LITERALS
     if vfp_zero_aware and not native_vfp_aarch64:
         raise ValueError("--vfp-zero-aware requires --native-vfp-aarch64")
+    if sparse_block_entries:
+        if hook_gates is None:
+            raise ValueError("--sparse-block-entries requires the hook gate list")
+        if region_entries or memory_entries or promote_registers:
+            raise ValueError(
+                "--sparse-block-entries does not support callback-free regions, "
+                "memory regions or register promotion")
     # Absent from the manifest when off: without the options the output (and
     # the manifest) is byte for byte the previous one.
     option_contract: dict[str, object] = {
         **({"vfp_zero_aware": True} if vfp_zero_aware else {}),
         **({"lean_stack": True} if lean_stack else {}),
+        **({"sparse_block_entries": True,
+            "hook_gates": sorted(hook_gates or ())} if sparse_block_entries else {}),
+        **({"fold_vfp_literals": True} if fold_vfp_literals else {}),
     }
     if giant_function_instructions < 0:
         raise ValueError("giant function threshold must not be negative")
@@ -3870,7 +4114,8 @@ def generate(
             == giant_function_instructions
         ) and all(
             cached.get(key, False) == (key in option_contract)
-            for key in ("vfp_zero_aware", "lean_stack")
+            for key in ("vfp_zero_aware", "lean_stack", "sparse_block_entries",
+                        "fold_vfp_literals")
         ) and all(
             (output / name).is_file() and
             _sha256((output / name).read_bytes()) == digest
@@ -3891,6 +4136,8 @@ def generate(
     if sys.getrecursionlimit() < deepest + 1000:
         sys.setrecursionlimit(deepest + 1000)
     _FOLDED_LITERALS.clear()
+    _FOLDED_VFP_LITERALS.clear()
+    _SPARSE_STATS.clear()
     _LITERAL_IMAGE = None
     # Without a declared text size (minimal fixtures) nothing is folded.
     if fold_literals and program.get("executable_size") is not None:
@@ -3902,6 +4149,9 @@ def generate(
     _PROMOTE_REGISTERS = promote_registers
     _VFP_ZERO_AWARE = vfp_zero_aware
     _LEAN_STACK = lean_stack
+    _SPARSE_BLOCK_ENTRIES = sparse_block_entries
+    _HOOK_GATES = frozenset(hook_gates or ()) if sparse_block_entries else frozenset()
+    _FOLD_VFP_LITERALS = fold_vfp_literals
     _GIANT_COLD_ENTRIES = frozenset(
         function.entry
         for function in functions
@@ -3922,6 +4172,9 @@ def generate(
         _PROMOTE_REGISTERS = False
         _VFP_ZERO_AWARE = False
         _LEAN_STACK = False
+        _SPARSE_BLOCK_ENTRIES = False
+        _HOOK_GATES = frozenset()
+        _FOLD_VFP_LITERALS = False
         _GIANT_COLD_ENTRIES = frozenset()
 
 
@@ -4043,6 +4296,22 @@ def _generate_files(
             else {}
         ),
         "folded_literal_addresses": len(_FOLDED_LITERALS),
+        **(
+            {"folded_vfp_literal_addresses": len(_FOLDED_VFP_LITERALS)}
+            if _FOLD_VFP_LITERALS
+            else {}
+        ),
+        **(
+            {
+                "sparse_block_entry_counts": dict(sorted(_SPARSE_STATS.items())),
+                # Listed gates that start no block: no hook can run there in
+                # either lowering.
+                "hook_gates_without_block": sorted(
+                    _HOOK_GATES - {block.pc for function in functions for block in function.blocks}),
+            }
+            if _SPARSE_BLOCK_ENTRIES
+            else {}
+        ),
         "folding_excluded_ranges": [
             [start, length] for start, length in HOST_WRITTEN_TEXT_RANGES
         ] if fold_literals else [],

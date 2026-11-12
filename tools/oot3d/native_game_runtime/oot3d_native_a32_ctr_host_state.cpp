@@ -9,11 +9,11 @@ namespace Oot3dNativeGame {
 
 namespace {
 
-// Savestate portátil: arquivos e archives do save/extdata (backend de pasta)
-// são guardados relativos à raiz ("savedata" ou "extdata"), não como caminho
-// absoluto do host, e religados à pasta configurada no restore (um savestate
-// do PC restaura no Switch). Estados antigos (caminho absoluto) continuam
-// aceitos pelo caminho de sempre.
+// Portable savestate: save/extdata files and archives (directory backend)
+// are stored relative to the root ("savedata" or "extdata"), not as an absolute
+// host path, and rebound to the configured directory on restore (a PC
+// savestate restores on the Switch). Old states (absolute path) are still
+// accepted the usual way.
 std::optional<std::pair<std::string, std::string>> PortableCtrSavePath(
     const std::filesystem::path& saveDirectory, const std::filesystem::path& path) {
     if (saveDirectory.empty() || path.empty()) return std::nullopt;
@@ -342,8 +342,8 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             }
             return false;
         }
-        // Primeiro acesso ao save pode ser este restore: a recuperação do
-        // diário (troca interrompida) roda antes de religar os arquivos.
+        // The first save access may be this restore: journal recovery
+        // (interrupted swap) runs before rebinding the files.
         SaveJournal();
         NativeA32CtrHostServices staged(mConfig);
         const auto normalizedAbsolute = [](const std::filesystem::path& path) {
@@ -368,8 +368,8 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             if (path.empty()) {
                 return true;
             }
-            // Extdata (<pai do save>/extdata) também: com um arquivo de
-            // extdata aberto (Play Coins) o restore falhava.
+            // Extdata (<save parent>/extdata) too: with an extdata file
+            // open (Play Coins) the restore failed.
             return (!mConfig.RomFsImagePath.empty() &&
                     normalizedAbsolute(path) ==
                         normalizedAbsolute(mConfig.RomFsImagePath)) ||
@@ -463,8 +463,12 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             object->FileClosed = encoded.value("file_closed", false);
             object->SaveJournalWriter = encoded.value("save_journal_writer", uint64_t{0});
             if (isRomFsFile && (object->FileOffset != mConfig.RomFsImageOffset ||
-                                object->FileSize != mConfig.RomFsImageSize)) {
-                throw std::runtime_error("restored RomFS service view is incompatible");
+                                object->FileSize != RomFsServiceViewSize())) {
+                // The view size includes installed RomFS mods: a state is
+                // bound to the mods that were active when it was saved.
+                throw std::runtime_error(
+                    "restored RomFS service view is incompatible (the save state "
+                    "was made with different RomFS mods or game data)");
             }
             if (exeFsSection) {
                 if (object->FileOffset != 0U || object->FileSize != exeFsSection->size()) {
@@ -507,8 +511,9 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                         "restored RomFS range exceeds its backing file");
                 }
             } else if (isRomFsFile && !object->FileClosed) {
-                object->RomFsBacking =
-                    std::make_shared<RomFsBackingFile>(object->FilePath);
+                object->RomFsBacking = std::make_shared<RomFsBackingFile>(
+                    object->FilePath, mConfig.RomFsOverlay,
+                    mConfig.RomFsImageOffset);
             }
             if (!encoded.at("mapped_address").is_null()) {
                 object->MappedAddress =
@@ -854,12 +859,12 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             state.at("ndm_scheduler_runs_in_background").get<bool>();
 
         staged.mRuntimeProfile.FsUnservedRequests = mRuntimeProfile.FsUnservedRequests;
-        // O diário do save é da execução, não do savestate: escritas pendentes,
-        // backups já feitos e a recuperação continuam valendo.
+        // The save journal belongs to the run, not the savestate: pending writes,
+        // backups already made and recovery stay in effect.
         staged.mSaveJournal = mSaveJournal;
         if (mSaveJournal) {
-            // Escritores pendentes que não existem no estado restaurado não
-            // podem segurar a confirmação para sempre.
+            // Pending writers that do not exist in the restored state must not
+            // hold back the commit forever.
             std::set<uint64_t> writers;
             for (const auto& record : staged.mHandles)
                 if (record.Object && record.Object->SaveJournalWriter != 0U && !record.Object->FileClosed)

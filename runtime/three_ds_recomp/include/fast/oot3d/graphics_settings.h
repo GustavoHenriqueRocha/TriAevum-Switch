@@ -416,4 +416,13 @@ class GraphicsSettingsService {
     std::optional<GraphicsSettings> mPending;
 };
 
+// Whether the scene environment (Lighting > Scene lights) drives the image:
+// the renderer supports per-pixel surface lighting, the model is Modern, the
+// preset is not Authentic and the native presentation override is off.
+[[nodiscard]] inline bool SceneEnvironmentActive(bool surfaceLightingAvailable, const GraphicsSettings& settings,
+                                   bool nativeOverride) noexcept {
+    return surfaceLightingAvailable && UsesFullSceneLighting(settings.Effects.SurfaceLighting) &&
+           settings.Preset != GraphicsPreset::Authentic && !nativeOverride;
+}
+
 } // namespace Fast::Oot3d

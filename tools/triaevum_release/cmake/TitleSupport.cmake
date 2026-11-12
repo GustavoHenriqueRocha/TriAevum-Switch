@@ -3,6 +3,8 @@ function(triaevum_add_title_support root pinned)
     set(host "${root}/tools/oot3d/native_game_runtime")
     add_library(triaevum_title_whole_aot_support STATIC EXCLUDE_FROM_ALL
         "${host}/oot3d_native_a32_memory.cpp"
+        # memory.cpp's fastmem window (off unless the host allocator hook is linked).
+        "${host}/oot3d_switch_guest_window.cpp"
         "${host}/oot3d_native_a32_memory_bus_defaults.cpp"
         "${pinned}/recomp/a32_vfp_binary64.cpp"
         "${a32}/oot3d_native_a32_vfp_ops.cpp"

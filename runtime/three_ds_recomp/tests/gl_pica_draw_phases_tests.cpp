@@ -1,4 +1,4 @@
-// Acumulador de fases do draw PICA (fast/backends/gl_pica_draw_phases.h).
+// PICA draw phase accumulator (fast/backends/gl_pica_draw_phases.h).
 
 #include "fast/backends/gl_pica_draw_phases.h"
 
@@ -24,7 +24,7 @@ TEST(PicaDrawPhases, LapsChargeTimeSincePreviousMark) {
     EXPECT_EQ(frame.SubmitTicks, 50U);
     uint64_t sum = 0U;
     for (const auto v : frame.PhaseTicks) sum += v;
-    EXPECT_EQ(sum, frame.SubmitTicks);  // cada instante cai em uma fase
+    EXPECT_EQ(sum, frame.SubmitTicks);  // every instant falls into one phase
     EXPECT_EQ(frame.Counts[static_cast<size_t>(Count::Draws)], 1U);
 }
 
@@ -46,7 +46,7 @@ TEST(PicaDrawPhases, TakeFrameResetsAndWindowAccumulates) {
     tracker.AddSection(Section::ResolvePlans, 7U);
     WindowTotals window;
     window.Accumulate(tracker.TakeFrame());
-    window.Accumulate(tracker.TakeFrame());  // quadro vazio
+    window.Accumulate(tracker.TakeFrame());  // empty frame
     EXPECT_EQ(window.Counts[static_cast<size_t>(Count::TexHashes)], 2U);
     EXPECT_EQ(window.Counts[static_cast<size_t>(Count::TexHashBytes)], 4096U);
     EXPECT_EQ(window.SectionNs[static_cast<size_t>(Section::ResolvePlans)],

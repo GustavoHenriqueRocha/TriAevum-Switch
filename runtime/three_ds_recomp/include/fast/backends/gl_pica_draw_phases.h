@@ -1,15 +1,15 @@
 #pragma once
 
-// Fases de CPU de um draw PICA no backend GL (glperf step_draw_<fase>_ms).
-// Livre de GL e sem alocacao; so a render thread escreve. O acumulador e
-// "sequencial": Lap(fase) cobra o tempo desde a marca anterior a fase dada,
-// entao cada instante do SubmitPicaDraw cai em exatamente uma fase (uma
-// leitura de relogio por marca). Relogio: contador de sistema do ARM no
-// Switch (19,2 MHz), steady_clock no host. Ativo so com config/gpu_timing;
-// desligado, quem chama nem le o relogio (veja GlPerf::Enabled()).
+// CPU phases of a PICA draw in the GL backend (glperf step_draw_<phase>_ms).
+// GL-free and allocation-free; only the render thread writes. The accumulator is
+// "sequential": Lap(phase) charges the time since the previous mark to the given phase,
+// so every instant of SubmitPicaDraw falls into exactly one phase (one
+// clock read per mark). Clock: the ARM system counter on the
+// Switch (19.2 MHz), steady_clock on the host. Active only with config/gpu_timing;
+// when off, callers don't even read the clock (see GlPerf::Enabled()).
 //
-// Alem das fases por draw ha "secoes" (tempo de parede de trechos da render
-// thread fora do draw, para decompor step_cpu_other) e contadores por quadro.
+// Besides the per-draw phases there are "sections" (wall time of render
+// thread stretches outside the draw, to break down step_cpu_other) and per-frame counters.
 
 #include <array>
 #include <chrono>
@@ -18,18 +18,18 @@
 namespace Fast::PicaDrawPhases {
 
 enum class Phase : uint8_t {
-    Validate,   // checagens, composicao, inicio de quadro, marca de etapa
-    Program,    // GetPicaGlProgram (chave + busca no mapa; compilacao se nova)
-    Target,     // alvo, fills pendentes, sombra
-    State,      // binds (FBO/VAO/programa/texturas/imagem) e estado de raster
-    Uniforms,   // memcmp + copia para o anel + bind range
-    Vertices,   // validacao, registro de geometria persistente, anel, atribs
-    TexHash,    // hash de conteudo de textura (so quando o quadro nao o trouxe)
-    TexLookup,  // chave + busca no mapa de texturas (inclui LUT de iluminacao)
-    TexUpload,  // criacao de textura nova (decode + glTexImage)
-    Indices,    // copia dos indices para o anel
-    Draw,       // glDrawElements/Arrays (incl. passes de canto)
-    Rest,       // o que sobrar ate o fim do SubmitPicaDraw
+    Validate,   // checks, composition, frame start, step marker
+    Program,    // GetPicaGlProgram (key + map lookup; compile if new)
+    Target,     // target, pending fills, shadow
+    State,      // binds (FBO/VAO/program/textures/image) and raster state
+    Uniforms,   // memcmp + copy into the ring + bind range
+    Vertices,   // validation, persistent geometry registration, ring, attribs
+    TexHash,    // texture content hash (only when the frame didn't bring it)
+    TexLookup,  // key + texture map lookup (includes lighting LUT)
+    TexUpload,  // new texture creation (decode + glTexImage)
+    Indices,    // copy of the indices into the ring
+    Draw,       // glDrawElements/Arrays (incl. corner passes)
+    Rest,       // whatever is left until the end of SubmitPicaDraw
     Count
 };
 inline constexpr size_t kPhaseCount = static_cast<size_t>(Phase::Count);
@@ -39,15 +39,15 @@ inline constexpr std::array<const char*, kPhaseCount> kPhaseNames{
     "tex_hash", "tex_lookup", "tex_upload", "indices", "draw",
     "rest"};
 
-// Trechos da render thread fora do draw (tempo de parede, podem aninhar).
+// Render thread stretches outside the draw (wall time, may nest).
 enum class Section : uint8_t {
-    ResolvePlans,  // planos diferidos dos quadros fechados
+    ResolvePlans,  // deferred plans of closed frames
     PinCopy,       // PinGpuCopyResources
-    SceneEnv,      // ambiente de cena / publicacao de luz
-    Execute,       // picaPresentationScheduler.Execute (inclui os draws)
-    VisualSample,  // ExecuteVisualSample inteiro (inclui PinCopy e Execute)
-    WindowAcquire, // bind + limpeza da janela: espera bloqueada pelo buffer
-                   // livre da swapchain (nwindowDequeueBuffer), nao trabalho
+    SceneEnv,      // scene environment / light publication
+    Execute,       // picaPresentationScheduler.Execute (includes the draws)
+    VisualSample,  // whole ExecuteVisualSample (includes PinCopy and Execute)
+    WindowAcquire, // bind + window clear: blocked wait for the free
+                   // swapchain buffer (nwindowDequeueBuffer), not work
     Count
 };
 inline constexpr size_t kSectionCount = static_cast<size_t>(Section::Count);
@@ -56,18 +56,18 @@ inline constexpr std::array<const char*, kSectionCount> kSectionNames{
     "resolve_plans", "pin_copy", "scene_env", "execute", "visual_sample", "acquire"};
 
 enum class Count : uint8_t {
-    Draws,            // draws medidos
-    TexLookups,       // buscas de textura
-    TexHashes,        // hashes de conteudo calculados nesta render thread
-    TexHashBytes,     // bytes hasheados
-    TexUploads,       // texturas criadas (decode + upload)
-    TexUploadBytes,   // bytes de GPU das texturas criadas
-    UniformSent,      // blocos de uniform enviados
-    UniformSentBytes, // bytes de uniform enviados
-    UniformSkipped,   // blocos iguais ao anterior (nao enviados)
+    Draws,            // measured draws
+    TexLookups,       // texture lookups
+    TexHashes,        // content hashes computed on this render thread
+    TexHashBytes,     // bytes hashed
+    TexUploads,       // textures created (decode + upload)
+    TexUploadBytes,   // GPU bytes of created textures
+    UniformSent,      // uniform blocks sent
+    UniformSentBytes, // uniform bytes sent
+    UniformSkipped,   // blocks equal to the previous one (not sent)
     UniformSkippedBytes,
-    VertexBytes,      // bytes de vertice copiados (anel/buffer proprio)
-    IndexBytes,       // bytes de indice copiados
+    VertexBytes,      // vertex bytes copied (ring/own buffer)
+    IndexBytes,       // index bytes copied
     Count
 };
 inline constexpr size_t kCountCount = static_cast<size_t>(Count::Count);
@@ -77,11 +77,11 @@ inline constexpr std::array<const char*, kCountCount> kCountNames{
     "tex_upload_bytes", "uniform_sent", "uniform_sent_bytes",
     "uniform_skipped", "uniform_skipped_bytes", "vertex_bytes", "index_bytes"};
 
-// Relogio. Ticks() e barato; TicksToNs() converte uma soma.
+// Clock. Ticks() is cheap; TicksToNs() converts a sum.
 inline uint64_t Ticks() noexcept {
 #if defined(__SWITCH__) && defined(__aarch64__)
     uint64_t value;
-    asm volatile("mrs %0, cntpct_el0" : "=r"(value)); // armGetSystemTick(): o Horizon bloqueia cntvct_el0 no EL0 (Data Abort)
+    asm volatile("mrs %0, cntpct_el0" : "=r"(value)); // armGetSystemTick(): Horizon blocks cntvct_el0 at EL0 (Data Abort)
     return value;
 #else
     return static_cast<uint64_t>(
@@ -92,7 +92,7 @@ inline uint64_t Ticks() noexcept {
 }
 inline uint64_t TicksToNs(uint64_t ticks) noexcept {
 #if defined(__SWITCH__) && defined(__aarch64__)
-    constexpr uint64_t kFrequency = 19200000ULL;  // CNTFRQ do Switch
+    constexpr uint64_t kFrequency = 19200000ULL;  // Switch CNTFRQ
     return ticks / kFrequency * 1000000000ULL +
            ticks % kFrequency * 1000000000ULL / kFrequency;
 #else
@@ -104,18 +104,18 @@ struct FrameTotals {
     std::array<uint64_t, kPhaseCount> PhaseTicks{};
     std::array<uint64_t, kSectionCount> SectionTicks{};
     std::array<uint64_t, kCountCount> Counts{};
-    uint64_t SubmitTicks = 0U;  // Begin -> End de todos os draws
+    uint64_t SubmitTicks = 0U;  // Begin -> End of all draws
 };
 
 class Tracker {
 public:
-    // Inicio de um draw: tempo desde a ultima marca nao e cobrado.
+    // Start of a draw: time since the last mark is not charged.
     void Begin(uint64_t now) noexcept {
         mStart = mLast = now;
         mOpen = true;
     }
-    // Cobra o tempo desde a marca anterior a `phase`. Fora de um draw
-    // (Begin nao chamado) nao faz nada.
+    // Charges the time since the previous mark to `phase`. Outside a draw
+    // (Begin not called) does nothing.
     void Lap(Phase phase, uint64_t now) noexcept {
         if (!mOpen) return;
         if (now > mLast) {
@@ -123,7 +123,7 @@ public:
         }
         mLast = now;
     }
-    // Fim do draw: o resto vai para Rest e o total do draw e somado.
+    // End of the draw: the remainder goes to Rest and the draw total is added.
     void End(uint64_t now) noexcept {
         if (!mOpen) return;
         Lap(Phase::Rest, now);
@@ -139,7 +139,7 @@ public:
     void AddSection(Section section, uint64_t ticks) noexcept {
         mFrame.SectionTicks[static_cast<size_t>(section)] += ticks;
     }
-    // Totais do quadro; zera para o proximo.
+    // Frame totals; resets for the next one.
     FrameTotals TakeFrame() noexcept {
         const FrameTotals result = mFrame;
         mFrame = {};
@@ -154,7 +154,7 @@ private:
     bool mOpen = false;
 };
 
-// Soma em janela (varios quadros) -> ns por fase; usado pelo relatorio.
+// Window sum (several frames) -> ns per phase; used by the report.
 struct WindowTotals {
     std::array<uint64_t, kPhaseCount> PhaseNs{};
     std::array<uint64_t, kSectionCount> SectionNs{};
@@ -173,7 +173,7 @@ struct WindowTotals {
     }
 };
 
-// Unica instancia (render thread).
+// Single instance (render thread).
 inline Tracker gTracker;
 
 } // namespace Fast::PicaDrawPhases

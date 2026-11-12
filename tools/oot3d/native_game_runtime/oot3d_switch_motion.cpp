@@ -1,9 +1,11 @@
-// Os sensores de movimento do próprio console como movimento de controle:
-// ver oot3d_switch_motion.h.
+// The console's own motion sensors as controller motion: see
+// oot3d_switch_motion.h.
 #include "oot3d_switch_motion.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cmath>
+#include <cstdio>
 
 #if defined(__SWITCH__)
 #include <switch.h>
@@ -41,9 +43,9 @@ std::size_t SwitchMotionAccumulator::Observe(std::span<const SwitchSixAxisSample
                                              std::uint64_t nowMicroseconds) noexcept {
   if (newestFirst.empty()) return 0;
   const std::uint64_t newest = newestFirst.front().SamplingNumber;
-  // Primeira leitura depois de um (re)início: a LIFO pode ainda ter o estado
-  // que o sensor deixou antes de parar, então só a posição é anotada. Um
-  // sampling number que voltou é o contador do sensor reiniciado.
+  // First read after a (re)start: the LIFO may still hold the state the
+  // sensor left before it stopped, so only the position is taken. A sampling
+  // number that went backwards is a restart of the sensor's counter.
   if (!mHasSamplingNumber || newest < mLastSamplingNumber) {
     mLastSamplingNumber = newest;
     mHasSamplingNumber = true;
@@ -95,12 +97,73 @@ ThreeDsRecomp::Input::MotionObservation SwitchMotionAccumulator::Take(
   return mLast;
 }
 
+const char *SwitchMotionSourceName(SwitchMotionSource source) noexcept {
+  switch (source) {
+  case SwitchMotionSource::None: return "none";
+  case SwitchMotionSource::FullKey: return "fullkey";
+  case SwitchMotionSource::JoyDualLeft: return "joy-dual-left";
+  case SwitchMotionSource::JoyDualRight: return "joy-dual-right";
+  case SwitchMotionSource::Handheld: return "handheld";
+  }
+  return "none";
+}
+
+std::optional<std::string> SwitchMotionLog::Observe(const SwitchMotionLogSample &sample,
+                                                    std::uint64_t nowMicroseconds) {
+  // A change waits this long after the previous line, so a state that flips
+  // every poll still gives at most one line a second.
+  constexpr std::uint64_t kChangeSpacingMicroseconds = 1'000'000;
+  const Key key{sample.Wanted,  sample.ControllerInstance, sample.Available,
+                sample.Running, sample.StartResult,        sample.GuestGyroscopeEnabled};
+  ++mPolls;
+  mWantedPolls += sample.Wanted ? 1U : 0U;
+  mSamples += sample.SamplesAdded;
+  mValidPolls += sample.GyroscopeValid ? 1U : 0U;
+  mRestarts += sample.Restarted ? 1U : 0U;
+  mPhysicalAimPolls += sample.PhysicalAim ? 1U : 0U;
+  const std::uint64_t elapsed = nowMicroseconds - mWindowStartMicroseconds;
+  const char *reason = nullptr;
+  if (!mStarted) {
+    reason = "start";
+  } else if (key != mKey && elapsed >= kChangeSpacingMicroseconds) {
+    reason = "change";
+  } else if (elapsed >= IntervalMicroseconds) {
+    if (mWantedPolls != 0U || sample.GuestGyroscopeSamples != mGuestSamplesAtWindowStart) reason = "interval";
+  }
+  std::optional<std::string> line;
+  if (reason != nullptr) {
+    char text[512];
+    std::snprintf(text, sizeof(text),
+                  "motion: reason=%s pad=%" PRId32 " wanted=%d available=%s sensor=%s start_rc=0x%" PRIX32
+                  " window_s=%.1f polls=%" PRIu64 " wanted_polls=%" PRIu64 " samples=%" PRIu64
+                  " valid=%" PRIu64 " restarts=%" PRIu64 " physical_aim=%" PRIu64 " guest_gyro=%s guest_ring=%" PRIu64
+                  " guest_nonzero=%" PRIu64,
+                  reason, sample.ControllerInstance, sample.Wanted ? 1 : 0, SwitchMotionSourceName(sample.Available),
+                  SwitchMotionSourceName(sample.Running), sample.StartResult,
+                  mStarted ? static_cast<double>(elapsed) * 1e-6 : 0.0, mPolls, mWantedPolls, mSamples, mValidPolls,
+                  mRestarts, mPhysicalAimPolls, sample.GuestGyroscopeEnabled ? "on" : "off",
+                  sample.GuestGyroscopeSamples - mGuestSamplesAtWindowStart,
+                  sample.GuestNonzeroGyroscopeSamples - mGuestNonzeroAtWindowStart);
+    line.emplace(text);
+    mKey = key;
+    mStarted = true;
+  } else if (elapsed < IntervalMicroseconds) {
+    return line;
+  }
+  // A line was written, or a quiet interval ended without one: a new window.
+  mWindowStartMicroseconds = nowMicroseconds;
+  mPolls = mWantedPolls = mSamples = mValidPolls = mRestarts = mPhysicalAimPolls = 0U;
+  mGuestSamplesAtWindowStart = sample.GuestGyroscopeSamples;
+  mGuestNonzeroAtWindowStart = sample.GuestNonzeroGyroscopeSamples;
+  return line;
+}
+
 #if defined(__SWITCH__)
 namespace {
 
-enum class MotionSource : std::uint8_t { None, FullKey, JoyDualLeft, JoyDualRight, Handheld };
+using MotionSource = SwitchMotionSource;
 
-// Reinicia um sensor cujos dados pararam no máximo com esta frequência.
+// Restart a sensor whose data stalled at most this often.
 constexpr std::uint64_t kRestartIntervalMicroseconds = 1'000'000;
 
 struct SwitchMotionProvider {
@@ -108,19 +171,20 @@ struct SwitchMotionProvider {
   bool HandheldReady = false;
   bool FullKeyReady = false;
   bool JoyDualReady = false;
-  // Nunca usado sem a flag Ready: a libnx aborta o app num handle com índice
-  // de estilo inválido.
+  // Never used unless its Ready flag is set: libnx aborts the app on a
+  // handle with an invalid style index.
   HidSixAxisSensorHandle Handheld{};
   HidSixAxisSensorHandle FullKey{};
   HidSixAxisSensorHandle JoyDual[2]{};
   MotionSource Started = MotionSource::None;
-  // O sensor atual informou dado válido desde que foi ligado pela última vez.
+  // hidStartSixAxisSensor's result for Started.
+  Result StartResult = 0;
+  // The current sensor has reported valid data since it last started.
   bool HadData = false;
   std::uint64_t StartedMicroseconds = 0;
   AppletHookCookie Hook{};
-  // Marcado pelo hook do applet (troca de foco, volta do sleep); lido pela
-  // leitura. Os dois rodam na thread do jogo (o pump do SDL chama o
-  // appletMainLoop); atômico mesmo assim.
+  // Set by the applet hook (focus change, resume); read by the poll. Both run
+  // on the game thread (SDL's pump calls appletMainLoop), atomic regardless.
   std::atomic<bool> RestartRequested{false};
   SwitchMotionAccumulator Accumulator;
 };
@@ -143,7 +207,7 @@ void OnAppletHook(AppletHookType hook, void* param) {
 void RequestHandles(SwitchMotionProvider& provider) {
   if (provider.HandlesRequested) return;
   provider.HandlesRequested = true;
-  // Calculado pela libnx sem IPC; só falha em estilo não suportado.
+  // Computed by libnx without IPC; fails only for unsupported styles.
   provider.HandheldReady = R_SUCCEEDED(hidGetSixAxisSensorHandles(
       &provider.Handheld, 1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld));
   provider.FullKeyReady = R_SUCCEEDED(hidGetSixAxisSensorHandles(
@@ -192,11 +256,11 @@ void Stop(SwitchMotionProvider& provider) {
   provider.Started = MotionSource::None;
 }
 
-// Um início que falhou é tentado de novo pela checagem de dados parados do
-// PollSwitchMotion.
+// A failed start is retried by the stall check of PollSwitchMotion.
 void Start(SwitchMotionProvider& provider, MotionSource source, std::uint64_t now) {
+  provider.StartResult = 0;
   if (source == MotionSource::None) return;
-  hidStartSixAxisSensor(HandleFor(provider, source));
+  provider.StartResult = hidStartSixAxisSensor(HandleFor(provider, source));
   provider.Started = source;
   provider.StartedMicroseconds = now;
   provider.Accumulator.Reset(now);
@@ -204,10 +268,10 @@ void Start(SwitchMotionProvider& provider, MotionSource source, std::uint64_t no
 
 } // namespace
 
-bool SwitchMotionSensorConnected() noexcept {
+SwitchMotionSource SwitchMotionAvailableSource() noexcept {
   auto& provider = Provider();
   RequestHandles(provider);
-  return SelectSource(provider) != MotionSource::None;
+  return SelectSource(provider);
 }
 
 SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
@@ -216,8 +280,8 @@ SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
   SwitchMotionPoll result;
   const std::uint64_t now = NowMicroseconds();
   const bool inFocus = appletGetFocusState() == AppletFocusState_InFocus;
-  // Fora de foco (menu HOME, sleep, o applet de controles) o sensor fica
-  // parado; volta a ligar na primeira leitura com o foco de volta.
+  // Out of focus (HOME menu, sleep, the controller applet) the sensor is
+  // stopped; it starts again on the first poll back in focus.
   const MotionSource target = wanted && inFocus ? SelectSource(provider) : MotionSource::None;
   const bool restart = inFocus && provider.RestartRequested.exchange(false, std::memory_order_relaxed);
   if (target != provider.Started || (restart && target != MotionSource::None)) {
@@ -226,7 +290,10 @@ SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
     result.SourceChanged = true;
     provider.HadData = false;
   }
-  if (provider.Started == MotionSource::None) return result;
+  if (provider.Started == MotionSource::None) {
+    result.StartResult = provider.StartResult;
+    return result;
+  }
 
   HidSixAxisSensorState states[17];
   const size_t count = hidGetSixAxisSensorStates(HandleFor(provider, provider.Started), states,
@@ -240,20 +307,23 @@ SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
                       {state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z},
                       (state.attributes & HidSixAxisSensorAttribute_IsConnected) != 0};
   }
-  provider.Accumulator.Observe(std::span(samples.data(), std::min(count, samples.size())), now);
+  result.SamplesAdded = provider.Accumulator.Observe(std::span(samples.data(), std::min(count, samples.size())), now);
   result.Motion = provider.Accumulator.Take(consume, now);
   if (result.Motion.GyroscopeValid) provider.HadData = true;
-  // Dados que pararam de chegar (sensor que não sobreviveu a uma troca de
-  // modo, ou volta do sleep sem mensagem de foco): liga de novo. Só o
-  // primeiro reinício depois de dado real zera a pose de quem chamou; as
-  // novas tentativas de um sensor que nunca responde não zeram.
+  // Data that stopped arriving (a sensor that did not survive a mode change
+  // or a resume without a focus message): start it again. Only the first
+  // restart after real data resets the caller's pose; retries of a sensor
+  // that never answers do not.
   if (provider.Accumulator.Stale(now) && now - provider.StartedMicroseconds > kRestartIntervalMicroseconds) {
     const MotionSource source = provider.Started;
     Stop(provider);
     Start(provider, source, now);
     result.SourceChanged = provider.HadData;
+    result.Restarted = true;
     provider.HadData = false;
   }
+  result.Running = provider.Started;
+  result.StartResult = provider.StartResult;
   return result;
 }
 #endif

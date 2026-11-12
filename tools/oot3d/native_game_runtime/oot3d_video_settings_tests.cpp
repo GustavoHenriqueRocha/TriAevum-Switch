@@ -56,6 +56,17 @@ int main() {
     Require(!std::filesystem::exists(dir / "fps60"), "fps60 removed");
     Require(VideoSettings::Load(dir) == saved, "round trip without fps60");
 
+    // drs_60: "full" only when Full (Resolution at 60 FPS).
+    saved.FullResolution60 = true;
+    Require(saved.Save(dir).empty(), "save drs_60");
+    Require(VideoSettings::Load(dir) == saved, "round trip with drs_60");
+    saved.FullResolution60 = false;
+    Require(saved.Save(dir).empty(), "save without drs_60");
+    Require(!std::filesystem::exists(dir / "drs_60"), "drs_60 removed");
+    WriteText(dir / "drs_60", "dynamic\n");
+    Require(!VideoSettings::Load(dir).FullResolution60, "drs_60 dynamic");
+    std::filesystem::remove(dir / "drs_60");
+
     // Upscaler, sharpen and anisotropy: files only away from the default.
     saved.Upscaler = VideoSettings::Upscale::Linear;
     saved.Anisotropy = false;
@@ -74,6 +85,12 @@ int main() {
     Require(VideoSettings::Load(dir).Upscaler == VideoSettings::Upscale::FsrSharpen, "FSR1 is fsr");
     WriteText(dir / "anisotropy", "8");
     Require(VideoSettings::Load(dir).Anisotropy, "8x counts as on");
+
+    // Upscaling only means something on OpenGL; deko3d shows it disabled.
+    Require(VideoSettings::UpscalerApplies(false), "upscaler applies on OpenGL");
+    Require(!VideoSettings::UpscalerApplies(true), "upscaler has no effect on deko3d");
+    Require(std::string(VideoSettings::kUpscalerDeko3dNote).find("deko3d") != std::string::npos,
+            "deko3d note names the renderer");
 
     std::filesystem::remove_all(dir);
   } catch (const std::exception &error) {

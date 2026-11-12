@@ -1,11 +1,16 @@
 // CTR host services of the native A32 process: SVC dispatch, handles and kernel objects, GSP
 // framebuffers and interrupts, memory, timing. Services: oot3d_native_a32_ctr_host_*.cpp.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_native_a32_ctr_save_safety.h"
 #include "oot3d_native_a32_ctr_system_archives.h"
 
 #include <algorithm>
 #include <cstdio>
+
+#if !defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)
+#include <spdlog/spdlog.h>
+#endif
 
 namespace Oot3dNativeGame {
 namespace {
@@ -65,6 +70,39 @@ const char* CtrSvcName(uint32_t immediate) {
 
 } // namespace
 
+std::string NativeA32CtrSvcEventName(const NativeA32CtrSvcEvent& event) {
+    const auto& words = event.NameWords;
+    switch (event.NameKind) {
+    case NativeA32CtrSvcEventNameKind::Text:
+        return event.Name;
+    case NativeA32CtrSvcEventNameKind::ArbitrateAddress: {
+        std::string name = "ArbitrateAddress:address=0x";
+        AppendHex8(name, static_cast<uint32_t>(words[0]));
+        name += ":type=" + std::to_string(static_cast<uint32_t>(words[1])) +
+                ":value=" + std::to_string(static_cast<int32_t>(words[2]));
+        return name;
+    }
+    case NativeA32CtrSvcEventNameKind::SleepThreadTimed:
+        return "SleepThread:nanoseconds=" + std::to_string(static_cast<int64_t>(words[0])) +
+               ":ticks=" + std::to_string(words[1]) + ":wake=" + std::to_string(words[2]);
+    case NativeA32CtrSvcEventNameKind::SleepThreadInfinite:
+        return "SleepThread:infinite";
+    case NativeA32CtrSvcEventNameKind::SleepThreadYield:
+        return "SleepThread:yield=" + std::to_string(static_cast<int64_t>(words[0]));
+    }
+    return event.Name;
+}
+
+namespace {
+
+void MaterializeSvcEventName(NativeA32CtrSvcEvent& event) {
+    if (event.NameKind == NativeA32CtrSvcEventNameKind::Text) return;
+    event.Name = NativeA32CtrSvcEventName(event);
+    event.NameKind = NativeA32CtrSvcEventNameKind::Text;
+}
+
+} // namespace
+
 detail::NativeA32CtrSvcEventHistory::NativeA32CtrSvcEventHistory(
     bool retainFullHistory, bool collectIpcNameCounts,
     size_t threadCapacityHint)
@@ -115,6 +153,7 @@ void detail::NativeA32CtrSvcEventHistory::push_back(
         ++mIpcNameCounts[event.Name];
     }
     if (mRetainFullHistory) {
+        MaterializeSvcEventName(event);
         mFullEvents.push_back(std::move(event));
         return;
     }
@@ -179,6 +218,7 @@ detail::NativeA32CtrSvcEventHistory::Events() const {
     for (auto candidate = mSnapshotCandidates.begin(); candidate != uniqueEnd;
          ++candidate) {
         mSnapshot.push_back((*candidate)->Event);
+        MaterializeSvcEventName(mSnapshot.back());
     }
     mSnapshotDirty = false;
     return mSnapshot;
@@ -203,7 +243,21 @@ NativeA32CtrHostServices::NativeA32CtrHostServices(
                  config.ProfileRuntime || config.CollectIpcNameCounts,
                  static_cast<size_t>(config.ResourceLimitValues[2])),
       mConfig(std::move(config)),
-      mLinearHeapCursor(mConfig.LinearHeapBaseAddress) {}
+      mLinearHeapCursor(mConfig.LinearHeapBaseAddress) {
+    // An overlay composes the image-path service view; it never applies to a
+    // module filesystem backend, and it must describe this image's view.
+    if (mConfig.RomFsOverlay &&
+        (mConfig.Filesystem != nullptr || mConfig.RomFsImagePath.empty() ||
+         mConfig.RomFsOverlay->BaseViewSize() != mConfig.RomFsImageSize)) {
+        throw std::invalid_argument(
+            "RomFS overlay requires the matching RomFS image service view");
+    }
+}
+
+uint64_t NativeA32CtrHostServices::RomFsServiceViewSize() const noexcept {
+    return mConfig.RomFsOverlay ? mConfig.RomFsOverlay->ViewSize()
+                                : mConfig.RomFsImageSize;
+}
 
 bool NativeA32CtrHostServices::HasPicaBackend() const noexcept {
 #if defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)
@@ -312,11 +366,27 @@ uint32_t NativeA32CtrHostServices::CreateHandle(
         mNextGeneration = 1;
     }
     mHandles.push_back({value, object});
+    ++mHandlesVersion;
     return value;
 }
 
 const NativeA32CtrHostServices::HandleRecord*
 NativeA32CtrHostServices::LookupHandle(uint32_t handle) const {
+    if (mConfig.FastSvc) {
+        // An entry holds the first match's index while the table is
+        // unchanged (any create or close moves the version on).
+        auto& entry = mHandleCache[(handle ^ (handle >> 15U)) % mHandleCache.size()];
+        if (entry.Version == mHandlesVersion && entry.Value == handle) {
+            return &mHandles[entry.Index];
+        }
+        for (size_t index = 0; index < mHandles.size(); ++index) {
+            if (mHandles[index].Value == handle) {
+                entry = {handle, static_cast<uint32_t>(index), mHandlesVersion};
+                return &mHandles[index];
+            }
+        }
+        return nullptr;
+    }
     for (const auto& record : mHandles) {
         if (record.Value == handle) {
             return &record;
@@ -337,11 +407,7 @@ bool NativeA32CtrHostServices::IsHandleType(uint32_t handle,
 
 std::optional<std::string>
 NativeA32CtrHostServices::LookupHandleType(uint32_t handle) const {
-    for (const auto& record : mHandles) {
-        if (record.Value == handle) {
-            return record.Object->Type;
-        }
-    }
+    if (const auto* record = LookupHandle(handle)) return record->Object->Type;
     return std::nullopt;
 }
 
@@ -563,9 +629,10 @@ bool NativeA32CtrHostServices::CloseHandle(uint32_t handle) {
         if (record->Value == handle) {
             const auto object = record->Object;
             mHandles.erase(record);
-            // svcCloseHandle do último handle de um arquivo do save sem
-            // FSFILE_Close: conta como Close (confirma se era o último
-            // escritor da transação; oot3d_native_a32_ctr_save_safety.h).
+            ++mHandlesVersion;
+            // svcCloseHandle of the last handle of a save file without
+            // FSFILE_Close: counts as Close (commits if it was the last
+            // writer of the transaction; oot3d_native_a32_ctr_save_safety.h).
             if (object && object->Type == "client_session:file:savedata" && !object->FileClosed &&
                 object->SaveJournalWriter != 0U &&
                 std::none_of(mHandles.begin(), mHandles.end(),
@@ -696,7 +763,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvc(
             std::ostringstream error;
             error << "TRIAEVUM_HOST_REQUEST_UNSERVED svc=0x" << std::hex << immediate
                   << " pc=0x" << state.r[15] << std::dec << " thread=" << context.ThreadId;
-            if (event) error << " request=" << std::quoted(event->Name)
+            if (event) error << " request=" << std::quoted(NativeA32CtrSvcEventName(*event))
                              << " detail=0x" << std::hex << event->Detail;
             std::fprintf(stderr, "%s\n", error.str().c_str());
             return {NativeA32HostAction::Fault, std::nullopt, 0U, error.str()};
@@ -729,12 +796,26 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         }
         std::string threadError;
         const auto threadId = context.Process.CreateThread(
-            {state.r[1], state.r[2], state.r[3], 0x10U, 0x03C00000U, priority},
+            {state.r[1], state.r[2], state.r[3], 0x10U, 0x03C00000U, priority,
+             processorId},
             &threadError);
         if (!threadId.has_value()) {
             event.Detail = 1;
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
+        }
+        // Which guest threads exist and the core each asked for (processor 1
+        // runs on the second core's host thread with config/second_core, the
+        // rest on the game thread); warning level, because the release logger
+        // drops info.
+        {
+            const std::string line = FormatNativeA32GuestThreadCreated(
+                *threadId, state.r[1], priority, processorId, state.r[3]);
+#if defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)
+            std::fprintf(stderr, "%s\n", line.c_str());
+#else
+            SPDLOG_WARN("{}", line);
+#endif
         }
         state.r[0] = kResultSuccess;
         state.r[1] = CreateHandle("thread", *threadId);
@@ -749,7 +830,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             static_cast<uint64_t>(state.r[0]) |
             (static_cast<uint64_t>(state.r[1]) << 32U);
         const int64_t nanoseconds = static_cast<int64_t>(rawNanoseconds);
-        event.Name = "SleepThread";
+        // config/kernel_svc: the event keeps its numbers (name written when
+        // read, NativeA32CtrSvcEventName).
+        const bool numbersOnly = mConfig.FastSvc;
+        if (!numbersOnly) event.Name = "SleepThread";
         if (nanoseconds > 0) {
             const uint64_t ticks =
                 NanosecondsToCtrTicks(static_cast<uint64_t>(nanoseconds));
@@ -763,19 +847,31 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             });
             mSleepWaiters.push_back(
                 {&context.Process, context.ThreadId, wakeTick});
-            event.Name += ":nanoseconds=" + std::to_string(nanoseconds) +
-                          ":ticks=" + std::to_string(ticks) +
-                          ":wake=" + std::to_string(wakeTick);
+            if (numbersOnly) {
+                event.NameKind = NativeA32CtrSvcEventNameKind::SleepThreadTimed;
+                event.NameWords = {rawNanoseconds, ticks, wakeTick};
+            } else {
+                event.Name += ":nanoseconds=" + std::to_string(nanoseconds) +
+                              ":ticks=" + std::to_string(ticks) +
+                              ":wake=" + std::to_string(wakeTick);
+            }
             event.Detail = static_cast<uint32_t>(ticks);
             event.Handled = true;
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
         if (nanoseconds == -1) {
-            event.Name += ":infinite";
+            if (numbersOnly) {
+                event.NameKind = NativeA32CtrSvcEventNameKind::SleepThreadInfinite;
+            } else {
+                event.Name += ":infinite";
+            }
             event.Handled = true;
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
+        } else if (numbersOnly) {
+            event.NameKind = NativeA32CtrSvcEventNameKind::SleepThreadYield;
+            event.NameWords[0] = rawNanoseconds;
         } else {
             event.Name += ":yield=" + std::to_string(nanoseconds);
         }
@@ -963,16 +1059,21 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};
     case 0x22: {
-        event.Name = "ArbitrateAddress";
         const auto* record = LookupHandle(state.r[0]);
         const uint32_t address = state.r[1];
         const uint32_t type = state.r[2];
         const int32_t value = static_cast<int32_t>(state.r[3]);
         event.Detail = type;
-        event.Name += ":address=0x";
-        AppendHex8(event.Name, address);
-        event.Name += ":type=" + std::to_string(type) +
-                      ":value=" + std::to_string(value);
+        if (mConfig.FastSvc) {
+            // config/kernel_svc: the name is written when read.
+            event.NameKind = NativeA32CtrSvcEventNameKind::ArbitrateAddress;
+            event.NameWords = {address, type, state.r[3]};
+        } else {
+            event.Name = "ArbitrateAddress:address=0x";
+            AppendHex8(event.Name, address);
+            event.Name += ":type=" + std::to_string(type) +
+                          ":value=" + std::to_string(value);
+        }
         if (record == nullptr || record->Object->Type != "address_arbiter" ||
             type > 4U || !memory.IsMapped(address, sizeof(uint32_t))) {
             mSvcEvents.push_back(std::move(event));
@@ -1028,6 +1129,53 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             return {NativeA32HostAction::Resume};
         }
 
+        const bool decrement = type == 2U || type == 4U;
+        if (SecondCore::Active()) {
+            // With the second core on, the other core may LDREX/STREX the
+            // word right now: read it atomically and, for
+            // DecrementAndWaitIfLessThan, compare and decrement as the CTR
+            // kernel does, with an exclusive pair on the calling core (the
+            // global monitor). The wake-up stays race-free because the
+            // check and the parking below both happen under the kernel lock,
+            // which a signal (type 0) needs as well.
+            for (;;) {
+                uint64_t loaded = 0U;
+                uint64_t token = 0U;
+                uint32_t faultAddress = address;
+                if (!memory.LoadExclusive(address, 4U, &loaded, &token,
+                                          &faultAddress)) {
+                    mSvcEvents.push_back(std::move(event));
+                    return {NativeA32HostAction::Wait};
+                }
+                const int32_t memoryValue = static_cast<int32_t>(loaded);
+                if (memoryValue >= value) {
+                    SecondCore::ClearExclusive();
+                    state.r[0] = kResultSuccess;
+                    event.Handled = true;
+                    mSvcEvents.push_back(std::move(event));
+                    return {NativeA32HostAction::Resume};
+                }
+                if (!decrement) {
+                    SecondCore::ClearExclusive();
+                    break;
+                }
+                const auto stored = memory.StoreExclusive(
+                    address, 4U, static_cast<uint32_t>(memoryValue - 1), token,
+                    &faultAddress);
+                if (stored == oot3d::recomp::a32::ExclusiveStoreResult::MemoryFault) {
+                    mSvcEvents.push_back(std::move(event));
+                    return {NativeA32HostAction::Wait};
+                }
+                if (stored == oot3d::recomp::a32::ExclusiveStoreResult::Success) {
+                    break;
+                }
+            }
+            mArbiterWaiters.push_back(
+                {record->Object, &context.Process, context.ThreadId, address});
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
         uint32_t memoryValueRaw = 0;
         if (!memory.Read32(address, &memoryValueRaw)) {
             mSvcEvents.push_back(std::move(event));
@@ -1035,7 +1183,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         }
         const int32_t memoryValue = static_cast<int32_t>(memoryValueRaw);
         if (memoryValue < value) {
-            if ((type == 2U || type == 4U) &&
+            if (decrement &&
                 !memory.Write32(address,
                                 static_cast<uint32_t>(memoryValue - 1))) {
                 mSvcEvents.push_back(std::move(event));
@@ -1967,6 +2115,51 @@ uint32_t NativeA32CtrHostServices::TakePendingDspAudioFrames() {
 
 bool NativeA32CtrHostServices::SignalDspAudioFrame() {
     return mDspAudioRunning && SignalDspInterrupt(2U, kDspAudioPipe);
+}
+
+bool NativeA32CtrHostServices::DspAudioInterruptHasCore0Waiter() const {
+    const auto& event = mDspInterruptEvents[2U][kDspAudioPipe];
+    if (event == nullptr) return false;
+    for (const auto& waiter : mSynchronizationWaiters) {
+        if (waiter.Process != nullptr && waiter.Process->ThreadHostCore(waiter.ThreadId) == 0U &&
+            std::find(waiter.Objects.begin(), waiter.Objects.end(), event) !=
+                waiter.Objects.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NativeA32CtrHostServices::SvcWaitsOnDspAudioInterrupt(
+    uint32_t immediate, const oot3d::recomp::a32::GuestState& state,
+    const NativeA32Memory& memory) const {
+    const auto& event = mDspInterruptEvents[2U][kDspAudioPipe];
+    if (event == nullptr) return false;
+    const auto lists = [&](uint32_t handle) {
+        const auto* record = LookupHandle(handle);
+        return record != nullptr && record->Object == event;
+    };
+    switch (immediate & 0xFFU) {
+    case 0x24U:
+        return lists(state.r[0]);
+    case 0x25U: {
+        const uint32_t count = state.r[2];
+        if (count > 0x40U) return false;  // refused before any handle is read
+        // The view resolves pending device writes as the SVC's own reads
+        // will, and counts no watched read.
+        const auto handles =
+            memory.SynchronousReadView(state.r[1], static_cast<size_t>(count) * 4U);
+        if (handles.size() != static_cast<size_t>(count) * 4U) return true;
+        for (uint32_t index = 0; index < count; ++index) {
+            uint32_t handle = 0;
+            std::memcpy(&handle, handles.data() + index * 4U, sizeof(handle));
+            if (lists(handle)) return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
 }
 
 NativeA32CtrHidRuntimeProfile

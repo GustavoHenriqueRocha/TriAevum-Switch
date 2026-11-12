@@ -44,8 +44,13 @@ void Require(bool condition, std::string_view message) {
     }
 }
 
+// Every test runs twice: with the SVC fast paths off and on
+// (config/kernel_svc); both must give the same registers, events and state.
+bool gFastSvc = false;
+
 NativeA32CtrHostConfig MakeConfig() {
     NativeA32CtrHostConfig config;
+    config.FastSvc = gFastSvc;
     config.ResourceLimitValues = {
         0x18, 0x04000000, 0x20, 0x20, 0x20,
         0x08, 0x08,       0x10, 0x02, 0,
@@ -2294,7 +2299,215 @@ void TestCfgAzaharDefaultBlocks() {
             "cfg block 0x00150002 (server type) is not L1");
 }
 
-int main() {
+// svcCreateThread passes the requested processor (r4) to the guest-thread
+// profile, next to the guest_thread: log line.
+void TestCreateThreadProcessor() {
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32CtrHostServices host(MakeConfig());
+    NativeA32Process process(registry, host);
+    const std::array<uint8_t, 0x10> code{};
+    std::string error;
+    Require(process.MapRegion({"text", 0x00100000, code.size(), false, true, code},
+                              &error) &&
+                process.MapRegion({"data", 0x00200000, 0x1000, true, false, {}},
+                                  &error) &&
+                process.CreatePrimaryThread(
+                    {0x00100000, 0x00300000, 0x1000, 0x00400000, 0x1000, 0, 0,
+                     0x10U, 0x03C00010U, 0x30U},
+                    &error),
+            error);
+    NativeA32HostContext context{process, 0};
+    GuestState state{};
+    state.r[0] = 0x18;        // priority
+    state.r[1] = 0x00100000;  // entry
+    state.r[2] = 7;           // argument
+    state.r[3] = 0x00200400;  // stack top
+    state.r[4] = 1;           // processor
+    Require(host.HandleSvc(0x08, state, process.Memory(), context).Action ==
+                    NativeA32HostAction::Resume &&
+                state.r[0] == 0 && process.ThreadCount() == 2U,
+            "CreateThread did not create the guest thread");
+    Require(process.GuestThreadProfile().ProcessorIds[0] == -2 &&
+                process.GuestThreadProfile().ProcessorIds[1] == 1,
+            "CreateThread did not record the requested processor");
+    state.r[0] = 0x18;
+    state.r[1] = 0x00100000;  // r1 came back as the thread handle
+    state.r[4] = static_cast<uint32_t>(-1);
+    Require(host.HandleSvc(0x08, state, process.Memory(), context).Action ==
+                    NativeA32HostAction::Resume &&
+                process.GuestThreadProfile().ProcessorIds[2] == -1,
+            "CreateThread did not record processor -1 as signed");
+}
+
+// config/kernel_svc: the same random SVC sequence (ArbitrateAddress,
+// SleepThread, WaitSynchronizationN, events, handles created and closed
+// between lookups) on two hosts, fast paths off and on, must leave the same
+// results, registers, guest memory, kernel state and SVC event history after
+// every call.
+void TestFastSvcEquivalence() {
+    struct Side {
+        explicit Side(bool fast) : host([fast] {
+                                       auto config = MakeConfig();
+                                       config.FastSvc = fast;
+                                       return config;
+                                   }()),
+                                   process(registry, host) {
+            const std::array<uint8_t, 0x10> code{};
+            std::string error;
+            Require(process.MapRegion({"text", 0x00100000, code.size(), false, true, code},
+                                      &error) &&
+                        process.MapRegion({"data", 0x00200000, 0x1000, true, false, {}},
+                                          &error) &&
+                        process.CreatePrimaryThread({0x00100000, 0x00300000, 0x1000, 0x00400000,
+                                                     0x1000, 0, 0, 0x10U, 0x03C00010U, 0x30U},
+                                                    &error),
+                    error);
+        }
+        oot3d::recomp::a32::Registry registry{};
+        NativeA32CtrHostServices host;
+        NativeA32Process process;
+    };
+    Side slow(false);
+    Side fast(true);
+    uint64_t random = 0x9E3779B97F4A7C15ULL;
+    const auto next = [&random](uint32_t bound) {
+        random ^= random << 13U;
+        random ^= random >> 7U;
+        random ^= random << 17U;
+        return static_cast<uint32_t>(random % bound);
+    };
+    std::vector<uint32_t> handles;  // the same values on both sides
+    const auto call = [&](uint32_t immediate, GuestState state, uint32_t threadId,
+                          const char* what) {
+        GuestState slowState = state;
+        GuestState fastState = state;
+        NativeA32HostContext slowContext{slow.process, threadId};
+        NativeA32HostContext fastContext{fast.process, threadId};
+        const auto a = slow.host.HandleSvc(immediate, slowState, slow.process.Memory(),
+                                           slowContext);
+        const auto b = fast.host.HandleSvc(immediate, fastState, fast.process.Memory(),
+                                           fastContext);
+        const std::string where = std::string(what) + " (fast SVC equivalence)";
+        Require(a.Action == b.Action && a.ResumePc == b.ResumePc && a.Detail == b.Detail &&
+                    a.Error == b.Error,
+                "result differs: " + where);
+        Require(slowState.r == fastState.r && slowState.cpsr == fastState.cpsr,
+                "registers differ: " + where);
+        Require(slow.process.StateFingerprint() == fast.process.StateFingerprint(),
+                "guest state differs: " + where);
+        Require(slow.host.CaptureState().dump() == fast.host.CaptureState().dump(),
+                "kernel state differs: " + where);
+        const auto& slowEvents = slow.host.SvcEvents();
+        const auto& fastEvents = fast.host.SvcEvents();
+        Require(slowEvents.size() == fastEvents.size(), "event count differs: " + where);
+        for (size_t index = 0; index < slowEvents.size(); ++index) {
+            const auto& x = slowEvents[index];
+            const auto& y = fastEvents[index];
+            Require(x.Immediate == y.Immediate && x.Pc == y.Pc && x.ThreadId == y.ThreadId &&
+                        x.Handled == y.Handled && x.Detail == y.Detail && x.Name == y.Name &&
+                        y.NameKind == NativeA32CtrSvcEventNameKind::Text,
+                    "event differs: " + where + ": " + x.Name + " / " + y.Name);
+        }
+        return slowState;
+    };
+    // Two more threads (ids 1 and 2), an arbiter and a few events.
+    for (uint32_t thread = 0; thread < 2U; ++thread) {
+        GuestState state{};
+        state.r[0] = 0x20U + thread;
+        state.r[1] = 0x00100000;
+        state.r[3] = 0x00200800;
+        state.r[4] = static_cast<uint32_t>(-2);
+        call(0x08, state, 0, "CreateThread");
+    }
+    handles.push_back(call(0x21, GuestState{}, 0, "CreateAddressArbiter").r[1]);
+    const uint32_t arbiter = handles.back();
+    const auto createEvent = [&] {
+        GuestState state{};
+        state.r[0] = 0xFFFFFFFFU;  // success writes 0; a refused call leaves it
+        state.r[1] = next(2U);     // one-shot or sticky
+        const GuestState result = call(0x17, state, 0, "CreateEvent");
+        if (result.r[0] == 0U) handles.push_back(result.r[1]);
+    };
+    for (int count = 0; count < 4; ++count) createEvent();
+    const auto anyHandle = [&] {
+        const uint32_t pick = next(10U);
+        if (pick == 0U) return 0xFFFF8001U;          // the current thread: no record
+        if (pick == 1U) return 0x12345678U;          // never created
+        return handles[next(static_cast<uint32_t>(handles.size()))];
+    };
+    for (int step = 0; step < 4000; ++step) {
+        const uint32_t threadId = next(3U);
+        GuestState state{};
+        state.r[15] = 0x00100000U + 4U * next(4U);
+        switch (next(9U)) {
+        case 0:
+        case 1: {  // ArbitrateAddress: mostly valid, sometimes not
+            state.r[0] = next(8U) == 0U ? anyHandle() : arbiter;
+            state.r[1] = next(16U) == 0U ? 0x00500000U : 0x00200000U + 4U * next(8U);
+            state.r[2] = next(6U);
+            state.r[3] = static_cast<uint32_t>(static_cast<int32_t>(next(5U)) - 2);
+            call(0x22, state, threadId, "ArbitrateAddress");
+            break;
+        }
+        case 2: {  // the arbitrated words move
+            const uint32_t address = 0x00200000U + 4U * next(8U);
+            const uint32_t value = static_cast<uint32_t>(static_cast<int32_t>(next(5U)) - 2);
+            Require(slow.process.Memory().Write32(address, value) &&
+                        fast.process.Memory().Write32(address, value),
+                    "data write");
+            break;
+        }
+        case 3: {  // SleepThread: timed, infinite, yield, negative
+            static constexpr int64_t kSleeps[] = {1000, 1'000'000'000, -1, 0, -7,
+                                                  INT64_MAX};
+            const auto nanoseconds = static_cast<uint64_t>(kSleeps[next(6U)]);
+            state.r[0] = static_cast<uint32_t>(nanoseconds);
+            state.r[1] = static_cast<uint32_t>(nanoseconds >> 32U);
+            call(0x0A, state, threadId, "SleepThread");
+            break;
+        }
+        case 4: {  // WaitSynchronizationN on 0-3 handles
+            const uint32_t count = next(4U);
+            for (uint32_t index = 0; index < count; ++index) {
+                const uint32_t handle = anyHandle();
+                Require(slow.process.Memory().Write32(0x00200100U + 4U * index, handle) &&
+                            fast.process.Memory().Write32(0x00200100U + 4U * index, handle),
+                        "handle list write");
+            }
+            state.r[1] = next(16U) == 0U ? 0x00500000U : 0x00200100U;
+            state.r[2] = next(32U) == 0U ? 0x41U : count;
+            state.r[3] = next(2U);
+            call(0x25, state, threadId, "WaitSynchronizationN");
+            break;
+        }
+        case 5:
+        case 6:  // SignalEvent / ClearEvent
+            state.r[0] = anyHandle();
+            call(next(2U) == 0U ? 0x18 : 0x19, state, threadId, "Signal/ClearEvent");
+            break;
+        case 7: {  // the handle table changes under the lookup cache
+            if (next(2U) == 0U && handles.size() > 2U) {
+                const size_t index = 1U + next(static_cast<uint32_t>(handles.size() - 1U));
+                state.r[0] = handles[index];
+                call(0x23, state, 0, "CloseHandle");
+                handles.erase(handles.begin() + static_cast<std::ptrdiff_t>(index));
+            } else if (handles.size() < 12U) {
+                createEvent();
+            }
+            break;
+        }
+        default:
+            slow.host.AdvanceSystemTicks(1U + next(400000U));
+            fast.host.AdvanceSystemTicks(slow.host.SystemTicks() - fast.host.SystemTicks());
+            break;
+        }
+    }
+    std::cout << "oot3d_native_a32_ctr_host_tests: fast SVC equivalence ok ("
+              << slow.host.SvcEventCount() << " SVCs)\n";
+}
+
+void RunAllTests() {
+    TestCreateThreadProcessor();
     TestCfgAzaharDefaultBlocks();
     TestSelfNcchArchive();
     TestGuestStateDump();
@@ -2331,7 +2544,7 @@ int main() {
         "oot3d_native_a32_ctr_host_test_savedata";
     std::error_code cleanupError;
     std::filesystem::remove_all(saveDataPath, cleanupError);
-    // Backups do diário do save (<save>-backups, ao lado da pasta).
+    // Save journal backups (<save>-backups, next to the directory).
     std::filesystem::remove_all(saveDataPath.string() + "-backups", cleanupError);
     constexpr std::array<uint8_t, 16> romFsBytes{
         0x49, 0x56, 0x46, 0x43, 0x00, 0x01, 0x02, 0x03,
@@ -2538,11 +2751,11 @@ int main() {
                 memory.Read32(0x1FF82088, &response) &&
                 response == writeBytes.size(),
             "SaveData File:Write did not persist the mapped payload");
-    // 05/11 (saves à prova de perda): o backend de pasta deixou de ser
-    // write-through. Write e SetSize vão para <arquivo>.triaevum-tmp e só
-    // trocam o arquivo no Flush/Close/ControlArchive, como o save transacional
-    // do 3DS; uma queda no meio não deixa mais o save metade novo. As mesmas
-    // asserções de bytes e tamanho valem no ponto de confirmação (Flush).
+    // 11/05 (loss-proof saves): the directory backend is no longer
+    // write-through. Write and SetSize go to <file>.triaevum-tmp and only
+    // swap the file on Flush/Close/ControlArchive, like the 3DS transactional
+    // save; a crash midway no longer leaves the save half new. The same
+    // byte and size assertions hold at the commit point (Flush).
     const auto persisted = [&]() {
         std::ifstream input(saveDataPath / "test.dat", std::ios::binary);
         return std::vector<uint8_t>((std::istreambuf_iterator<char>(input)),
@@ -3213,6 +3426,24 @@ int main() {
     state.r[1] = 0x1FF82100;
     state.r[2] = 1;
     state.r[3] = 0;
+    // config/kernel_retake: the waits that list the audio interrupt (this
+    // event resets manually, as the game's: a wait leaves it signaled), and
+    // no waiter on it.
+    {
+        oot3d::recomp::a32::GuestState single = state;
+        single.r[0] = dspPipeEvent;
+        oot3d::recomp::a32::GuestState tooMany = state;
+        tooMany.r[2] = 0x41U;
+        oot3d::recomp::a32::GuestState other = state;
+        other.r[0] = dspSemaphoreEvent;
+        Require(host.SvcWaitsOnDspAudioInterrupt(0x25U, state, memory) &&
+                    host.SvcWaitsOnDspAudioInterrupt(0x24U, single, memory) &&
+                    !host.SvcWaitsOnDspAudioInterrupt(0x24U, other, memory) &&
+                    !host.SvcWaitsOnDspAudioInterrupt(0x25U, tooMany, memory) &&
+                    !host.SvcWaitsOnDspAudioInterrupt(0x18U, single, memory) &&
+                    !host.DspAudioInterruptHasCore0Waiter(),
+                "the DSP audio interrupt's waits were not told apart");
+    }
     Require(host.HandleSvc(0x25, state, memory, context).Action ==
                     NativeA32HostAction::Resume &&
                 state.r[0] == 0 && state.r[1] == 0,
@@ -3276,6 +3507,24 @@ int main() {
                 memory.Read32(0x1FF82088, &convertedDspAddress) &&
                 convertedDspAddress == 0x1FF57FFE,
             "DSP:ConvertProcessAddress did not expose the DSP RAM view");
+
+    // The ending's audio flushes and invalidates DSP-shared buffers (#104).
+    for (const auto [request, expected] :
+         {std::pair{0x00130082U, 0x00130040U}, std::pair{0x00140082U, 0x00140040U}}) {
+        Require(memory.Write32(0x1FF82080, request) &&
+                    memory.Write32(0x1FF82084, 0x1FF00000) &&
+                    memory.Write32(0x1FF82088, 0x100) &&
+                    memory.Write32(0x1FF8208C, 0) &&
+                    memory.Write32(0x1FF82090, 0xFFFF8001),
+                "cannot write DSP data-cache request");
+        state.r[0] = dspSession;
+        Require(host.HandleSvc(0x32, state, memory, context).Action ==
+                        NativeA32HostAction::Resume &&
+                    memory.Read32(0x1FF82080, &response) &&
+                    response == expected &&
+                    memory.Read32(0x1FF82084, &response) && response == 0,
+                "DSP data-cache request rejected coherent guest memory");
+    }
 
     Require(memory.Write32(0x1FF82080, 0x001F0000),
             "cannot write DSP:GetHeadphoneStatus request");
@@ -3894,6 +4143,16 @@ int main() {
     std::filesystem::remove_all(saveDataPath, removeError);
     std::filesystem::remove_all(saveDataPath.string() + "-backups", removeError);
 
+    std::cout << "oot3d_native_a32_ctr_host_tests: ok (fast SVC "
+              << (gFastSvc ? "on" : "off") << ")\n";
+}
+
+int main() {
+    for (const bool fastSvc : {false, true}) {
+        gFastSvc = fastSvc;
+        RunAllTests();
+    }
+    TestFastSvcEquivalence();
     std::cout << "oot3d_native_a32_ctr_host_tests: ok\n";
     return 0;
 }

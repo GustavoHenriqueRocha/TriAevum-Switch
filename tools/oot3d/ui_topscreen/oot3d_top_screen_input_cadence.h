@@ -20,12 +20,14 @@ class TopScreenInputCadence {
         uint32_t held = 0;
         if (input.ZrHeld) held |= ButtonMask(Button::Zr);
         if (input.ZlHeld) held |= ButtonMask(Button::Zl);
-        if (input.XHeld) held |= ButtonMask(Button::X);
-        if (input.YHeld) held |= ButtonMask(Button::Y);
         if (input.DpadLeftHeld) held |= ButtonMask(Button::DpadLeft);
         if (input.DpadRightHeld) held |= ButtonMask(Button::DpadRight);
         if (input.DpadUpHeld) held |= ButtonMask(Button::DpadUp);
         Guest.Observe(held);
+        uint32_t itemLanes = 0;
+        for (size_t lane = 0; lane < input.DpadItemHeld.size(); ++lane)
+            if (input.DpadItemHeld[lane]) itemLanes |= 1U << lane;
+        DpadItems.Observe(itemLanes);
     }
 
     TopScreenExtendedInputFrame Advance() noexcept {
@@ -34,24 +36,26 @@ class TopScreenInputCadence {
         auto result = Latest;
         result.ZrPressed = (pressed & ButtonMask(Button::Zr)) != 0;
         result.ZlPressed = (pressed & ButtonMask(Button::Zl)) != 0;
-        result.XPressed = (pressed & ButtonMask(Button::X)) != 0;
-        result.YPressed = (pressed & ButtonMask(Button::Y)) != 0;
         result.DpadLeftPressed = (pressed & ButtonMask(Button::DpadLeft)) != 0;
         result.DpadRightPressed = (pressed & ButtonMask(Button::DpadRight)) != 0;
         result.DpadUpPressed = (pressed & ButtonMask(Button::DpadUp)) != 0;
+        const auto itemLanes = DpadItems.Consume().Pressed;
+        for (size_t lane = 0; lane < result.DpadItemPressed.size(); ++lane)
+            result.DpadItemPressed[lane] = (itemLanes & (1U << lane)) != 0;
         ++Updates;
         ZrPressUpdates += result.ZrPressed;
         ZlPressUpdates += result.ZlPressed;
         return result;
     }
 
-    void Reset() noexcept { Guest.Reset(); Latest = {}; }
+    void Reset() noexcept { Guest.Reset(); DpadItems.Reset(); Latest = {}; }
     uint64_t Updates = 0;
     uint64_t ZrPressUpdates = 0;
     uint64_t ZlPressUpdates = 0;
 
   private:
     ThreeDsRecomp::Input::DigitalInputAccumulator Guest;
+    ThreeDsRecomp::Input::DigitalInputAccumulator DpadItems;
     TopScreenExtendedInputFrame Latest;
 };
 

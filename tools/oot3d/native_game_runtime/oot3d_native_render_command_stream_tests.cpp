@@ -1,4 +1,5 @@
 #include "oot3d_native_render_command_stream.h"
+#include "oot3d_native_a32_second_core.h"
 
 #include <atomic>
 #include <chrono>
@@ -215,8 +216,8 @@ void TestTwoFramesInFlight() {
     Require(stream.MaxFramesInFlight() == 1U, "zero frames in flight means one");
 }
 
-// tour24: o áudio adiado só entra antes da apresentação quando o próximo
-// fim de quadro esperaria o renderer (FrameSlotsFull).
+// tour24: deferred audio only goes in before presentation when the next
+// end of frame would wait on the renderer (FrameSlotsFull).
 void TestFrameSlotsFull() {
     NativeRenderCommandStream inlineStream(Mode::Inline, 1U);
     Require(!inlineStream.FrameSlotsFull(), "inline stream never waits for a slot");
@@ -296,6 +297,71 @@ void TestEarlyFrameSlotRelease() {
             "inline stream released a slot");
 }
 
+// config/second_core: a submission from the frame loop's level (kernel lock
+// held once) keeps the kernel lock unless it waits for a frame slot. A probe
+// thread polling the lock never gets it across thousands of submissions with
+// free slots (each release used to hand the lock to the waiting second
+// core), and does get it while the game thread waits for a full frame slot.
+void TestKernelLockKeptUnlessWaiting() {
+    namespace SecondCore = Oot3dNativeGame::SecondCore;
+    SecondCore::SetActive(true);
+    SecondCore::LockKernel();
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> probeAcquisitions{0};
+    std::thread probe([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            if (SecondCore::gKernelMutex.try_lock()) {
+                probeAcquisitions.fetch_add(1U);
+                SecondCore::gKernelMutex.unlock();
+            }
+        }
+    });
+    {
+        NativeRenderCommandStream stream(Mode::Worker, 2U);
+        std::atomic<int> executed{0};
+        for (int i = 0; i < 20000; ++i) {
+            stream.Submit([&] { executed.fetch_add(1); }, i % 4 == 3);
+            // Frame slots stay free: the worker keeps up before each frame end.
+            if (i % 4 == 2) {
+                while (executed.load() < i + 1) std::this_thread::yield();
+            }
+        }
+        Require(stream.GetWaitStats().SubmitWaits == 0U,
+                "a submission with a free frame slot waited");
+        Require(probeAcquisitions.load() == 0U,
+                "a submission that did not wait released the kernel lock");
+        Require(SecondCore::tKernelDepth == 1U, "a submission changed the kernel depth");
+        // Drain (a real wait: it releases the lock) and then take both slots
+        // with frames still running: the next frame end waits and releases
+        // the lock meanwhile.
+        stream.Drain();
+        const uint64_t waitsBefore = stream.GetWaitStats().SubmitWaits;
+        const uint64_t acquisitionsBefore = probeAcquisitions.load();
+        std::atomic<bool> release{false};
+        for (int frame = 0; frame < 2; ++frame) {
+            stream.Submit([&] {
+                while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }, true);
+        }
+        Require(stream.GetWaitStats().SubmitWaits == waitsBefore,
+                "a frame end with a free slot waited");
+        std::thread releaser([&] {
+            while (probeAcquisitions.load() == acquisitionsBefore) std::this_thread::yield();
+            release = true;
+        });
+        stream.Submit([] {}, true);
+        releaser.join();
+        Require(stream.GetWaitStats().SubmitWaits == waitsBefore + 1U,
+                "the full frame slot did not wait");
+        Require(SecondCore::tKernelDepth == 1U, "the wait did not restore the kernel depth");
+        stop = true;
+        probe.join();
+        stream.Drain();
+    }
+    SecondCore::UnlockKernel();
+    SecondCore::SetActive(false);
+}
+
 int main() {
     TestInlineRunsAtSubmission();
     TestWorkerKeepsProgramOrder();
@@ -307,6 +373,7 @@ int main() {
     TestWaitStatsAndSkippedSignals();
     TestFrameSlotsFull();
     TestEarlyFrameSlotRelease();
+    TestKernelLockKeptUnlessWaiting();
     std::cout << "oot3d_native_render_command_stream_tests: ok\n";
     return 0;
 }

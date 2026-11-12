@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Médias por janela do logs/perf.txt, só da última sessão do jogo.
+"""Per-window averages of logs/perf.txt, only from the game's last session.
 
-O perf.txt é anexado a cada execução: misturar sessões deu números errados
-(tour22 contado com o tour21 lento junto: 48 refresh perdidos/janela em vez de 4,1).
-A sessão nova começa quando host_frames volta a diminuir.
+perf.txt is appended on every run: mixing sessions gave wrong numbers
+(tour22 counted together with the slow tour21: 48 missed refreshes/window instead of 4.1).
+The new session starts when host_frames goes down again.
 
-Uso: perf_window_summary.py perf.txt [--first N] [campo ...]
+Usage: perf_window_summary.py perf.txt [--first N] [field ...]
      perf_window_summary.py --guest-spikes logs/guest_spikes_summary.txt
 """
 import re
@@ -17,7 +17,7 @@ DEFAULT_FIELDS = ["fps", "guest", "present", "total_ms", "game_cpu", "missed_ref
 
 
 def last_session(lines):
-    """Linhas de janela (host_frames=...) da última sessão."""
+    """Window lines (host_frames=...) of the last session."""
     windows, previous = [], None
     for line in lines:
         if not line.startswith("host_frames="):
@@ -45,14 +45,14 @@ def summarize(lines, fields=DEFAULT_FIELDS, first=None):
 
 
 def guest_spike_saturation(lines):
-    """Fração dos quadros que viraram pico no perfil de picos do guest.
+    """Fraction of frames that became spikes in the guest spike profile.
 
-    tour21: a instrumentação levou o guest a 39,5 ms/quadro com limite de 14 ms,
-    97% dos quadros viraram pico e o "perfil de picos" virou um perfil geral.
-    Acima de 0,5 o resultado não isola picos: subir o limite (relativo à média
-    medida com o perfil ligado) e repetir."""
+    tour21: the instrumentation took the guest to 39.5 ms/frame with a 14 ms limit,
+    97% of frames became spikes and the "spike profile" became a general profile.
+    Above 0.5 the result doesn't isolate spikes: raise the limit (relative to the average
+    measured with the profile on) and repeat."""
     for line in lines:
-        match = re.search(r"quadros=(\d+) picos=(\d+)", line)
+        match = re.search(r"frames=(\d+) spikes=(\d+)", line)
         if match and int(match.group(1)):
             return int(match.group(2)) / int(match.group(1))
     return None
@@ -63,9 +63,9 @@ def main(argv):
         with open(argv[2], errors="replace") as handle:
             ratio = guest_spike_saturation(handle)
         if ratio is None:
-            print("sem cabeçalho quadros=/picos=")
+            print("no frames=/spikes= header")
             return 2
-        print(f"picos/quadros={ratio:.2f}" + (" SATURADO: não isola picos" if ratio > 0.5 else ""))
+        print(f"spikes/frames={ratio:.2f}" + (" SATURATED: does not isolate spikes" if ratio > 0.5 else ""))
         return 1 if ratio > 0.5 else 0
     if len(argv) < 2:
         print(__doc__)
@@ -78,7 +78,7 @@ def main(argv):
         del args[index:index + 2]
     with open(argv[1], errors="replace") as handle:
         count, averages = summarize(handle, args or DEFAULT_FIELDS, first)
-    print(f"janelas={count} " + " ".join(f"{k}={v:.2f}" for k, v in averages.items()))
+    print(f"windows={count} " + " ".join(f"{k}={v:.2f}" for k, v in averages.items()))
     return 0
 
 

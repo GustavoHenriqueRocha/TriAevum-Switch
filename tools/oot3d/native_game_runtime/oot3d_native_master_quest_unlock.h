@@ -1,37 +1,39 @@
 #pragma once
 
-// Opção "liberar o Master Quest sem zerar o jogo" (config/unlock_master_quest).
+// Option "unlock Master Quest without beating the game" (config/unlock_master_quest).
 //
-// Onde o OoT3D guarda o desbloqueio (code.bin EUR canônico; o formato do
-// arquivo é o mesmo na versão USA): no arquivo de sistema "data:/system.dat"
-// do arquivo de save (34 bytes), não nos slots save00..05.bin.
+// Where OoT3D stores the unlock (canonical EUR code.bin; the file format is
+// the same in the USA version): in the system file "data:/system.dat" of the
+// save archive (34 bytes), not in the save00..05.bin slots.
 //
-//   +0x00  u8   0xBE = Master Quest desbloqueado (0x00 até zerar o jogo)
-//   +0x01  u8[30] identificador aleatório (FUN_00435274 / FUN_0042231c)
-//   +0x1F  u8   0xEF = a última escolha da tela de versões foi o Master Quest
-//   +0x20  u16  CRC-16/ARC (polinômio 0xA001 refletido, início 0) dos 34
-//               bytes com este campo zerado (FUN_002faf90), little-endian
+//   +0x00  u8   0xBE = Master Quest unlocked (0x00 until the game is beaten)
+//   +0x01  u8[30] random identifier (FUN_00435274 / FUN_0042231c)
+//   +0x1F  u8   0xEF = the last choice on the version screen was Master Quest
+//   +0x20  u16  CRC-16/ARC (reflected polynomial 0xA001, init 0) of the 34
+//               bytes with this field zeroed (FUN_002faf90), little-endian
 //
-// Na memória o arquivo vive em 0x00587934 (EUR). Quem lê o desbloqueio:
-//   FUN_003487ec  "desbloqueado?" = byte0 == 0xBE; chamado por EnMag_Init/
-//                 Update (logo do título), FUN_003480a8 (COmoteUraSelector:
-//                 escolha de duas versões ou só a normal), FileChoose_Init e o
-//                 fim do jogo (0x457820, que grava 0xBE via FUN_0047d7c4 e
-//                 salva o arquivo com FUN_002f3684 quando ainda não havia).
-//   FUN_002e63c8  modo MQ ativo = byte0 == 0xBE && byte0x1F == 0xEF; escolhe
-//                 os slots 3..5 (FileSelect_GetSlotBuffer/IsSlotValid); o
-//                 mesmo teste inline em FUN_00434f74/FUN_00483888 copia o modo
-//                 para gSaveContext.masterQuestFlag (+0x0E).
-//   O seletor grava +0x1F (FUN_0030765c = 0xEF, FUN_00307668 = 0) só na RAM.
+// In memory the file lives at 0x00587934 (EUR). Readers of the unlock:
+//   FUN_003487ec  "unlocked?" = byte0 == 0xBE; called by EnMag_Init/
+//                 Update (title logo), FUN_003480a8 (COmoteUraSelector:
+//                 choice of two versions or only the normal one),
+//                 FileChoose_Init and the game ending (0x457820, which writes
+//                 0xBE via FUN_0047d7c4 and saves the file with FUN_002f3684
+//                 when it was not set yet).
+//   FUN_002e63c8  MQ mode active = byte0 == 0xBE && byte0x1F == 0xEF; selects
+//                 slots 3..5 (FileSelect_GetSlotBuffer/IsSlotValid); the
+//                 same inline test in FUN_00434f74/FUN_00483888 copies the mode
+//                 into gSaveContext.masterQuestFlag (+0x0E).
+//   The selector writes +0x1F (FUN_0030765c = 0xEF, FUN_00307668 = 0) in RAM only.
 //
-// O jogo lê o arquivo uma única vez no boot (leitura assíncrona de 34 bytes
-// direto em 0x00587934, CRC conferido em FUN_0042231c; CRC ruim => zera e
-// gera outro identificador) e só o grava no primeiro boot (padrão, byte0 0)
-// e no fim do jogo. Por isso a opção age no serviço fs:USER do host, sem
-// tocar no código traduzido: a leitura de system.dat devolve byte0 = 0xBE
-// com o CRC refeito, e a gravação de system.dat nunca leva para o disco um
-// 0xBE que o disco não tinha. O arquivo e os saves no cartão ficam como
-// estavam; tirar a opção volta ao estado anterior (os saves MQ continuam lá).
+// The game reads the file only once at boot (async 34-byte read straight
+// into 0x00587934, CRC checked in FUN_0042231c; bad CRC => zeroes it and
+// generates a new identifier) and only writes it on first boot (default,
+// byte0 0) and at the game ending. So the option acts in the host fs:USER
+// service, without touching translated code: reading system.dat returns
+// byte0 = 0xBE with the CRC recomputed, and writing system.dat never puts on
+// disk a 0xBE the disk did not have. The file and the saves on the card stay
+// as they were; removing the option restores the previous state (the MQ
+// saves remain there).
 
 #include <array>
 #include <cstdint>
@@ -51,7 +53,7 @@ inline constexpr std::uint8_t kSystemDataMasterQuestUnlocked = 0xBEU;
 inline constexpr std::uint8_t kSystemDataMasterQuestMode = 0xEFU;
 inline constexpr std::uint32_t kSystemDataGuestAddressEur = 0x00587934U;
 
-// CRC-16/ARC (FUN_002faf90): polinômio 0xA001 refletido, início 0.
+// CRC-16/ARC (FUN_002faf90): reflected polynomial 0xA001, init 0.
 [[nodiscard]] inline std::uint16_t Crc16Arc(std::span<const std::uint8_t> data) noexcept {
     std::uint16_t crc = 0U;
     for (const std::uint8_t value : data) {
@@ -62,7 +64,7 @@ inline constexpr std::uint32_t kSystemDataGuestAddressEur = 0x00587934U;
     return crc;
 }
 
-// O CRC do system.dat: os 34 bytes com o campo do CRC zerado.
+// The system.dat CRC: the 34 bytes with the CRC field zeroed.
 [[nodiscard]] inline std::uint16_t
 SystemDataChecksum(std::span<const std::uint8_t> data) noexcept {
     std::array<std::uint8_t, kSystemDataSize> copy{};
@@ -91,15 +93,15 @@ inline void StoreSystemDataChecksum(std::span<std::uint8_t> data) noexcept {
     data[kSystemDataChecksumOffset + 1U] = static_cast<std::uint8_t>(crc >> 8U);
 }
 
-// O arquivo de sistema na raiz do arquivo de save ("/system.dat").
+// The system file at the root of the save archive ("/system.dat").
 [[nodiscard]] inline bool IsSystemDataPath(const std::filesystem::path &path) {
     return path.filename() == "system.dat";
 }
 
-// Leitura: `bytes` é o que o host vai devolver ao jogo a partir de
-// `offset`. Só mexe numa leitura do arquivo inteiro a partir do início
-// com CRC válido (um arquivo corrompido continua corrompido, e o jogo o
-// trata como sempre). Devolve true se marcou o desbloqueio.
+// Read: `bytes` is what the host will return to the game starting at
+// `offset`. Only touches a read of the whole file from the start with a
+// valid CRC (a corrupted file stays corrupted, and the game handles it as
+// always). Returns true if it set the unlock.
 inline bool ApplyMasterQuestUnlockToSystemDataRead(std::uint64_t offset,
                                                    std::span<std::uint8_t> bytes) noexcept {
     if (offset != 0U || bytes.size() < kSystemDataSize || !IsValidSystemData(bytes) ||
@@ -110,12 +112,12 @@ inline bool ApplyMasterQuestUnlockToSystemDataRead(std::uint64_t offset,
     return true;
 }
 
-// Gravação: `bytes` é o que o jogo pediu para gravar a partir de `offset`;
-// `diskFirstByte` é o byte 0 que está no disco agora (nullopt: arquivo vazio
-// ou novo). Com a opção ligada, o 0xBE na RAM veio da leitura acima, então
-// ele não vai para o disco: volta o byte do disco (0 num arquivo novo, o
-// valor do jogo sem desbloqueio) e o CRC é refeito. Um CRC já inválido na
-// gravação fica como veio. Devolve true se alterou `bytes`.
+// Write: `bytes` is what the game asked to write starting at `offset`;
+// `diskFirstByte` is the byte 0 currently on disk (nullopt: empty or new
+// file). With the option on, the 0xBE in RAM came from the read above, so it
+// does not go to disk: the disk byte is restored (0 in a new file, the game's
+// value without the unlock) and the CRC is recomputed. A CRC already invalid
+// on write is left as is. Returns true if it changed `bytes`.
 inline bool GuardMasterQuestUnlockOnSystemDataWrite(std::uint64_t offset,
                                                     std::span<std::uint8_t> bytes,
                                                     std::optional<std::uint8_t> diskFirstByte) noexcept {
@@ -128,7 +130,7 @@ inline bool GuardMasterQuestUnlockOnSystemDataWrite(std::uint64_t offset,
     return true;
 }
 
-// "1"/"y"/"t" ou arquivo vazio ligam; "0"/"n"/"f" desligam.
+// "1"/"y"/"t" or an empty file enable; "0"/"n"/"f" disable.
 [[nodiscard]] inline bool ParseMasterQuestUnlockSetting(const std::string &text) noexcept {
     for (const char c : text) {
         if (c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F')
@@ -146,14 +148,14 @@ inline int &TestOverride() noexcept {
 }
 } // namespace MasterQuestUnlockDetail
 
-// Testes: força a opção (true/false) ou volta à leitura normal (nullopt).
+// Tests: force the option (true/false) or restore normal reading (nullopt).
 inline void SetMasterQuestUnlockOptionForTesting(std::optional<bool> enabled) noexcept {
     MasterQuestUnlockDetail::TestOverride() = enabled ? (*enabled ? 1 : 0) : -1;
 }
 
-// Lido uma vez: no Switch, a presença de sdmc:/switch/oot3dre/config/
-// unlock_master_quest liga (conteúdo "0" desliga); fora dele a variável
-// TRIAEVUM_UNLOCK_MASTER_QUEST (com o mesmo formato).
+// Read once: on Switch, the presence of sdmc:/switch/oot3dre/config/
+// unlock_master_quest enables it (content "0" disables); elsewhere the
+// TRIAEVUM_UNLOCK_MASTER_QUEST variable (same format).
 [[nodiscard]] inline bool MasterQuestUnlockOptionEnabled() {
     if (const int forced = MasterQuestUnlockDetail::TestOverride(); forced >= 0)
         return forced != 0;

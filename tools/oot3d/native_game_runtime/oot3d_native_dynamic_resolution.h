@@ -50,9 +50,40 @@
 // 13-28% at 28-30 and 33-80% above. Down at pair + 3 > 28.3 (pair > 25.3),
 // up when the pair predicted at the scale above + 3 <= 26.7 (pair <= 23.7).
 //
-// Pure logic (no GL, no clock): oot3d_native_dynamic_resolution_tests.cpp.
+// deko3d (log16, 0.1.2-test.8, 07/11): every 60 FPS window sat at the floor
+// 2.25, title screen and Temple of Time included, while 30 FPS drew 3.00.
+// The calibration above is the GL timer's: down at a timed pair > 25.3 ms
+// (step frame > 12.7), up from 2.25 only with a step frame <= 10.1 ms. The
+// deko3d device times its frames itself (busy = scene + tail,
+// gfx_deko3d_device.cpp) and nothing of the pair is hidden from it: room 8
+// of the Forest Temple held 60 FPS with no in-between frame dropped and no
+// late step at busy 16.8 ms a frame (a timed pair of 33.2 of 33.3), and the
+// governor drops exactly where the timed pair passes the budget. The light
+// areas at 2.25 (title, Temple of Time: 11.1-11.9 ms a step frame, a pair
+// of 22-24 = 67-71%) could never climb. UseDeko3dDynamicResolutionTiming:
+// no hidden part, down above 92% (30.7 ms, 2.7 ms before the governor's
+// drop), up when the predicted pair fits 82% (27.3 ms: from 2.25 with a
+// step frame <= 11.9 ms). Measured cost against scale with Per-pixel
+// lighting (the same spot at 30 FPS, 3.00, and 60 FPS, 2.25): the Temple of
+// Time's scene 10.8 -> 19.5 ms (x1.81, area x1.78: no fixed part), room 8's
+// 16.2 -> 25.2 (x1.55: about 0.3 fixed); the model's 0.35 errs at most ~7%
+// low on one step up, inside the 82 -> 92% gap with room for noise (84%
+// went back and forth at the edge with +-6% jitter in the replay tests).
+// 3.00 itself costs 16-20 ms a frame there: more than a 60 Hz refresh, so
+// at 60 FPS the light areas settle at 2.5 (2.75 from ~10.4 ms at 2.25, 3.00
+// from ~8.5).
+//
+// Resolution at 60 FPS (L3+R3 > Video, config/drs_60): Dynamic (default)
+// is all of the above; Full holds MaxScale at 60 FPS (the controller is
+// configured with MinScale == MaxScale: no level to step to) so the GPU
+// clock options can be compared at full resolution. The cadence governor
+// still drops in-between frames that do not fit. 30 FPS is unaffected.
+//
+// Pure logic (no GL, no clock): oot3d_native_dynamic_resolution_tests.cpp
+// (TestLog16Deko3dReplay replays log16's windows, TestFullAtSixty).
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -82,6 +113,15 @@ struct DynamicResolutionConfig {
   // fraction of the budget.
   double GpuBoundFraction = 0.65;
 };
+
+// deko3d's own frame timing (see the top: log16). The GL backend keeps the
+// defaults above.
+inline void UseDeko3dDynamicResolutionTiming(
+    DynamicResolutionConfig &config) noexcept {
+  config.HiddenGpuMs = 0.0;
+  config.DownFraction = 0.92;
+  config.UpFraction = 0.82;
+}
 
 // Default lowest scale: three steps below the configured one (3 -> 2.25).
 inline constexpr float kDynamicResolutionDefaultSteps = 3.0F;
@@ -123,6 +163,59 @@ inline constexpr float kDynamicResolutionDefaultSteps = 3.0F;
   return std::min(scale, maxScale);
 }
 
+enum class DynamicResolutionSixtyMode : uint8_t { Dynamic, Full };
+
+// config/drs_60: "full" (any case of the first word) holds the full scale
+// at 60 FPS; absent or anything else: Dynamic.
+[[nodiscard]] inline DynamicResolutionSixtyMode ParseDynamicResolutionSixtyMode(
+    std::string_view text) noexcept {
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+    text.remove_prefix(1U);
+  if (text.size() < 4U)
+    return DynamicResolutionSixtyMode::Dynamic;
+  for (size_t i = 0; i < 4U; ++i)
+    if ((text[i] | 0x20) != "full"[i])
+      return DynamicResolutionSixtyMode::Dynamic;
+  if (text.size() > 4U && text[4] != '\r' && text[4] != '\n' &&
+      text[4] != ' ' && text[4] != '\t')
+    return DynamicResolutionSixtyMode::Dynamic;
+  return DynamicResolutionSixtyMode::Full;
+}
+
+[[nodiscard]] constexpr std::string_view DynamicResolutionSixtyModeName(
+    DynamicResolutionSixtyMode mode) noexcept {
+  return mode == DynamicResolutionSixtyMode::Full ? "full" : "dynamic";
+}
+
+// Under Full at 60 FPS: nothing to vary (MinScale == MaxScale).
+inline void ApplyDynamicResolutionSixtyMode(uint32_t rateHz,
+                                            DynamicResolutionSixtyMode mode,
+                                            DynamicResolutionConfig &config) noexcept {
+  if (rateHz == 60U && mode == DynamicResolutionSixtyMode::Full)
+    config.MinScale = config.MaxScale;
+}
+
+// L3+R3 > Video > Resolution at 60 FPS while the game runs: published by
+// the menu, read by the render thread at its next pacing check.
+struct LiveDynamicResolutionSixtyChoice {
+  std::atomic<uint8_t> Mode{0U};
+  std::atomic<uint64_t> Revision{0U};
+
+  void Publish(DynamicResolutionSixtyMode mode) noexcept {
+    Mode.store(static_cast<uint8_t>(mode), std::memory_order_relaxed);
+    Revision.fetch_add(1U, std::memory_order_release);
+  }
+  [[nodiscard]] DynamicResolutionSixtyMode Load() const noexcept {
+    return static_cast<DynamicResolutionSixtyMode>(
+        Mode.load(std::memory_order_relaxed));
+  }
+};
+
+inline LiveDynamicResolutionSixtyChoice &LiveDynamicResolutionSixty() noexcept {
+  static LiveDynamicResolutionSixtyChoice choice;
+  return choice;
+}
+
 struct DynamicResolutionStats {
   uint64_t Steps = 0;    // step-frame GPU results observed
   uint64_t Changes = 0;  // scale changes (down + up)
@@ -134,9 +227,11 @@ struct DynamicResolutionStats {
 
 class DynamicResolutionController {
 public:
-  // pairBudgetMs: two presentation periods (33.3 ms at 60 Hz).
-  void Configure(const DynamicResolutionConfig &config,
-                 double pairBudgetMs) noexcept {
+  // pairBudgetMs: two presentation periods (33.3 ms at 60 Hz). startScale:
+  // the scale to begin at (0: MaxScale); between two levels, the lower one,
+  // so a start never lies above it.
+  void Configure(const DynamicResolutionConfig &config, double pairBudgetMs,
+                 float startScale = 0.0F) noexcept {
     mConfig = config;
     if (!(mConfig.StepScale > 0.0F))
       mConfig.StepScale = 0.25F;
@@ -147,6 +242,11 @@ public:
     mLevels = std::min<uint32_t>(mLevels, kMaxLevels - 1U);
     mBudgetMs = pairBudgetMs > 0.0 ? pairBudgetMs : 1000.0 / 30.0;
     mLevel = 0U;
+    if (startScale > 0.0F && startScale < mConfig.MaxScale)
+      mLevel = std::min<uint32_t>(
+          mLevels, static_cast<uint32_t>(std::ceil(
+                       (mConfig.MaxScale - startScale) / mConfig.StepScale -
+                       1.0e-3)));
     mAverageMs = 0.0;
     mSettle = 0U;
     mOver = 0U;

@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <span>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -59,9 +61,13 @@ struct NativeActorVisibilityReservation {
     bool Extended = false;
     bool Restore = false;
     bool NativeDraw = false;
+    // Natively visible again after an extension: Actor_Draw shows the
+    // continued extension fade, written at its entry and restored after.
+    bool Handoff = false;
     uint8_t NativeState = 0U;
     uint8_t NativeFade = 0U;
     uint8_t ExtendedFade = 0U;
+    uint8_t HandoffFade = 0U;
 };
 
 struct NativeActorVisibilityRetention {
@@ -70,8 +76,20 @@ struct NativeActorVisibilityRetention {
 };
 
 struct NativeActorVisibilityState {
-    // Snapshot of the settings and presentation, taken between host frames.
-    bool ExtendedDrawDistance = false;
+    // Snapshot of the settings and presentation, taken between host frames:
+    // the forward range multiplier, 1 = the title's draw distance.
+    float DistanceMultiplier = 1.0F;
+    // SoH's Kokiri option (F1's Extended draw distance only): En_Ko, Mido and
+    // Saria stop fading by distance. Not draw-only: their fade also gates
+    // targeting (SoH z_en_ko.c), so the Switch draw distance leaves it.
+    bool NoKokiriFade = false;
+    // L3+R3 > Video > Draw distance above Original, unless
+    // config/draw_distance_native_groups: En_Wood02 groups (trees and bushes
+    // around a parent tree) also spawn their offspring in the extended volume.
+    bool ExtendGroups = false;
+    // Extension candidates drawn per walk at most, nearest first
+    // (ActorExtensionLimit of the Draw distance choice).
+    uint32_t ExtensionLimit = kActorExtensionLimit;
     // The presented view: the frustum hook widens every perspective the
     // GPU draws with, but the title builds its culling matrix separately.
     Fast::Oot3d::ScenePresentationPolicy Presentation{};
@@ -81,17 +99,43 @@ struct NativeActorVisibilityState {
     bool CullingVolumeValid = false;
     // Host-owned writes to the title's read-only distance constants.
     NativeA32Memory* HostMemory = nullptr;
-    bool Diagnostics = false;
     bool ReportedUnknownConstants = false;
     uint64_t NativeVisible = 0U;
     uint64_t NativeCulled = 0U;
     uint64_t Extended = 0U;
+    // Culling walks (Actor_DrawAll entries), for the perf.txt line.
+    uint64_t Walks = 0U;
+    // Extension candidates (culled, inside the extended volume), those past
+    // the ExtensionLimit nearest, and selected ones the light budget refused.
+    uint64_t Candidates = 0U;
+    uint64_t Capped = 0U;
+    uint64_t LightDenied = 0U;
     // Observational counts only; admission always reads the live arena. A
     // savestate load/first partial epoch cannot lend stale credits.
     uint64_t LightEpoch = 0U;
     uint32_t LightAllocations = 0U;
     uint32_t PreviousLightAllocations = 0U;
     uint32_t PeakLightAllocations = 0U;
+    // The perf.txt window: its peak and the counters at its start.
+    uint32_t WindowPeakLightAllocations = 0U;
+    struct Counters {
+        uint64_t Walks = 0U;
+        uint64_t NativeCulled = 0U;
+        uint64_t Extended = 0U;
+        uint64_t Candidates = 0U;
+        uint64_t Capped = 0U;
+        uint64_t LightDenied = 0U;
+        uint64_t BudgetDenied = 0U;
+        uint64_t BudgetLimitedWalks = 0U;
+        uint64_t BudgetInvalidWalks = 0U;
+    } WindowStart{};
+    // The settings last written to the game log (Choice 0xFF: none yet).
+    struct LoggedSettings {
+        uint8_t Choice = 0xFFU;
+        float DistanceMultiplier = 0.0F;
+        bool ExtendGroups = false;
+        bool NoKokiriFade = false;
+    } Logged{};
     uint64_t BudgetLimitedWalks = 0U;
     uint64_t BudgetDenied = 0U;
     uint64_t BudgetInvalidWalks = 0U;
@@ -111,6 +155,21 @@ struct NativeActorVisibilityState {
 // restoring it into the incoming guest memory; settings/pointers survive.
 [[nodiscard]] bool NativeActorVisibilityHasPendingRestore(const NativeActorVisibilityState& visibility) noexcept;
 void ResetNativeActorVisibilityAfterStateLoad(NativeActorVisibilityState& visibility) noexcept;
+
+// perf.txt, once per window: "actor_visibility: multiplier=.. groups=..
+// walks=.. culled=.. extended=.. candidates=.. capped=.. light_denied=..
+// denied=.. limited_walks=.. invalid_walks=.. peak_lights=.. limit=..\n",
+// counts over the window (extended: culled actors drawn anyway, by the
+// extension or the presented width; capped: candidates past the `limit`
+// nearest; light_denied: selected ones the light budget refused; denied: every
+// refusal), then starts the next window.
+[[nodiscard]] std::string TakeNativeActorVisibilityPerfLine(NativeActorVisibilityState& visibility);
+
+// The game log line for the effective settings ("draw_distance: choice=..
+// multiplier=.. groups=.. kokiri_fade=.."), when they differ from the last
+// one written (always the first time); nothing otherwise.
+[[nodiscard]] std::optional<std::string> TakeNativeActorVisibilitySettingsLine(
+    NativeActorVisibilityState& visibility, ActorDrawDistance choice);
 
 [[nodiscard]] std::span<const uint32_t> NativeActorVisibilityHookPcs() noexcept;
 

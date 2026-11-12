@@ -185,6 +185,11 @@ void N64UiFast3dRenderer::Release() noexcept {
     textures_.clear();
     failed_textures_.clear();
     prepared_keys_.clear();
+    provisional_polled_.clear();
+    drawable_keys_.clear();
+    hold_polls_.clear();
+    ahead_keys_.clear();
+    held_keys_.clear();
     staged_textures_.clear();
 }
 
@@ -199,7 +204,7 @@ void N64UiFast3dRenderer::SetTextureProvider(
 
 const N64UiFast3dRenderer::ResidentTexture*
 N64UiFast3dRenderer::ResolveTexture(const UiTextureIdentity& identity,
-                                    std::string* error) {
+                                    std::string* error, bool* held) {
     // The key in a kept string: a resident texture (every frame's case)
     // allocates nothing.
     key_scratch_.assign(identity.semantic_name);
@@ -223,6 +228,10 @@ N64UiFast3dRenderer::ResolveTexture(const UiTextureIdentity& identity,
 
     const auto staged = staged_textures_.find(semanticKey);
     if (staged == staged_textures_.end()) {
+        if (held_keys_.contains(semanticKey)) {
+            *held = true;
+            return nullptr;
+        }
         ++stats_.missing_texture_resources;
         if (error != nullptr) {
             *error = "UI texture was not prepared before rendering";
@@ -263,7 +272,7 @@ N64UiFast3dRenderer::ResolveTexture(const UiTextureIdentity& identity,
 
     ResidentTexture uploaded;
     uploaded.renderer_id = rendering_api_.CreateUiTexture(
-        pixels.rgba8, pixels.width, pixels.height, error);
+        pixels.Data(), pixels.width, pixels.height, error);
     if (uploaded.renderer_id == 0U) {
         ++stats_.unsupported_texture_resources;
         failed_textures_.insert(semanticKey);
@@ -288,22 +297,122 @@ bool DrawsPrimitive(const UiPrimitive& primitive) {
 void N64UiFast3dRenderer::Stage(PreparedUiTextures prepared) {
     for (auto& texture : prepared) {
         std::string key = texture.key;
+        if (texture.held) {
+            // Nothing to draw yet; a texture already resident for the key
+            // (resolved at an earlier provider revision) keeps drawing.
+            if (!textures_.contains(key)) {
+                held_keys_.insert(std::move(key));
+            }
+            continue;
+        }
+        held_keys_.erase(key);
+        // A payload prepared again (final pixels for a provisional one, or a
+        // new provider revision) supersedes the texture uploaded before; the
+        // backend frees it once no frame in flight reads it.
+        if (const auto resident = textures_.find(key);
+            resident != textures_.end()) {
+            if (resident->second.renderer_id != 0U) {
+                rendering_api_.DeleteUiTexture(resident->second.renderer_id);
+            }
+            textures_.erase(resident);
+        }
+        failed_textures_.erase(key);
         staged_textures_.insert_or_assign(std::move(key), std::move(texture));
     }
+}
+
+bool N64UiFast3dRenderer::RequestAhead(
+    std::span<const UiTextureIdentity> identities) {
+    if (texture_provider_ == nullptr) {
+        return true;
+    }
+    const std::uint64_t revision = texture_provider_->Revision();
+    if (revision != ahead_revision_) {
+        ahead_revision_ = revision;
+        ahead_keys_.clear();
+    }
+    // A key prepared at this revision was resolved already (its first sight).
+    const bool preparedCurrent = prepared_revision_ == revision;
+    bool requested = false;
+    for (const UiTextureIdentity& identity : identities) {
+        if (identity.semantic_name.empty()) {
+            continue;
+        }
+        std::string key = BuildUiTextureCacheKey(identity);
+        if (ahead_keys_.contains(key) ||
+            (preparedCurrent && prepared_keys_.contains(key))) {
+            continue;
+        }
+        if (requested) {
+            return false;
+        }
+        texture_provider_->RequestAhead(identity);
+        ++stats_.ahead_requests;
+        ahead_keys_.insert(std::move(key));
+        requested = true;
+    }
+    return true;
 }
 
 PreparedUiTextures N64UiFast3dRenderer::PrepareTextures(
     std::span<const UiPrimitive> primitives) {
     PreparedUiTextures prepared;
+    if (texture_provider_ != nullptr &&
+        texture_provider_->Revision() != prepared_revision_) {
+        // Every key is resolved again; a key that has drawn keeps its texture
+        // until then (drawable_keys_ stays).
+        prepared_revision_ = texture_provider_->Revision();
+        prepared_keys_.clear();
+        provisional_polled_.clear();
+        hold_polls_.clear();
+    }
+    ++prepare_calls_;
+    // Resolves of this call beyond first sights: each reads the game's
+    // texture and identifies it in the pack (test.13: a pack change resolved
+    // every HUD texture again at once, and polled the ones still decoding at
+    // every call, 25-50 ms of the game thread per frame for ~10 frames).
+    // First sights and held ones count but are never deferred. A count and a
+    // time budget (test.14: a resolve that decoded cost 2-6 ms on a desktop
+    // core, more on the console, and the TopScreen HUD prepares twice per frame).
+    std::uint32_t budget = kUiResolvesPerPrepare;
+    const auto start = std::chrono::steady_clock::now();
+    const auto take = [&budget, start] {
+        if (budget == 0U || std::chrono::steady_clock::now() - start >= kUiResolveTimeBudget) return false;
+        --budget;
+        return true;
+    };
+    std::unordered_set<std::string> seen;
     for (const UiPrimitive& primitive : primitives) {
         if (!DrawsPrimitive(primitive) ||
             primitive.texture.semantic_name.empty()) {
             continue;
         }
         std::string key = BuildUiTextureCacheKey(primitive.texture);
-        if (!prepared_keys_.insert(key).second) {
+        if (!seen.insert(key).second) {
             continue;
         }
+        const bool first = !prepared_keys_.contains(key);
+        const bool drawable = drawable_keys_.contains(key);
+        const auto hold = hold_polls_.find(key);
+        const bool holding = hold != hold_polls_.end() && hold->second < kUiHoldPolls;
+        const auto provisional = provisional_polled_.find(key);
+        if (first && drawable) {
+            // A new revision of a texture that draws: it keeps drawing until
+            // a later call has budget for it.
+            if (!take()) {
+                ++stats_.deferred_resolves;
+                continue;
+            }
+        } else if (first || holding) {
+            // Not drawn otherwise.
+            (void)take();
+        } else if (provisional == provisional_polled_.end() ||
+                   prepare_calls_ - provisional->second < kUiProvisionalPollInterval || !take()) {
+            // Prepared already, or a provisional one polled lately (or no
+            // budget left: a later call).
+            continue;
+        }
+        prepared_keys_.insert(key);
         PreparedUiTexture texture;
         texture.key = std::move(key);
         texture.native = primitive.texture.semantic_name.starts_with("oot3d/");
@@ -315,10 +424,41 @@ PreparedUiTextures N64UiFast3dRenderer::PrepareTextures(
                 texture_provider_->Resolve(primitive.texture, pixels,
                                            &texture.error) &&
                 pixels.width != 0U && pixels.height != 0U &&
-                pixels.rgba8.size() ==
+                pixels.Data().size() ==
                     static_cast<std::size_t>(pixels.width) * pixels.height * 4U;
             texture.status = resolved ? PreparedUiTexture::Status::Resolved
                                       : PreparedUiTexture::Status::Invalid;
+            if (resolved && pixels.provisional) {
+                provisional_polled_.insert_or_assign(texture.key, prepare_calls_);
+                if (pixels.native_stand_in && drawable) {
+                    // Only the game's own pixels while the replacement
+                    // decodes: what draws (the replacement of an earlier
+                    // revision, or those pixels) keeps drawing.
+                    continue;
+                }
+                if (first && pixels.native_stand_in) {
+                    // First sight of a texture whose replacement is decoding:
+                    // held rather than drawn with the old art.
+                    hold_polls_.insert_or_assign(texture.key, 1U);
+                    texture.held = true;
+                    pixels = {};
+                } else if (holding) {
+                    if (++hold->second < kUiHoldPolls) {
+                        continue;
+                    }
+                    // The hold ran out: the game's own pixels from now on.
+                    ++stats_.holds_expired;
+                } else if (!first) {
+                    // The provisional pixels handed earlier are still current.
+                    continue;
+                }
+            } else {
+                provisional_polled_.erase(texture.key);
+                hold_polls_.erase(texture.key);
+            }
+            if (resolved && !texture.held) {
+                drawable_keys_.insert(texture.key);
+            }
         }
         prepared.push_back(std::move(texture));
     }
@@ -392,8 +532,13 @@ bool N64UiFast3dRenderer::Render(std::span<const UiPrimitive> primitives,
         const bool textured = !primitive->texture.semantic_name.empty();
         std::uint32_t textureId = 0U;
         if (textured) {
+            bool held = false;
             const ResidentTexture* texture = ResolveTexture(
-                primitive->texture, error);
+                primitive->texture, error, &held);
+            if (held) {
+                ++stats_.held_draws;
+                continue;
+            }
             if (texture == nullptr) {
                 success = false;
                 continue;

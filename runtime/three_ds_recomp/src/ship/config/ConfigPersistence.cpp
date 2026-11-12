@@ -113,8 +113,8 @@ AtomicConfigWriteResult WriteConfigFileAtomically(
         };
     }
 #else
-    // O FS do Horizon não renomeia por cima de arquivo existente (EEXIST): a
-    // troca e a recuperação estão em ship/config/FileReplace.h.
+    // Horizon's FS cannot rename over an existing file (EEXIST): see
+    // ship/config/FileReplace.h for the replace and its recovery.
     const std::error_code replaceError =
         ReplaceFileWithTemporary(temporary, target);
     if (replaceError) {

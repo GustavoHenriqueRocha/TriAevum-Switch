@@ -1,16 +1,24 @@
-// Um lado do diferencial de sequências (run_store_sequence_diff.sh): compila
-// as funções de store_sequences.inc contra a memória atual (padrão) ou contra
-// a revisão base renomeada para OldMem (-DSEQ_OLD). O otimizador vê os
-// acessos inlinados exatamente como no C++ gerado, com os registradores guest
-// como referências para o estado arquitetural.
+// One side of the sequence differential (run_store_sequence_diff.sh): compiles
+// the functions of store_sequences.inc against the current memory (default) or against
+// the base revision renamed to OldMem (-DSEQ_OLD). The optimizer sees the
+// inlined accesses exactly as in the generated C++, with the guest registers
+// as references to the architectural state.
 #if defined(SEQ_OLD)
 #include "old_memory.h"
 namespace SeqMem = OldMem;
 #define SEQ_SIDE OldSide
+// The base's exclusives with its second core active: the global exclusive
+// monitor, which the current memory uses with the second core on or off.
+#if __has_include("old_second_core.h")
+#include "old_second_core.h"
+#define SEQ_MONITOR OldMem::SecondCore
+#endif
 #else
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 namespace SeqMem = Oot3dNativeGame;
 #define SEQ_SIDE NewSide
+#define SEQ_MONITOR Oot3dNativeGame::SecondCore
 #endif
 #include "oot3d_aot_architectural_state.h"
 
@@ -40,8 +48,8 @@ struct Hash {
 
 using Observations = Hash;
 
-// Observação fora de linha no meio da sequência, como uma chamada para fora
-// do código gerado: a geração e o carimbo da página precisam estar exatos.
+// Out-of-line observation mid-sequence, like a call out of the generated
+// code: the generation and the page stamp must be exact.
 __attribute__((noinline)) void Observe(Observations& observations, Memory& memory,
                                        uint32_t base) {
     observations.Add(memory.WriteGeneration());
@@ -61,9 +69,9 @@ constexpr uint32_t kSeqBaseCount = sizeof(kSeqBases) / sizeof(kSeqBases[0]);
               Observations& observations, uint32_t& faultPc, uint32_t& faultAddress, \
               uint64_t& exclusiveToken)
 #define MEM mem
-// Uma falha é registrada e a sequência continua (no código gerado ela sai da
-// função); assim cada sequência exercita todas as operações e as falhas
-// parciais de LDM/STM entram no resumo.
+// A fault is recorded and the sequence continues (in generated code it exits
+// the function); this way each sequence exercises every operation and partial
+// LDM/STM faults enter the digest.
 #define FAULT(pc, address)                         \
     do {                                           \
         faultPc = faultPc * 31U + (pc);            \
@@ -73,8 +81,8 @@ constexpr uint32_t kSeqBaseCount = sizeof(kSeqBases) / sizeof(kSeqBases[0]);
 using SeqFn = void (*)(Memory&, Oot3dAotArchitecturalState&, Observations&, uint32_t&,
                        uint32_t&, uint64_t&);
 
-// Auxiliares de acesso em linha reta: o lado novo usa os da memória atual
-// (StoreGuestValue/LoadGuestValue); o lado base, std::memcpy.
+// Straight-line access helpers: the new side uses the current memory's
+// (StoreGuestValue/LoadGuestValue); the base side, std::memcpy.
 #if defined(SEQ_OLD)
 template <typename T>
 inline void RawStore(uint8_t* destination, T value) {
@@ -103,7 +111,7 @@ using RawFn = void (*)(uint8_t*, Oot3dAotArchitecturalState&);
 
 #include "store_sequences.inc"
 
-// Executa Raw_<index> sobre um buffer guest de 32 bytes.
+// Runs Raw_<index> over a 32-byte guest buffer.
 uint64_t RunRaw(uint32_t index, uint64_t seed) {
     std::mt19937_64 rng(seed);
     std::vector<uint8_t> bytes(32);
@@ -121,9 +129,26 @@ uint64_t RunRaw(uint32_t index, uint64_t seed) {
 
 uint32_t SeqCount() { return sizeof(kSeqFunctions) / sizeof(kSeqFunctions[0]); }
 
-// Executa a função `index` com estado e configuração derivados de `seed` e
-// devolve o resumo de tudo que é observável.
+// Runs whose image took the fastmem window (current side).
+uint64_t gWindowRuns = 0;
+uint64_t WindowRuns() { return gWindowRuns; }
+
+// Runs function `index` with state and configuration derived from `seed` and
+// returns the digest of everything observable.
 uint64_t Run(uint32_t index, uint64_t seed) {
+#if defined(SEQ_MONITOR)
+#if defined(SEQ_OLD)
+    // A plain constant-initialized flag, not a guarded static: the guard's
+    // condition variable needs Horizon kernel calls (devkitA64 under
+    // qemu-aarch64 aborts in __cxa_guard_release).
+    static bool active = false;
+    if (!active) {
+        SEQ_MONITOR::SetActive(true);
+        active = true;
+    }
+#endif
+    SEQ_MONITOR::ResetExclusiveMonitor();
+#endif
     std::mt19937_64 rng(seed);
     auto below = [&](uint32_t n) { return static_cast<uint32_t>(rng() % n); };
     Memory memory;
@@ -136,6 +161,9 @@ uint64_t Run(uint32_t index, uint64_t seed) {
         !memory.MapRegion({"ram2", 0x20000U, ram2.size(), true, false, ram2})) {
         return 0;
     }
+#if !defined(SEQ_OLD)
+    if (memory.InGuestWindow()) ++gWindowRuns;
+#endif
     Hash events;
     const uint32_t mode = below(12);
     if (mode == 0) {
@@ -150,7 +178,7 @@ uint64_t Run(uint32_t index, uint64_t seed) {
         const std::pair<uint32_t, uint32_t> range{0x10F00U + below(0x200), 0x11100U + below(0x200)};
         memory.SetRangeWatch(std::span(&range, 1));
     }
-    // Algumas escritas prévias: gerações e carimbos não triviais.
+    // A few prior writes: non-trivial generations and stamps.
     for (uint32_t i = 0, n = below(8); i < n; ++i) {
         memory.WriteFast<uint32_t>(0x10000U + below(0x3000 / 4) * 4U, uint32_t(rng()));
     }

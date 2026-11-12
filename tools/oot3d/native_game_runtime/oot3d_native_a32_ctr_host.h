@@ -3,6 +3,7 @@
 #include "oot3d_native_a32_ctr_pica_bridge.h"
 #include "oot3d_native_a32_input.h"
 #include "oot3d_native_a32_process.h"
+#include "oot3d_native_a32_romfs_overlay.h"
 #include "../../ctr_services/y2r_service.h"
 
 #include <array>
@@ -27,6 +28,18 @@ struct Oot3dGspCommandPacket;
 enum class Oot3dPicaCompositionDomain : uint8_t;
 enum class Oot3dPicaInterruptId : uint8_t;
 
+// How an SVC event's Name is made. Text: Name holds it. The others
+// (NativeA32CtrHostConfig::FastSvc, the hot SVCs) leave Name empty and keep
+// its numbers in NameWords; NativeA32CtrSvcEventName writes the same text,
+// and every event the history hands out (Events) carries it in Name.
+enum class NativeA32CtrSvcEventNameKind : uint8_t {
+    Text,
+    ArbitrateAddress,     // address, type, value
+    SleepThreadTimed,     // nanoseconds, ticks, wake tick
+    SleepThreadInfinite,
+    SleepThreadYield,     // nanoseconds
+};
+
 struct NativeA32CtrSvcEvent {
     uint32_t Immediate = 0;
     uint32_t Pc = 0;
@@ -34,7 +47,12 @@ struct NativeA32CtrSvcEvent {
     bool Handled = false;
     std::string Name;
     uint32_t Detail = 0;
+    NativeA32CtrSvcEventNameKind NameKind = NativeA32CtrSvcEventNameKind::Text;
+    std::array<uint64_t, 3> NameWords{};
 };
+
+// The event's name, also for one that keeps its numbers.
+std::string NativeA32CtrSvcEventName(const NativeA32CtrSvcEvent& event);
 
 namespace detail {
 
@@ -225,11 +243,17 @@ struct NativeA32CtrHostConfig {
     std::filesystem::path RomFsImagePath;
     uint64_t RomFsImageOffset = 0;
     uint64_t RomFsImageSize = 0;
+    // Optional user-installed RomFS mods over RomFsImagePath's service view
+    // (Forge's O3RO overlay). Absent: the service view is the image itself.
+    std::shared_ptr<const NativeA32RomFsOverlay> RomFsOverlay;
     NativeA32CtrFilesystem* Filesystem = nullptr;
     std::string RomFsContentPath = "inputs/romfs";
     Oot3dNativePicaFrontend* PicaFrontend = nullptr;
     NativeA32CtrPicaBridge* PicaBridge = nullptr;
     const Oot3dPicaCompositionDomain* PicaCompositionDomain = nullptr;
+    // The domain the last guest refresh set (what a list kicked on time
+    // gets; Oot3dNativePicaFrontend::SetCommandListTiming).
+    const Oot3dPicaCompositionDomain* PicaRefreshCompositionDomain = nullptr;
     Oot3dPicaCommandListCompositionProvider* PicaCompositionProvider = nullptr;
     std::filesystem::path SaveDataDirectory;
     // Seções do ExeFS do próprio título (icon, banner, logo) servidas pelo
@@ -255,6 +279,10 @@ struct NativeA32CtrHostConfig {
         0, 6700, -6700, 0, 6700, -6700, 0, 6700, -6700,
     };
     bool RetainFullSvcHistory = false;
+    // config/kernel_svc (oot3d_native_kernel_options.h): the hot SVCs keep
+    // their event's numbers instead of building its name, and handle lookups
+    // go through an exact cache. Guest results are the same either way.
+    bool FastSvc = false;
     // CTR RTC published in the shared page (0x1FF81000), in milliseconds
     // of local time since the CTR "1900" epoch, which nn::fnd::DateTime
     // places 36525 days before 2000-01-01 (ms since 2000 + 3155760000000).
@@ -317,6 +345,17 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     size_t PendingSleepCount() const;
     uint32_t TakePendingDspAudioFrames();
     bool SignalDspAudioFrame();
+    // config/kernel_retake: who could see the audio pipe's interrupt before
+    // the frame it announces is mixed. A game-thread (host core 0) thread
+    // already waiting on it (any wait listing it, also wait-all ones the
+    // signal did not satisfy)...
+    bool DspAudioInterruptHasCore0Waiter() const;
+    // ... or a wait SVC (0x24 WaitSynchronization1, 0x25 WaitSynchronizationN)
+    // about to start that lists it (a list it cannot read counts as listing
+    // it). Kernel lock held; reads only.
+    bool SvcWaitsOnDspAudioInterrupt(uint32_t immediate,
+                                     const oot3d::recomp::a32::GuestState& state,
+                                     const NativeA32Memory& memory) const;
     NativeA32CtrHidUpdateResult
     AdvanceHidToCurrentTick(NativeA32Memory& memory,
                             const NativeA32HidState& state);
@@ -382,6 +421,8 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         uint32_t commandBuffer, NativeA32CtrSvcEvent event, uint32_t pathType,
         uint32_t pathSize, uint32_t pathAddress);
+    // The guest-visible RomFS size: the image's view, plus any overlay tail.
+    uint64_t RomFsServiceViewSize() const noexcept;
     struct RomFsBackingFile;
 
     struct KernelObject {
@@ -396,8 +437,8 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         uint64_t FileSize = 0;
         uint32_t FileOpenMode = 0;
         bool FileClosed = false;
-        // Arquivo do save no backend de pasta: identificador deste handle
-        // como escritor no diário (CtrSaveJournal; 0 = ainda não escreveu).
+        // Save file on the directory backend: this handle's identifier
+        // as a journal writer (CtrSaveJournal; 0 = has not written yet).
         uint64_t SaveJournalWriter = 0;
         std::shared_ptr<NativeA32CtrFile> FileBackend;
         std::shared_ptr<RomFsBackingFile> RomFsBacking;
@@ -598,6 +639,16 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     NativeA32CtrHostConfig mConfig;
     NativeA32CtrRuntimeProfile mRuntimeProfile;
     std::vector<HandleRecord> mHandles;
+    // FastSvc: LookupHandle's cache. An entry is valid while its Version is
+    // mHandlesVersion, which every CreateHandle and CloseHandle moves on, so
+    // it always names the first matching record, as the scan would.
+    struct HandleCacheEntry {
+        uint32_t Value = 0;
+        uint32_t Index = 0;
+        uint64_t Version = 0;
+    };
+    mutable std::array<HandleCacheEntry, 8> mHandleCache{};
+    uint64_t mHandlesVersion = 1;
     std::vector<ArbiterWaiter> mArbiterWaiters;
     std::vector<SynchronizationWaiter> mSynchronizationWaiters;
     std::vector<SleepWaiter> mSleepWaiters;
@@ -608,9 +659,9 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     // Chamadas por "serviço:comando" das sessões stub (resumo do log).
     std::map<std::string, uint64_t> mStubServiceCallCounts;
     std::vector<ArchiveRecord> mArchives;
-    // Diário do save no backend de pasta (oot3d_native_a32_ctr_save_safety.h):
-    // escrita atômica, backups e recuperação. Uma vez por execução; o restore
-    // de savestate repassa o mesmo objeto.
+    // Save journal on the directory backend (oot3d_native_a32_ctr_save_safety.h):
+    // atomic writes, backups and recovery. Once per run; a savestate restore
+    // passes the same object along.
     std::shared_ptr<CtrSaveJournal> mSaveJournal;
     CtrSaveJournal* SaveJournal();
     uint16_t mNextSlot = 0;

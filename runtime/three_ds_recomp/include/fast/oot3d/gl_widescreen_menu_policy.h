@@ -14,36 +14,36 @@
 
 namespace Fast::Oot3d {
 
-// Menus e textos 2D no widescreen do backend OpenGL (ver gl_widescreen_policy.h).
+// 2D menus and text in the OpenGL backend's widescreen (see gl_widescreen_policy.h).
 //
-// Com o alvo da tela de cima alargado, o backend GL só punha num quadro 5:3
-// centralizado (proporção nativa) os draws que o runtime atribui ao domínio
-// `Ui` (HUD, caixas de texto, páginas de pausa dentro da cena). Fora do jogo
-// em si (tela de título, seleção de arquivo, criação de nome, escolha
-// normal/Master Quest) o domínio é `Unknown`/`Scene` e tudo esticava 16:9/5:3
-// (~6,7% mais largo), inclusive o menu de baixo que o TopScreen realoca para a
-// tela de cima. Esta política reconhece esses desenhos 2D pelo próprio estado
-// PICA e os põe no mesmo quadro centralizado:
+// With the top-screen target widened, the GL backend only put into a centered 5:3
+// frame (native aspect ratio) the draws the runtime assigns to the `Ui` domain
+// (HUD, text boxes, pause pages inside the scene). Outside the game itself
+// (title screen, file select, name entry, Normal/Master Quest choice) the domain
+// is `Unknown`/`Scene` and everything stretched 16:9/5:3
+// (~6.7% wider), including the bottom menu that TopScreen relocates to the
+// top screen. This policy recognizes those 2D draws from the PICA state itself
+// and puts them in the same centered frame:
 //
-// * viewport que não cobre o eixo horizontal apresentado inteiro (o menu de
-//   baixo realocado: Y 40..360 de 400) - nenhum desenho da cena usa isso;
-// * projeção ortográfica (c0-c3, linha w = 0,0,0,1) com pixels quadrados no
-//   mapeamento nativo, cuja geometria não cobre o viewport (um painel, um
-//   texto, um logotipo; uma lavagem/fade de tela inteira continua esticada).
+// * a viewport that doesn't cover the whole presented horizontal axis (the
+//   relocated bottom menu: Y 40..360 of 400) - no scene draw uses that;
+// * an orthographic projection (c0-c3, w row = 0,0,0,1) with square pixels in the
+//   native mapping, whose geometry doesn't cover the viewport (a panel, a
+//   text, a logo; a full-screen wash/fade stays stretched).
 //
-// Nunca entram: draws que amostram cópias do quadro renderizado (o redesenho
-// tem de cair sobre os pixels copiados) e a camada de atmosfera (efeitos de
-// tela do ambiente presos à cena, como o lens flare).
+// Never included: draws that sample copies of the rendered frame (the redraw
+// has to land on the copied pixels) and the atmosphere layer (environment
+// screen effects tied to the scene, such as the lens flare).
 //
-// Além disso, um draw em perspectiva posto no quadro 5:3 cujo frustum o hook
-// de projeção alargou (anisotropia medida = 1/fator) seria espremido; nele o
-// viewport é alargado pelo mesmo fator em torno do centro (modelos 3D dos
-// menus: Link no Equipamento, itens girando), recortado ao quadro.
+// Also, a perspective draw put into the 5:3 frame whose frustum the projection
+// hook widened (measured anisotropy = 1/factor) would be squeezed; for it the
+// viewport is widened by the same factor around the center (3D models in the
+// menus: Link in Equipment, spinning items), clipped to the frame.
 //
-// Lido uma vez: no Switch de sdmc:/switch/oot3dre/config/widescreen_menus
-// ("0" desliga; sem o arquivo, ligado); fora dele da variável
-// TRIAEVUM_GL_WIDESCREEN_MENUS (sem ela, ligado). Só tem efeito com o
-// widescreen ligado.
+// Read once: on the Switch from sdmc:/switch/oot3dre/config/widescreen_menus
+// ("0" turns it off; without the file, on); elsewhere from the
+// TRIAEVUM_GL_WIDESCREEN_MENUS variable (without it, on). Only has an effect with
+// widescreen on.
 [[nodiscard]] inline bool GlWidescreenMenusEnabled() {
     static const bool enabled = [] {
         constexpr bool kDefault = true;
@@ -67,15 +67,15 @@ enum class GlProjectionShape : std::uint8_t {
     Perspective,
 };
 
-// Escalas x/y da projeção que os programas do OoT3D leem de c0-c3 (linhas,
-// girada com o framebuffer: a linha 0 dá o clip x = eixo vertical apresentado,
-// a linha 1 o clip y = eixo horizontal apresentado). Para não depender do
-// sentido da rotação, a escala de cada linha é o módulo das colunas 0 e 1.
+// x/y scales of the projection that OoT3D programs read from c0-c3 (rows,
+// rotated with the framebuffer: row 0 gives clip x = presented vertical axis,
+// row 1 clip y = presented horizontal axis). To not depend on the
+// rotation direction, each row's scale is the magnitude of columns 0 and 1.
 struct GlProjectionScales {
     GlProjectionShape Shape = GlProjectionShape::Unknown;
-    // Unidades de clip (divididas por w na ortográfica) por unidade de view.
-    float Vertical = 0.0F;   // linha 0
-    float Horizontal = 0.0F; // linha 1
+    // Clip units (divided by w in orthographic) per view unit.
+    float Vertical = 0.0F;   // row 0
+    float Horizontal = 0.0F; // row 1
 };
 
 [[nodiscard]] inline GlProjectionScales DecodeGlProjection(
@@ -107,11 +107,11 @@ struct GlProjectionScales {
     return result;
 }
 
-// Pixels apresentados por unidade de view na horizontal sobre os da vertical,
-// no mapeamento nativo do viewport (1 = pixels quadrados, sem distorção).
-// O alvo da tela de cima guarda o eixo vertical apresentado em X com
-// `framebufferWidth / 240` amostras por linha (480 -> 2) e o horizontal em Y
-// 1:1. 0 quando não dá para medir.
+// Presented pixels per view unit horizontally over those vertically,
+// in the viewport's native mapping (1 = square pixels, no distortion).
+// The top-screen target stores the presented vertical axis in X with
+// `framebufferWidth / 240` samples per row (480 -> 2) and the horizontal one in Y
+// 1:1. 0 when it can't be measured.
 [[nodiscard]] inline float GlNativePixelAnisotropy(
     const GlProjectionScales& projection, float viewportWidth,
     float viewportHeight, std::uint32_t framebufferWidth) noexcept {
@@ -126,51 +126,51 @@ struct GlProjectionScales {
     return std::isfinite(anisotropy) && anisotropy > 0.0F ? anisotropy : 0.0F;
 }
 
-// O que o backend sabe de um draw no alvo alargado da tela de cima.
+// What the backend knows about a draw in the widened top-screen target.
 struct GlWidescreenDrawEvidence {
-    // Domínio `Ui` atribuído pelo runtime (HUD, texto, pausa).
+    // `Ui` domain assigned by the runtime (HUD, text, pause).
     bool UiDomain = false;
-    // Camada de atmosfera (efeitos de tela do ambiente, presos à cena).
+    // Atmosphere layer (environment screen effects, tied to the scene).
     bool Atmosphere = false;
-    // O viewport cobre o alvo nativo inteiro.
+    // The viewport covers the whole native target.
     bool ViewportCoversTarget = false;
-    // O viewport cobre o eixo horizontal apresentado inteiro (Y 0..altura).
+    // The viewport covers the whole presented horizontal axis (Y 0..height).
     bool ViewportSpansPresentedWidth = false;
-    // A geometria projetada cobre o viewport inteiro (fade, lavagem).
+    // The projected geometry covers the whole viewport (fade, wash).
     bool GeometryCoversViewport = false;
-    // Amostra alguma cópia do quadro renderizado.
+    // Samples some copy of the rendered frame.
     bool SamplesRenderedCopy = false;
     GlProjectionShape Projection = GlProjectionShape::Unknown;
-    // GlNativePixelAnisotropy (0 = desconhecida).
+    // GlNativePixelAnisotropy (0 = unknown).
     float PixelAnisotropy = 0.0F;
-    // Não amostra textura nenhuma (cor sólida: fade, escurecimento).
+    // Samples no texture at all (solid color: fade, dimming).
     bool Untextured = false;
-    // Recorte (scissor) do próprio jogo ligado.
+    // The game's own scissor enabled.
     bool GuestScissor = false;
-    // Limites em NDC da geometria projetada (eixo 0 = vertical apresentado,
-    // eixo 1 = horizontal apresentado; -1 = começo do viewport no alvo).
+    // NDC bounds of the projected geometry (axis 0 = presented vertical,
+    // axis 1 = presented horizontal; -1 = viewport start in the target).
     bool BoundsKnown = false;
     std::array<float, 2> NdcMin{};
     std::array<float, 2> NdcMax{};
 };
 
 struct GlWidescreenDrawPlacement {
-    // No quadro nativo centralizado (senão esticado sobre o alvo todo, como
-    // a cena).
+    // In the centered native frame (otherwise stretched over the whole target, like
+    // the scene).
     bool Canvas = false;
-    // No quadro, alargar o viewport pelo fator do widescreen em torno do seu
-    // centro (perspectiva que o hook de projeção alargou). O recorte fica no
-    // viewport nativo: o que o 3DS não mostra (fora da tela de baixo) continua
-    // fora.
+    // In the frame, widen the viewport by the widescreen factor around its
+    // center (perspective the projection hook widened). The scissor stays at the
+    // native viewport: what the 3DS doesn't show (outside the bottom screen) stays
+    // outside.
     bool CompensateWidening = false;
-    // Cor sólida que cobre todo o menu realocado (fade/escurecimento da tela
-    // de baixo): cobre o alvo alargado inteiro, com a cena embaixo.
+    // Solid color covering the whole relocated menu (bottom-screen
+    // fade/dimming): covers the whole widened target, with the scene underneath.
     bool FillTarget = false;
-    // Com FillTarget: até onde a geometria chega no eixo horizontal
-    // apresentado (NDC; 1/fator quando o hook alargou o frustum).
+    // With FillTarget: how far the geometry reaches on the presented horizontal
+    // axis (NDC; 1/factor when the hook widened the frustum).
     float FillHorizontalExtent = 1.0F;
-    // Draw do menu de baixo realocado: os cantos de baixo (a aba BACK) vão
-    // para os cantos da tela alargada (ResolveGlWidescreenCornerPasses).
+    // Draw of the relocated bottom menu: the bottom corners (the BACK tab) go
+    // to the corners of the widened screen (ResolveGlWidescreenCornerPasses).
     bool SplitCorners = false;
 
     bool operator==(const GlWidescreenDrawPlacement&) const = default;
@@ -183,8 +183,8 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
            std::abs(anisotropy / expected - 1.0F) <= kGlWidescreenAnisotropyTolerance;
 }
 
-// Um draw fora do domínio `Ui` só precisa da prova de cobertura (cara: projeta
-// os vértices) quando todo o resto já o poria no quadro.
+// A draw outside the `Ui` domain only needs the coverage proof (expensive: projects
+// the vertices) when everything else would already put it in the frame.
 [[nodiscard]] inline bool GlWidescreenOrthographicPanelCandidate(
     const GlWidescreenDrawEvidence& evidence) noexcept {
     return !evidence.UiDomain && !evidence.Atmosphere &&
@@ -194,8 +194,8 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
            GlAnisotropyNear(evidence.PixelAnisotropy, 1.0F);
 }
 
-// O hook de projeção alargou este frustum de perspectiva pelo fator do
-// widescreen (anisotropia medida = 1/fator).
+// The projection hook widened this perspective frustum by the widescreen
+// factor (measured anisotropy = 1/factor).
 [[nodiscard]] inline bool GlWidescreenPerspectiveWidened(
     const GlWidescreenDrawEvidence& evidence, float widescreenFactor) noexcept {
     return widescreenFactor > 1.0F &&
@@ -203,9 +203,9 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
            GlAnisotropyNear(evidence.PixelAnisotropy, 1.0F / widescreenFactor);
 }
 
-// Até onde (em NDC, eixo horizontal apresentado = linha 1 do clip) a geometria
-// de um draw tem de chegar para cobrir o viewport nativo: o frustum alargado
-// pelo hook põe a borda nativa em 1/fator.
+// How far (in NDC, presented horizontal axis = clip row 1) a draw's geometry
+// has to reach to cover the native viewport: the frustum widened
+// by the hook puts the native edge at 1/factor.
 [[nodiscard]] inline float GlWidescreenNativeHorizontalExtent(
     const GlWidescreenDrawEvidence& evidence, float widescreenFactor) noexcept {
     return GlWidescreenPerspectiveWidened(evidence, widescreenFactor)
@@ -213,28 +213,28 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
                : 1.0F;
 }
 
-// Um draw do menu realocado (fora do domínio Ui) que só precisa da prova de
-// cobertura para virar fade de tela inteira. A camada de atmosfera não conta
-// aqui: no trace do host os draws do menu realocado vêm atribuídos a ela (o
-// menu da tela de título roda dentro da fila de ambiente do Gameplay_Draw), e
-// nenhum efeito de ambiente da cena usa o viewport Y 40..360.
-// O fade da transição (seleção de arquivo -> jogo) vem no domínio Ui, sem
-// textura, com a ortográfica 400x240 da tela de cima no viewport do menu
-// (trace do host); vale para os dois domínios.
+// A relocated-menu draw (outside the Ui domain) that only needs the coverage
+// proof to become a full-screen fade. The atmosphere layer doesn't count
+// here: in the host trace the relocated-menu draws come assigned to it (the
+// title-screen menu runs inside Gameplay_Draw's environment queue), and
+// no scene environment effect uses the Y 40..360 viewport.
+// The transition fade (file select -> game) comes in the Ui domain, without
+// texture, with the top screen's 400x240 orthographic in the menu viewport
+// (host trace); applies to both domains.
 [[nodiscard]] inline bool GlWidescreenRelocatedFillCandidate(
     const GlWidescreenDrawEvidence& evidence) noexcept {
     return !evidence.SamplesRenderedCopy && !evidence.ViewportSpansPresentedWidth &&
            evidence.Untextured && !evidence.GuestScissor;
 }
 
-// Cantos de baixo do menu de baixo realocado (a aba BACK encostada no canto
-// da tela de baixo). Num jogo widescreen eles ficam nos cantos da tela, não
-// nos cantos do 4:3 do menu. A aba vem no mesmo draw que os cartões, o
-// cabeçalho e os textos (trace do host: 1104 vértices, um só draw), então o
-// draw é repetido por recortes: o meio no lugar, cada canto deslocado pela
-// margem até a borda do alvo alargado.
-// Lido uma vez: Switch, config/widescreen_menu_corners ("0" desliga; sem o
-// arquivo, ligado); fora dele, TRIAEVUM_GL_WIDESCREEN_MENU_CORNERS.
+// Bottom corners of the relocated bottom menu (the BACK tab against the corner
+// of the bottom screen). In a widescreen game they sit in the screen corners, not
+// in the corners of the menu's 4:3. The tab comes in the same draw as the cards, the
+// header and the texts (host trace: 1104 vertices, a single draw), so the
+// draw is repeated by scissor regions: the middle in place, each corner shifted by the
+// margin to the edge of the widened target.
+// Read once: Switch, config/widescreen_menu_corners ("0" turns it off; without the
+// file, on); elsewhere, TRIAEVUM_GL_WIDESCREEN_MENU_CORNERS.
 [[nodiscard]] inline bool GlWidescreenMenuCornersEnabled() {
     static const bool enabled = [] {
         constexpr bool kDefault = true;
@@ -252,11 +252,11 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
     return enabled;
 }
 
-// Tamanho de cada canto, no menu nativo de 320x240: a aba BACK ocupa 57x37.
-// Os cartões e botões de baixo terminam acima de 43 linhas da borda e a mais
-// de 70 px da lateral.
-inline constexpr std::int32_t kGlWidescreenCornerWidth = 64;  // px apresentados
-inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // linhas
+// Size of each corner, in the native 320x240 menu: the BACK tab takes 57x37.
+// The bottom cards and buttons end more than 43 rows above the edge and more
+// than 70 px from the side.
+inline constexpr std::int32_t kGlWidescreenCornerWidth = 64;  // presented px
+inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // rows
 
 [[nodiscard]] inline GlWidescreenDrawPlacement ResolveGlWidescreenDrawPlacement(
     const GlWidescreenDrawEvidence& evidence, float widescreenFactor,
@@ -265,26 +265,26 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // linhas
     if (menusEnabled && !evidence.ViewportSpansPresentedWidth &&
         GlWidescreenRelocatedFillCandidate(evidence) &&
         evidence.GeometryCoversViewport) {
-        // Fade/escurecimento de cor sólida sobre todo o menu de baixo
-        // realocado (Y 40..360): no 3DS cobre a tela de baixo inteira; aqui
-        // cobre a tela toda, senão a cena (céu) sobra nas laterais do 4:3.
+        // Solid-color fade/dimming over the whole relocated bottom menu
+        // (Y 40..360): on the 3DS it covers the whole bottom screen; here
+        // it covers the whole screen, otherwise the scene (sky) shows at the sides of the 4:3.
         placement.FillTarget = true;
         placement.FillHorizontalExtent =
             GlWidescreenNativeHorizontalExtent(evidence, widescreenFactor);
         return placement;
     }
     if (evidence.UiDomain) {
-        // Regra anterior: UI que cobre o alvo inteiro é conteúdo de quadro
-        // (fade, redesenho da cópia) e estica; o resto fica no quadro.
+        // Previous rule: UI covering the whole target is frame content
+        // (fade, copy redraw) and stretches; the rest stays in the frame.
         placement.Canvas =
             !(evidence.ViewportCoversTarget && evidence.GeometryCoversViewport);
     } else if (menusEnabled && !evidence.SamplesRenderedCopy &&
                (!evidence.Atmosphere || !evidence.ViewportSpansPresentedWidth)) {
         if (!evidence.ViewportSpansPresentedWidth) {
-            // O menu de baixo realocado (Y 40..360), mesmo atribuído à camada
-            // de atmosfera (antes isso o esticava: a aba BACK saía do canto,
-            // x=128 em vez de 160 de 1280, e o cartão que entra deslizando
-            // aparecia até x=1152).
+            // The relocated bottom menu (Y 40..360), even when assigned to the atmosphere
+            // layer (this used to stretch it: the BACK tab left the corner,
+            // x=128 instead of 160 of 1280, and the card sliding in
+            // appeared up to x=1152).
             placement.Canvas = true;
         } else {
             placement.Canvas = GlWidescreenOrthographicPanelCandidate(evidence) &&
@@ -301,21 +301,21 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // linhas
     return placement;
 }
 
-// Texturas da tela de baixo realocada (seleção de arquivo, escolha Normal/
-// Master Quest, criação de nome) amostradas com GL_NEAREST na ampliação.
-// O menu é montado com peças de um atlas desenhadas texel por pixel nativo
-// (ortográfica 320x240, anisotropia 1): na resolução do 3DS cada pixel cai no
-// centro de um texel e o filtro linear devolve o texel exato. Com resolução
-// interna N×, os fragmentos da borda de uma peça caem a 1/(2N) de texel do
-// limite e o linear mistura o texel vizinho do atlas: no cabeçalho "Please
-// select a file." a emenda entre o canto e o meio virou uma linha clara
-// vertical a ~28 px de cada borda (some com escala 1, aparece em 2 e 3). O
-// nearest numa escala inteira reproduz o resultado nativo pixel a pixel (o
-// mesmo texel em cada um dos N×N fragmentos) e não lê fora da peça; minificação
-// continua linear. Escala fracionária (1,5×) fica linear: o nearest daria
-// texels de larguras desiguais.
-// Lido uma vez: Switch, config/menu_nearest ("0" desliga; sem o arquivo,
-// ligado); fora dele, TRIAEVUM_GL_MENU_NEAREST.
+// Textures of the relocated bottom screen (file select, Normal/
+// Master Quest choice, name entry) sampled with GL_NEAREST on magnification.
+// The menu is assembled from atlas pieces drawn one texel per native pixel
+// (orthographic 320x240, anisotropy 1): at the 3DS resolution each pixel lands at the
+// center of a texel and the linear filter returns the exact texel. With internal
+// resolution N×, the fragments at a piece's edge land 1/(2N) of a texel from the
+// boundary and linear blends in the neighboring atlas texel: in the "Please
+// select a file." header the seam between the corner and the middle became a light
+// vertical line ~28 px from each edge (gone at scale 1, shows at 2 and 3).
+// Nearest at an integer scale reproduces the native result pixel by pixel (the
+// same texel in each of the N×N fragments) and doesn't read outside the piece; minification
+// stays linear. A fractional scale (1.5×) stays linear: nearest would give
+// texels of unequal widths.
+// Read once: Switch, config/menu_nearest ("0" turns it off; without the file,
+// on); elsewhere, TRIAEVUM_GL_MENU_NEAREST.
 [[nodiscard]] inline bool GlMenuNearestEnabled() {
     static const bool enabled = [] {
         constexpr bool kDefault = true;
@@ -333,35 +333,44 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // linhas
     return enabled;
 }
 
-// O draw é uma peça da tela de baixo realocada (viewport que não cobre o eixo
-// horizontal apresentado, ortográfica de pixels quadrados, com textura
-// própria) e a escala interna é inteira >= 2. Vale nos dois domínios: a
-// criação de nome (teclado e cabeçalho, mesma emenda) vem no domínio Ui, como
-// os painéis do Game Over e as páginas centradas da pausa; HUD, Items, Map e
-// System cobrem a largura toda e ficam lineares.
-[[nodiscard]] inline bool GlRelocatedMenuNearestSampling(
-    const GlWidescreenDrawEvidence& evidence, float resolutionScale) noexcept {
-    const bool integerScale = resolutionScale >= 2.0F - 1.0e-3F &&
-                              std::abs(resolutionScale - std::round(resolutionScale)) <= 1.0e-3F;
-    return integerScale && !evidence.ViewportSpansPresentedWidth &&
-           !evidence.Untextured && !evidence.SamplesRenderedCopy &&
+// A piece of the relocated bottom screen (TopScreen moves the game's lower
+// screen into a viewport of the top one): a viewport that doesn't cover the
+// presented horizontal axis, square-pixel orthographic, with its own texture.
+// File select, name entry, the Normal/Master Quest choice and the Game Over
+// panels; the file-select menu comes attributed to the title scene's
+// atmosphere layer (Scene domain), the others in the Ui domain.
+[[nodiscard]] inline bool GlRelocatedMenuDraw(const GlWidescreenDrawEvidence& evidence) noexcept {
+    return !evidence.ViewportSpansPresentedWidth && !evidence.Untextured && !evidence.SamplesRenderedCopy &&
            evidence.Projection == GlProjectionShape::Orthographic &&
            GlAnisotropyNear(evidence.PixelAnisotropy, 1.0F);
 }
 
-// Eixo horizontal apresentado (Y do alvo alargado, em pixels do alvo) de um
-// draw: viewport e recorte. O eixo vertical (X) não muda com o widescreen.
+// The draw is a piece of the relocated bottom screen (GlRelocatedMenuDraw)
+// and the internal scale is an integer >= 2. Applies in both domains: the
+// name entry (keyboard and header, same seam) comes in the Ui domain, as do
+// the Game Over panels, the centered pause pages and System (drawn as a
+// centered page); HUD, Items and the dungeon Map cover the full width and
+// stay linear.
+[[nodiscard]] inline bool GlRelocatedMenuNearestSampling(
+    const GlWidescreenDrawEvidence& evidence, float resolutionScale) noexcept {
+    const bool integerScale = resolutionScale >= 2.0F - 1.0e-3F &&
+                              std::abs(resolutionScale - std::round(resolutionScale)) <= 1.0e-3F;
+    return integerScale && GlRelocatedMenuDraw(evidence);
+}
+
+// Presented horizontal axis (Y of the widened target, in target pixels) of a
+// draw: viewport and scissor. The vertical axis (X) doesn't change with widescreen.
 struct GlWidescreenPresentedAxisInput {
-    float ViewportY = 0.0F;      // nativo
-    float ViewportHeight = 0.0F; // nativo
-    // Recorte do jogo (ScissorMode 3): Y1 e Y2 nativos, inclusivos.
+    float ViewportY = 0.0F;      // native
+    float ViewportHeight = 0.0F; // native
+    // Game scissor (ScissorMode 3): native Y1 and Y2, inclusive.
     bool GuestScissor = false;
     std::uint16_t ScissorY1 = 0;
     std::uint16_t ScissorY2 = 0;
-    std::uint16_t FramebufferHeight = 0; // 400 na tela de cima
-    std::uint32_t TargetHeight = 0;      // alvo alargado (pixels)
-    float ResolutionScale = 1.0F;        // pixels por pixel nativo (quadro)
-    float TargetScaleY = 1.0F;           // pixels por pixel nativo (esticado)
+    std::uint16_t FramebufferHeight = 0; // 400 on the top screen
+    std::uint32_t TargetHeight = 0;      // widened target (pixels)
+    float ResolutionScale = 1.0F;        // pixels per native pixel (frame)
+    float TargetScaleY = 1.0F;           // pixels per native pixel (stretched)
 };
 
 struct GlWidescreenPresentedAxis {
@@ -391,15 +400,15 @@ struct GlWidescreenPresentedAxis {
     axis.ViewportBegin = edge(input.ViewportY);
     axis.ViewportEnd = edge(input.ViewportY + input.ViewportHeight);
     if (placement.FillTarget) {
-        // A geometria chega a FillHorizontalExtent do viewport: essa extensão
-        // vai para a largura apresentada inteira do alvo.
+        // The geometry reaches FillHorizontalExtent of the viewport: that extent
+        // goes to the target's whole presented width.
         const float centre = static_cast<float>(input.TargetHeight) * 0.5F;
         const float half = centre / std::max(placement.FillHorizontalExtent, 1.0e-3F);
         axis.ViewportBegin = static_cast<std::int32_t>(std::floor(centre - half));
         axis.ViewportEnd = static_cast<std::int32_t>(std::ceil(centre + half));
     } else if (placement.CompensateWidening) {
-        // O hook alargou o frustum pelo fator do alvo: o viewport cresce o
-        // mesmo tanto em torno do centro e as proporções voltam às nativas.
+        // The hook widened the frustum by the target factor: the viewport grows by the
+        // same amount around the center and the proportions return to native.
         const float centre =
             offset + (input.ViewportY + input.ViewportHeight * 0.5F) * scale;
         const float half = input.ViewportHeight * 0.5F * input.TargetScaleY;
@@ -415,7 +424,7 @@ struct GlWidescreenPresentedAxis {
                               : axis.ScissorBegin;
     }
     if (canvas) {
-        // O que vai para o quadro nunca passa dele.
+        // What goes into the frame never goes past it.
         const auto canvasBegin = static_cast<std::int32_t>(offset);
         const auto canvasEnd = canvasBegin + static_cast<std::int32_t>(std::llround(
             static_cast<double>(input.FramebufferHeight) *
@@ -424,9 +433,9 @@ struct GlWidescreenPresentedAxis {
         axis.ScissorEnd = std::min(axis.ScissorEnd, canvasEnd);
     }
     if (placement.CompensateWidening) {
-        // O viewport alargado só devolve as proporções; o que estava fora do
-        // viewport nativo (fora da tela no 3DS: um modelo 3D de menu passando
-        // da borda) continua cortado ali, como no console.
+        // The widened viewport only restores the proportions; what was outside the
+        // native viewport (off screen on the 3DS: a 3D menu model going past
+        // the edge) stays cut there, as on the console.
         axis.ScissorBegin = std::max(axis.ScissorBegin, edge(input.ViewportY));
         axis.ScissorEnd =
             std::min(axis.ScissorEnd, edge(input.ViewportY + input.ViewportHeight));
@@ -436,8 +445,8 @@ struct GlWidescreenPresentedAxis {
     return axis;
 }
 
-// Um passe de um draw no alvo alargado: o viewport do eixo apresentado
-// deslocado e o recorte (X = eixo vertical apresentado, Y = horizontal).
+// One pass of a draw in the widened target: the presented-axis viewport
+// shifted and the scissor (X = presented vertical axis, Y = horizontal).
 struct GlWidescreenPass {
     std::int32_t ViewportShift = 0;
     std::int32_t ScissorX0 = 0;
@@ -449,21 +458,21 @@ struct GlWidescreenPass {
 };
 
 struct GlWidescreenCornerInput {
-    // Recorte já resolvido no eixo vertical apresentado (X do alvo).
+    // Scissor already resolved on the presented vertical axis (target X).
     std::int32_t ScissorX0 = 0;
     std::int32_t ScissorX1 = 0;
-    // Começo do viewport em X (a linha de baixo da tela) e quantos pixels do
-    // alvo têm as kGlWidescreenCornerHeight linhas de baixo.
+    // Viewport start in X (the bottom row of the screen) and how many target
+    // pixels the kGlWidescreenCornerHeight bottom rows take.
     std::int32_t BottomX = 0;
     std::int32_t CornerHeight = 0;
-    // Pixels do alvo das kGlWidescreenCornerWidth colunas do menu.
+    // Target pixels of the menu's kGlWidescreenCornerWidth columns.
     std::int32_t CornerWidth = 0;
     std::int32_t TargetHeight = 0;
 };
 
-// Até 4 passes: o meio do menu (em cima de tudo e a faixa de baixo entre os
-// cantos) no lugar, e os dois cantos de baixo encostados nas bordas do alvo.
-// Cada pixel do menu sai em um único passe.
+// Up to 4 passes: the middle of the menu (everything above plus the bottom strip between the
+// corners) in place, and the two bottom corners against the target's edges.
+// Each menu pixel comes out in exactly one pass.
 [[nodiscard]] inline std::size_t ResolveGlWidescreenCornerPasses(
     const GlWidescreenPresentedAxis& axis, const GlWidescreenCornerInput& input,
     std::array<GlWidescreenPass, 4>& passes) noexcept {
@@ -491,9 +500,9 @@ struct GlWidescreenCornerInput {
     return count;
 }
 
-// Toque/ponteiro com os cantos deslocados (mesma regra do desenho): um ponto
-// num canto de baixo da janela, fora do menu, vai para o canto equivalente
-// do menu realocado, onde o jogo o espera. `width`x`height` = janela.
+// Touch/pointer with the shifted corners (same rule as drawing): a point
+// in a bottom corner of the window, outside the menu, goes to the equivalent corner
+// of the relocated menu, where the game expects it. `width`x`height` = window.
 struct GlWidescreenPointer {
     float X = 0.0F;
     float Y = 0.0F;
@@ -506,13 +515,13 @@ struct GlWidescreenPointer {
         return pointer;
     const float canvasWidth = std::min(width, height * kNativeTopScreenAspect);
     const float canvasX = (width - canvasWidth) * 0.5F;
-    const float unit = canvasWidth / 400.0F; // pixel apresentado nativo
+    const float unit = canvasWidth / 400.0F; // native presented pixel
     const float menuBegin = canvasX + 40.0F * unit;
     const float menuEnd = canvasX + 360.0F * unit;
     const float cornerWidth = static_cast<float>(kGlWidescreenCornerWidth) * unit;
     const float cornerTop =
         height - static_cast<float>(kGlWidescreenCornerHeight) * height / 240.0F;
-    // Sem margem além do quadro 5:3 (janela 5:3) não há o que deslocar.
+    // No margin beyond the 5:3 frame (5:3 window): nothing to shift.
     if (canvasX <= 0.5F || y < cornerTop)
         return pointer;
     if (x < cornerWidth)
@@ -522,15 +531,15 @@ struct GlWidescreenPointer {
     return pointer;
 }
 
-// Diagnóstico da classificação (desligado sem o arquivo): com
-// sdmc:/switch/oot3dre/config/widescreen_menus_log presente (desktop: variável
-// TRIAEVUM_GL_WIDESCREEN_MENUS_LOG com o caminho do arquivo de saída), o
-// backend grava em logs/widescreen_menus.txt uma linha por assinatura distinta
-// de draw no alvo alargado (viewport, projeção, cobertura, domínio, camada,
-// textura, decisão), até um teto. Serve para conferir no console o que caiu no
-// quadro 5:3 e o que esticou (botão B, fades, painéis) sem trace PICA.
+// Classification diagnostics (off without the file): with
+// sdmc:/switch/oot3dre/config/widescreen_menus_log present (desktop: variable
+// TRIAEVUM_GL_WIDESCREEN_MENUS_LOG with the output file path), the
+// backend writes to logs/widescreen_menus.txt one line per distinct draw signature
+// in the widened target (viewport, projection, coverage, domain, layer,
+// texture, decision), up to a cap. Used to check on the console what landed in the
+// 5:3 frame and what stretched (B button, fades, panels) without a PICA trace.
 struct GlWidescreenDrawLogFacts {
-    std::array<float, 4> Viewport{}; // X, Y, largura, altura (nativos)
+    std::array<float, 4> Viewport{}; // X, Y, width, height (native)
     std::uint16_t FramebufferWidth = 0;
     std::uint16_t FramebufferHeight = 0;
     std::uint8_t ScissorMode = 0;
@@ -592,16 +601,16 @@ struct GlWidescreenDrawLogFacts {
 [[nodiscard]] inline std::string FormatGlWidescreenDrawLogLine(
     const GlWidescreenDrawLogFacts& facts, const GlWidescreenDrawEvidence& evidence,
     const GlWidescreenDrawPlacement& placement) {
-    const char* shape = evidence.Projection == GlProjectionShape::Orthographic ? "orto"
+    const char* shape = evidence.Projection == GlProjectionShape::Orthographic ? "ortho"
                         : evidence.Projection == GlProjectionShape::Perspective ? "persp"
                                                                                 : "?";
     char text[640];
     int length = std::snprintf(
         text, sizeof(text),
         "%s%s vp=%.0f,%.0f,%.0f,%.0f fb=%ux%u sc=%u:%u,%u,%u,%u dom=%u cam=%u "
-        "proj=%s aniso=%.4f cobre_vp=%d vp_largura=%d vp_alvo=%d copia=%d "
-        "atm=%d tipada=%d sem_tex=%d vtx=%u vs=%016llx tex=%u:%08x/%u",
-        placement.FillTarget ? "TELA" : placement.Canvas ? "QUADRO" : "ESTICA",
+        "proj=%s aniso=%.4f covers_vp=%d vp_width=%d vp_target=%d copy=%d "
+        "atm=%d typed=%d no_tex=%d vtx=%u vs=%016llx tex=%u:%08x/%u",
+        placement.FillTarget ? "SCREEN" : placement.Canvas ? "FRAME" : "STRETCH",
         placement.CompensateWidening ? "+COMP" : "",
         static_cast<double>(facts.Viewport[0]), static_cast<double>(facts.Viewport[1]),
         static_cast<double>(facts.Viewport[2]), static_cast<double>(facts.Viewport[3]),
@@ -625,7 +634,7 @@ struct GlWidescreenDrawLogFacts {
                                                                sizeof(text) - 1U)
                                        : 0U);
     if (placement.SplitCorners)
-        line.insert(0, "CANTOS ");
+        line.insert(0, "CORNERS ");
     if (evidence.BoundsKnown) {
         length = std::snprintf(text, sizeof(text), " ndc=v%.3f..%.3f,h%.3f..%.3f",
                                static_cast<double>(evidence.NdcMin[0]),
@@ -647,7 +656,7 @@ struct GlWidescreenDrawLogFacts {
     return line;
 }
 
-// Arquivo de saída do diagnóstico, ou vazio se desligado. Lido uma vez.
+// Diagnostic output file, or empty if off. Read once.
 [[nodiscard]] inline const std::string& GlWidescreenMenusLogPath() {
     static const std::string path = []() -> std::string {
 #if defined(__SWITCH__)

@@ -1,7 +1,119 @@
-> **Fork com port para Nintendo Switch.** Este fork de [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum)
-> adiciona correções e otimizações para o homebrew de Switch — veja [SWITCH_PORT.md](SWITCH_PORT.md).
-> Para portar outros jogos de 3DS reaproveitando essas técnicas, veja o [guia de port 3DS → Switch](docs/GUIA_PORT_3DS_SWITCH.md).
-> Todo o crédito do projeto é do autor original e dos projetos que ele credita abaixo. Nenhuma ROM é distribuída.
+> **Nintendo Switch port, in English.** This fork of
+> [GustavoHenriqueRocha/TriAevum-Switch](https://github.com/GustavoHenriqueRocha/TriAevum-Switch), the Switch port of
+> [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum), translates the port into English and adds gyro aiming,
+> touchscreen controls, a performance overlay, in-game updates and a first-launch import of your own cartridge dump.
+> All credit for the recompilation, runtime and renderer goes to those projects and the ones credited below.
+> No ROM or game data is distributed. Port notes: [SWITCH_PORT.md](SWITCH_PORT.md); 3DS → Switch porting
+> guide: [docs/PORTING_GUIDE_3DS_SWITCH.md](docs/PORTING_GUIDE_3DS_SWITCH.md).
+
+## Nintendo Switch
+
+**You need** a Switch running Atmosphère and a decrypted dump of your own *Ocarina of Time 3D* cartridge
+(`.3ds` or `.cci`): USA Rev 1 (En, Fr, Es) or European (original or Rev 1). GodMode9 on a modded 3DS can
+dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
+
+1. Download `oot3dre-<version>-switch.zip` from [Releases](https://github.com/JohnUzoka/TriAevum-Switch/releases)
+   and extract it to the root of the SD card. It creates `switch/oot3dre/`.
+2. Copy your dump into `switch/oot3dre/`.
+3. Start the game with a game's memory: hold R while starting any game, then open it from the homebrew menu.
+   The first start turns your dump into the game files (about a minute), then asks whether to keep (A) or
+   delete (Y) the dump. A forwarder on the HOME menu made with [Sphaira](https://github.com/NaGaa95/sphaira)
+   works too; forwarders from the nsp-forwarder website have been reported to close the game, so if you try
+   one, please send `switch/oot3dre/boot-status.txt` and the `logs` folder.
+
+- **Menu:** press both sticks in (L3+R3) for settings, the performance overlay, updates and Exit game.
+  Touch works in the menu too.
+- **Controls:** gyro aiming with the console, a Pro Controller or a pair of Joy-Cons; tap the on-screen
+  item, X/Y and D-pad icons; drag a finger on empty screen to aim. L3+R3 → Controls → Camera → Free
+  camera → Smoothing Off makes the free camera stop as soon as you let go of the stick.
+- **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept. The game
+  also checks when it starts and shows a notice for a few seconds when a newer version is out; L3+R3 →
+  Updates → Check at launch turns that off.
+- **Performance:** at stock clocks lighter areas run at full speed and busy ones slow down (the CPU is
+  the limit). L3+R3 → Video → **Performance mode** On raises the CPU to 1224 MHz, the GPU to 460.8 MHz
+  and the memory to 1600 MHz (each also on its own row; off by default, more battery use); the clocks
+  go back to normal when you turn it off, press HOME, sleep or exit. sys-clk still works and takes
+  precedence.
+- **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
+  unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
+- **Gameplay (L3+R3 → Game → Gameplay):** *Landing roll (N64)* (on by default) rolls after a run jump off a
+  ledge as on N64; *Roll dash* (off by default) is Single Screen Experience's Roll Dash: keep A held after
+  a roll and Link dashes. Its dash animations come with the HUD art download below; a game set up with an
+  earlier version is offered the download again at the next start once Roll dash is on.
+- **HUD art, downloaded on the console:** the single-screen HUD's art comes from the TopScreen mod
+  ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0), whose license
+  lets you download and install it but not share it. The first start offers to download it from
+  GameBanana (56 MB) and builds the HUD textures, the HD HUD art and the HD text font from your game
+  files: A downloads, B asks again next time, X never asks (L3+R3 → Updates turns the offer back on).
+  Without internet, download `singlescreen_322.zip` from that page on a PC and copy it into
+  `switch/oot3dre/`. Without the mod the game still runs, with the game's own HUD art.
+
+### HD textures (optional)
+
+HenrikoMagnifico's texture pack replaces the world, character and HUD textures with sharper ones.
+
+1. Download the **1080p** version of the
+   [Ocarina of Time 3D 4K texture pack](https://www.henrikomagnifico.com/zelda-ocarina-of-time-3d-4k)
+   (`OOT3D 4K 5.0a (1080p).zip`, 1.9 GB). If Google Drive says the download quota is exceeded, use the
+   MediaFire mirror on the same page.
+2. Make a copy at the sizes the Switch uses, on a PC: install [Python 3](https://www.python.org/downloads/)
+   and Pillow (`pip install pillow`), download
+   [`shrink_texture_pack.py`](tools/switch/shrink_texture_pack.py) into the same folder as the zip, and run
+
+   ```
+   python shrink_texture_pack.py "OOT3D 4K 5.0a (1080p).zip" textures
+   ```
+
+   It writes a `textures` folder of about 350 MB instead of 1.9 GB (world 2x the original, HUD 3x), so
+   the Switch also loads it faster. Add `--parts hud,models` for the HUD and characters only (65 MB).
+   `--models 3` keeps characters, creatures and Link at 3x (38 MB instead of 21 MB); then set
+   "HD texture size" to 3x in the game, or it draws them at 2x.
+   Skipping this step works too: copy the contents of the zip's `user/load/textures/0004000000033500/`
+   folder instead, and the game reduces each texture as it loads it.
+3. Copy the contents of `textures` (the folders and `pack.json`) to `switch/oot3dre/textures/` on the SD
+   card, whatever your dump's region.
+4. In the game, L3+R3 → Video → **HD textures**. It applies at once and turns off the same way.
+   "HD texture size" (default 2x) is the most the world textures are drawn at. Once the game has
+   checked your pack (a few seconds after HD textures come on, the first time), the menu offers only
+   sizes your pack has: 1x and 2x for the copy from step 2, up to 3x with `--models 3`, all of them for
+   the 1080p pack.
+
+Higher resolution costs some GPU time and memory (about 10–50 MB of textures per area at 2x): if a busy
+area slows down, compare the same spot with HD textures off, using the performance overlay.
+
+### Mods: Link models and other game files (optional)
+
+Mods made for the 3DS that replace the game's files (Luma's `romfs` folder) work on the Switch
+too. Get them yourself from the mod's page; the port includes and downloads none.
+
+1. Make a folder per mod in `switch/oot3dre/mods/` and put the mod's `romfs` folder in it, e.g.
+   [Vanilla+ Link remodel](https://gamebanana.com/mods/705890) →
+   `switch/oot3dre/mods/vanilla_plus_link/romfs/actor/zelda_link_boy_new.zar` (its `actor` and `misc`
+   folders). For Better Link v3, use its romfs-only variant (without `code.ips`), the same way.
+2. Start the game. The first start with a new or changed mod takes a moment ("Applying the
+   mods..."); `switch/oot3dre/logs/oot3d_native_game.log` lists what was applied, e.g.
+   `romfs mods: 26 files from 1 mod (vanilla_plus_link), 0 ignored`.
+
+- Mods apply in folder name order; when two replace the same file, the later folder wins.
+- **Turn them off:** L3+R3 → Game → Gameplay → **Mods (RomFS)**. It applies at the next start.
+- Texture-only mods (e.g. Art-Accurate Link, PNG files for Citra/Azahar) are texture packs: copy
+  them into `switch/oot3dre/textures/` instead (see HD textures above). With the HD pack installed
+  too, the first file in name order wins, so the pack's `LINK` folder beats a mod's loose files:
+  put the mod in a folder whose name starts with `0`, e.g. `textures/0-art-accurate-link/`.
+- **N64 models** (ModLoader64 `.pak`/`.zobj`, e.g. Skilar's TP Link): convert them with
+  [Ocarina ReTuned](https://github.com/OTPR26/Ocarina-ReTuned/blob/main/documentation/Player-models.md)
+  on a PC (Settings → Mods → PAK Importer, after preparing your dump there). It writes
+  `player-models/<id>/converted.zar` in its data folder (`%LOCALAPPDATA%\Ocarina ReTuned` on Windows,
+  `~/Library/Application Support/Ocarina ReTuned` on macOS, `~/.local/share/Ocarina ReTuned` on
+  Linux; the most recently modified `<id>` folder is your last import). Copy it as
+  `switch/oot3dre/mods/<name>/romfs/actor/zelda_link_boy_new.zar` for adult Link or
+  `zelda_link_child_new.zar` for child Link.
+- **What does not work:** code patches (`code.ips`, `exefs/`: the game's code is compiled ahead of
+  time) and mods that add new files the game does not have. They are skipped and the log says why.
+- **Save states** made with other mods (or with none) do not load; in-game saves are not affected.
+- A mod's new materials may draw a little slower at first: the console cannot compile shaders, so
+  missing ones use a slower general shader (they are saved in `logs/deko3d_shaders/` for the next
+  shader pack).
 
 # TriAevum — Echoes of Time
 

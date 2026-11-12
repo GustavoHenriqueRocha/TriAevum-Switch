@@ -1,6 +1,8 @@
 // Copyright 2016 Citra Emulator Project
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
+// Modified by TriAevum contributors; the Switch port's changes (2026-10-17)
+// are listed in docs/AZAHAR_AUDIO_PROVENANCE.md.
 
 #pragma once
 

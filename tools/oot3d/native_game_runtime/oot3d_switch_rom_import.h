@@ -1,15 +1,14 @@
 #pragma once
 
-// Importação, no primeiro início, do dump decriptado do jogador para
-// sdmc:/switch/oot3dre/game/ (oot3d_rom_import.h), com uma tela de progresso
-// no console do libnx. Chamada no começo do main(), no lançamento padrão do
-// NRO (o do OoT3D), antes de os argumentos serem montados e de qualquer coisa
-// ler o game/. config/no_rom_import desliga.
+// First-launch import of the player's decrypted dump into
+// sdmc:/switch/oot3dre/game/ (oot3d_rom_import.h), with a libnx console
+// progress screen. Called at the start of main(), before the launch
+// arguments are built and anything reads game/.
 
 namespace Oot3dNativeGame {
 
-// Verdadeiro para seguir o boot; falso quando o app deve sair (sem dados do
-// jogo, importação que falhou sem dados anteriores, ou o jogador fechou o app).
+// True to continue booting; false when the app should exit (no game data,
+// a failed import without previous data, or the player closed the app).
 [[nodiscard]] bool RunSwitchRomImport();
 
 } // namespace Oot3dNativeGame

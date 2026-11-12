@@ -95,13 +95,23 @@ bool GuestBlockProfiler::Start(const GuestProfileOptions& options,
     mMaxGapTicks = TicksPerSecond() * mOptions.MaxGapMicroseconds / 1000000U;
     Reset();
     mActive = mSlots != 0U;
-    if (mActive) RegisterWithGuestOverrides();
+    if (mActive) {
+        // At boot, not at the first report: the writer and the spike
+        // profile share the map read-only from here on.
+        if (!mFunctionsLoaded) LoadFunctionMap();
+        // The writer's zeroed set, swapped with the live counters at a dump.
+        mSnapshot.Counts.assign(mSlots, 0U);
+        mSnapshot.Ticks.assign(mSlots, 0U);
+        // A pthread: oot3d_switch_threads.cpp makes it a service thread
+        // (0x3B on cores 1-2), off the game's core.
+        mWriter = std::thread([this] { WriterLoop(); });
+        RegisterWithGuestOverrides();
+    }
     return mActive;
 }
 
+// The frame-level fields; the counters are new (Start) or were swapped out.
 void GuestBlockProfiler::Reset() noexcept {
-    std::fill(mCounts.begin(), mCounts.end(), 0U);
-    std::fill(mTicks.begin(), mTicks.end(), 0U);
     mTotalEntries = 0U;
     mOutside = 0U;
     mGaps = 0U;
@@ -115,6 +125,7 @@ void GuestBlockProfiler::Reset() noexcept {
 
 GuestBlockProfiler::~GuestBlockProfiler() {
     if (mSpikeOn) FlushSpikes();
+    FinishReports();
 }
 
 bool GuestBlockProfiler::EnableSpikes(const GuestSpikeConfig& config,
@@ -131,15 +142,15 @@ bool GuestBlockProfiler::EnableSpikes(const GuestSpikeConfig& config,
     mSpikeLog = log;
     mSpikeSummary = summary;
     mSpikeFlushFrames = std::max(1U, flushFrames);
-    // Um pico pode cair em qualquer quadro: todos medidos.
+    // A spike can land on any frame: measure all of them.
     mOptions.SampleEveryFrames = 1U;
     mSampling = true;
     mSpikeOn = mSpike.Enabled();
     if (mSpikeOn) {
         if (FILE* file = std::fopen(mSpikeLog.string().c_str(), "a")) {
             std::fprintf(file,
-                         "session_start limite_ms=%.2f corte_carregamento_ms=%.2f "
-                         "top=%u funcoes_no_mapa=%zu\n",
+                         "session_start threshold_ms=%.2f load_cutoff_ms=%.2f "
+                         "top=%u functions_in_map=%zu\n",
                          mSpike.Config().ThresholdMs, mSpike.Config().LoadMs,
                          mSpike.Config().TopPerSpike, entries.size());
             std::fclose(file);
@@ -228,8 +239,8 @@ void GuestBlockProfiler::Note(uint32_t pc, uint64_t now) noexcept {
 
 namespace {
 
-// Registro para as substituições nativas (oot3d_native_guest_overrides.h):
-// elas consultam o filtro de repasse e marcam a própria entrada.
+// Registration for the native overrides (oot3d_native_guest_overrides.h):
+// they query the forwarding filter and mark their own entry.
 bool OverrideForwards(const void* user, uint32_t first, uint32_t last) noexcept {
     return static_cast<const GuestBlockProfiler*>(user)->ForwardsRange(first, last);
 }
@@ -258,7 +269,7 @@ void GuestBlockProfiler::OnBlockEntry(uint32_t pc,
     self.Note(pc, Ticks());
     if (self.mCallback != nullptr && self.IsHook(pc)) {
         self.mCallback(pc, state, memory, self.mCallbackUser);
-        // O tempo do gancho (política do host) não é do bloco guest.
+        // Hook time (host policy) does not belong to the guest block.
         self.mLastTicks = Ticks();
         return;
     }
@@ -268,13 +279,13 @@ void GuestBlockProfiler::OnBlockEntry(uint32_t pc,
 bool GuestBlockProfiler::OnHostFrame(uint64_t hostFrame) {
     if (!mActive) return false;
     if (mSpikeOn) {
-        // O quadro que terminou: pico? O primeiro inclui a carga inicial.
+        // The frame that just ended: spike? The first includes the initial load.
         if (mSpikeFrameSeen) {
             (void)mSpike.EndFrame(hostFrame, mTotalEntries - mSpikeEntriesStart);
         } else {
             mSpikeFrameSeen = true;
             mSpikeLastFlush = hostFrame;
-            (void)mSpike.EndFrame(hostFrame, 0U); // a carga inicial (load=1)
+            (void)mSpike.EndFrame(hostFrame, 0U); // the initial load (load=1)
         }
         mSpikeEntriesStart = mTotalEntries;
         if (hostFrame - mSpikeLastFlush >= mSpikeFlushFrames) {
@@ -282,7 +293,10 @@ bool GuestBlockProfiler::OnHostFrame(uint64_t hostFrame) {
             FlushSpikes();
         }
     }
-    if (mSampling) ++mSampledFrames;
+    if (mSampling) {
+        ++mSampledFrames;
+        ++mSampledSinceReport;
+    }
     if (!mFrameSeen) {
         mFrameSeen = true;
         mStartFrame = hostFrame;
@@ -290,16 +304,97 @@ bool GuestBlockProfiler::OnHostFrame(uint64_t hostFrame) {
     }
     if (mOptions.DumpEveryHostFrames != 0U &&
         hostFrame - mLastDumpFrame >= mOptions.DumpEveryHostFrames) {
-        WriteReport(hostFrame);
-        mLastDumpFrame = hostFrame;
-        if (mOptions.Window) {
-            Reset();
-            mStartFrame = hostFrame;
+        // The writer sorts and writes; while it is still on the previous
+        // report (a slow SD write) the next frame tries again.
+        if (QueueReport(false)) {
+            mLastDumpFrame = hostFrame;
+            if (mOptions.Window) {
+                Reset();
+                mStartFrame = hostFrame;
+            }
+        } else {
+            ++mReportsPostponed;
         }
     }
     mSampling = (hostFrame + 1U) % mOptions.SampleEveryFrames == 0U;
     mLastSlot = UINT32_MAX;
     return mSampling;
+}
+
+bool GuestBlockProfiler::QueueReport(bool wait) {
+    std::unique_lock lock(mWriterMutex, std::defer_lock);
+    if (wait) {
+        lock.lock();
+        mWriterChanged.wait(lock, [this] { return mSnapshotState == SnapshotState::Spare; });
+    } else if (!lock.try_lock() || mSnapshotState != SnapshotState::Spare) {
+        return false;
+    }
+    // The writer's set is zeroed: the live counters continue from zero, the
+    // writer folds them into its totals (window=0) or reports them alone.
+    mCounts.swap(mSnapshot.Counts);
+    mTicks.swap(mSnapshot.Ticks);
+    mSnapshot.TotalEntries = mTotalEntries;
+    mSnapshot.Outside = mOutside;
+    mSnapshot.Gaps = mGaps;
+    mSnapshot.GapTicks = mGapTicks;
+    mSnapshot.SampledFrames = mSampledFrames;
+    mSnapshot.ElapsedTicks = Ticks() - mStartTicks;
+    mSnapshot.Window = mOptions.Window;
+    mSnapshot.Appendix.clear();
+    if (mAppendix) {
+        // Counters the game thread owns (native overrides): read here.
+        std::ostringstream appendix;
+        appendix << '\n';
+        mAppendix(appendix);
+        mSnapshot.Appendix = appendix.str();
+    }
+    mSampledSinceReport = 0U;
+    mSnapshotState = SnapshotState::Queued;
+    lock.unlock();
+    mWriterChanged.notify_all();
+    return true;
+}
+
+void GuestBlockProfiler::WriterLoop() {
+    std::unique_lock lock(mWriterMutex);
+    for (;;) {
+        mWriterChanged.wait(lock, [this] {
+            return mWriterStop || mSnapshotState == SnapshotState::Queued;
+        });
+        if (mSnapshotState != SnapshotState::Queued) return;  // stopped
+        mSnapshotState = SnapshotState::Writing;
+        lock.unlock();
+        const bool ok = WriteReport(mSnapshot);
+        lock.lock();
+        mLastWriteOk = ok;
+        mReportsWritten.fetch_add(1U, std::memory_order_relaxed);
+        mSnapshotState = SnapshotState::Spare;
+        mWriterChanged.notify_all();
+    }
+}
+
+void GuestBlockProfiler::StopWriter() {
+    if (!mWriter.joinable()) return;
+    {
+        std::lock_guard lock(mWriterMutex);
+        mWriterStop = true;
+    }
+    mWriterChanged.notify_all();
+    mWriter.join();
+}
+
+void GuestBlockProfiler::WaitWriterIdle() {
+    std::unique_lock lock(mWriterMutex);
+    mWriterChanged.wait(lock, [this] { return mSnapshotState == SnapshotState::Spare; });
+}
+
+bool GuestBlockProfiler::FinishReports() {
+    if (!mWriter.joinable()) return mLastWriteOk;
+    // Frames measured since the last report: one more, from here.
+    if (mFrameSeen && mSampledSinceReport != 0U) QueueReport(true);
+    WaitWriterIdle();
+    StopWriter();
+    return mLastWriteOk;
 }
 
 void GuestBlockProfiler::LoadFunctionMap() {
@@ -318,13 +413,11 @@ void GuestBlockProfiler::LoadFunctionMap() {
     std::sort(mFunctions.begin(), mFunctions.end());
 }
 
-bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
-    if (!mActive) return false;
-    static_cast<void>(hostFrame);
-    if (!mFunctionsLoaded) LoadFunctionMap();
+bool GuestBlockProfiler::WriteReport(ReportSnapshot& snapshot) {
     const double ticksPerMs = static_cast<double>(TicksPerSecond()) / 1000.0;
-    const uint64_t elapsed = Ticks() - mStartTicks;
-    const uint64_t frames = mSampledFrames; // quadros medidos
+    const uint64_t elapsed = snapshot.ElapsedTicks;
+    const uint64_t frames = snapshot.SampledFrames; // measured frames
+    const uint64_t totalEntries = snapshot.TotalEntries;
 
     struct Row {
         uint32_t Pc = 0U;
@@ -334,12 +427,38 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
     };
     std::vector<Row> blocks;
     uint64_t attributed = 0U;
-    for (uint32_t slot = 0; slot < mSlots; ++slot) {
-        if (mCounts[slot] == 0U && mTicks[slot] == 0U) continue;
-        blocks.push_back({mBase + slot * 4U, mCounts[slot], mTicks[slot], 1U});
-        attributed += mTicks[slot];
+    const auto addBlock = [&](uint32_t slot, uint64_t count, uint64_t ticks) {
+        blocks.push_back({mBase + slot * 4U, count, ticks, 1U});
+        attributed += ticks;
+    };
+    if (snapshot.Window) {
+        for (uint32_t slot = 0; slot < mSlots; ++slot) {
+            if (snapshot.Counts[slot] == 0U && snapshot.Ticks[slot] == 0U) continue;
+            addBlock(slot, snapshot.Counts[slot], snapshot.Ticks[slot]);
+        }
+    } else {
+        // Cumulative: the counters since the previous report join the
+        // totals (both by slot).
+        std::vector<SlotTotal> merged;
+        merged.reserve(mTotals.size() + 4096U);
+        size_t next = 0U;
+        for (uint32_t slot = 0; slot < mSlots; ++slot) {
+            const bool live = snapshot.Counts[slot] != 0U || snapshot.Ticks[slot] != 0U;
+            const bool known = next < mTotals.size() && mTotals[next].Slot == slot;
+            if (!live && !known) continue;
+            SlotTotal total{slot, 0U, 0U};
+            if (known) total = mTotals[next++];
+            total.Count += snapshot.Counts[slot];
+            total.Ticks += snapshot.Ticks[slot];
+            merged.push_back(total);
+        }
+        mTotals.swap(merged);
+        for (const auto& total : mTotals) addBlock(total.Slot, total.Count, total.Ticks);
     }
-    // Agrega por função: maior entrada do mapa <= pc.
+    // Zeroed again for the next swap.
+    std::fill(snapshot.Counts.begin(), snapshot.Counts.end(), 0U);
+    std::fill(snapshot.Ticks.begin(), snapshot.Ticks.end(), 0U);
+    // Aggregate by function: greatest map entry <= pc.
     std::vector<Row> functions;
     if (!mFunctions.empty()) {
         std::vector<Row> byIndex(mFunctions.size());
@@ -380,21 +499,21 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
     const double attributedMs = static_cast<double>(attributed) / ticksPerMs;
     std::snprintf(line, sizeof(line),
                   "# triaevum guest_profile v1\n"
-                  "# quadros_medidos=%" PRIu64 " (1 a cada %u) janela_ms=%.1f entradas_de_bloco=%" PRIu64
-                  " fora_do_codigo=%" PRIu64 "\n"
-                  "# tempo_atribuido_ms=%.1f (%.2f ms/quadro) intervalos_descartados=%" PRIu64
-                  " (%.1f ms, guest fora: SVC/host)\n"
-                  "# tempo por bloco = desde a entrada do bloco ate a proxima entrada,\n"
-                  "# inclui a sobrecarga do proprio perfil (~constante por entrada).\n",
+                  "# sampled_frames=%" PRIu64 " (1 of every %u) window_ms=%.1f block_entries=%" PRIu64
+                  " outside_code=%" PRIu64 "\n"
+                  "# attributed_ms=%.1f (%.2f ms/frame) dropped_gaps=%" PRIu64
+                  " (%.1f ms, guest away: SVC/host)\n"
+                  "# time per block = from the block's entry to the next entry,\n"
+                  "# includes the profiler's own overhead (~constant per entry).\n",
                   frames, mOptions.SampleEveryFrames, static_cast<double>(elapsed) / ticksPerMs,
-                  mTotalEntries,
-                  mOutside, attributedMs,
-                  frames != 0U ? attributedMs / static_cast<double>(frames) : 0.0, mGaps,
-                  static_cast<double>(mGapTicks) / ticksPerMs);
+                  totalEntries,
+                  snapshot.Outside, attributedMs,
+                  frames != 0U ? attributedMs / static_cast<double>(frames) : 0.0, snapshot.Gaps,
+                  static_cast<double>(snapshot.GapTicks) / ticksPerMs);
     out << line;
     if (!functions.empty()) {
-        out << "\n# funcoes: entrada | %tempo | ms | ms/quadro | entradas | %entradas | "
-               "ns/entrada | blocos | nome\n";
+        out << "\n# functions: entry | %time | ms | ms/frame | entries | %entries | "
+               "ns/entry | blocks | name\n";
         const size_t limit = std::min<size_t>(functions.size(), mOptions.TopFunctions);
         for (size_t i = 0; i < limit; ++i) {
             const auto& row = functions[i];
@@ -406,14 +525,14 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
                                                  static_cast<double>(attributed) : 0.0,
                           ms, frames != 0U ? ms / static_cast<double>(frames) : 0.0,
                           row.Count,
-                          mTotalEntries != 0U ? 100.0 * static_cast<double>(row.Count) /
-                                                    static_cast<double>(mTotalEntries) : 0.0,
+                          totalEntries != 0U ? 100.0 * static_cast<double>(row.Count) /
+                                                   static_cast<double>(totalEntries) : 0.0,
                           row.Count != 0U ? ms * 1.0e6 / static_cast<double>(row.Count) : 0.0,
-                          row.Blocks, row.Pc == 0U ? "(fora do mapa)" : nameOf(row.Pc).c_str());
+                          row.Blocks, row.Pc == 0U ? "(outside map)" : nameOf(row.Pc).c_str());
             out << line;
         }
     }
-    out << "\n# blocos: pc | %tempo | ms | entradas | ns/entrada\n";
+    out << "\n# blocks: pc | %time | ms | entries | ns/entry\n";
     const size_t limit = std::min<size_t>(blocks.size(), mOptions.TopBlocks);
     for (size_t i = 0; i < limit; ++i) {
         const auto& row = blocks[i];
@@ -426,10 +545,7 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
                       row.Count != 0U ? ms * 1.0e6 / static_cast<double>(row.Count) : 0.0);
         out << line;
     }
-    if (mAppendix) {
-        out << '\n';
-        mAppendix(out);
-    }
+    out << snapshot.Appendix;
     return static_cast<bool>(out);
 }
 

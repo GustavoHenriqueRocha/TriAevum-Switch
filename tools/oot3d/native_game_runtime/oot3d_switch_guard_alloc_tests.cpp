@@ -1,5 +1,5 @@
-// Alocador com páginas de guarda (oot3d_switch_guard_alloc.h): leitura de
-// config/guard_alloc, posição do objeto na página e a quarentena FIFO.
+// Guard-page allocator (oot3d_switch_guard_alloc.h): parsing of
+// config/guard_alloc, object position in the page and the FIFO quarantine.
 #include "oot3d_switch_guard_alloc.h"
 
 #include <cstdlib>
@@ -22,25 +22,25 @@ void TestParse() {
     Require(ParseConfig("", config) && config.MinSize == 57U && config.MaxSize == 72U &&
                 config.QuarantineBlocks == 131072U && config.MaxLive == 32768U &&
                 config.GuardMode == Mode::Canary,
-            "empty file must be the default 57..72 / 131072 / 32768 canario");
+            "empty file must be the default 57..72 / 131072 / 32768 canary");
     Require(ParseConfig("57 72 100 2000", config) && config.QuarantineBlocks == 100U &&
                 config.MaxLive == 2000U,
             "quarantine and live cap");
     Require(ParseConfig("40 96\r\n", config) && config.MinSize == 40U && config.MaxSize == 96U &&
                 config.QuarantineBlocks == 131072U,
             "range only keeps the default quarantine");
-    Require(ParseConfig("57 72 32768 32768 pagina", config) && config.GuardMode == Mode::Page &&
+    Require(ParseConfig("57 72 32768 32768 page", config) && config.GuardMode == Mode::Page &&
                 config.QuarantineBlocks == kMaxPageQuarantine,
             "page mode must clamp the quarantine (32768 closed pages broke audio and FS)");
-    Require(ParseConfig("57 72 2000 100 pagina", config) && config.QuarantineBlocks == 2000U,
+    Require(ParseConfig("57 72 2000 100 page", config) && config.QuarantineBlocks == 2000U,
             "page mode below the clamp is kept");
-    Require(ParseConfig("57 72 canario", config) && config.GuardMode == Mode::Canary &&
+    Require(ParseConfig("57 72 canary", config) && config.GuardMode == Mode::Canary &&
                 config.QuarantineBlocks == 131072U,
             "mode right after the range");
     Require(ParseConfig("57 72 1 1 pagin", config) == false, "unknown mode");
-    Require(ParseConfig("57 72 1 1 canario 5", config) == false, "number after the mode");
-    Require(ParseConfig("1 3969 0 1 pagina", config) == false, "max past the header must be rejected");
-    Require(ParseConfig("1 3968 0 1 pagina", config), "max right after the header is fine");
+    Require(ParseConfig("57 72 1 1 canary 5", config) == false, "number after the mode");
+    Require(ParseConfig("1 3969 0 1 page", config) == false, "max past the header must be rejected");
+    Require(ParseConfig("1 3968 0 1 page", config), "max right after the header is fine");
     Require(ParseConfig("72 57", config) == false, "min > max must be rejected");
     Require(ParseConfig("0 72", config) == false, "min 0 must be rejected");
     Require(ParseConfig("57 72 x", config) == false, "garbage must be rejected");
@@ -51,7 +51,7 @@ void TestParse() {
 
 void TestLayout() {
     const Config config;
-    // O chunk corrompido dos tours 16-20: 0x50 bytes = pedidos de 57 a 72.
+    // The corrupted chunk from tours 16-20: 0x50 bytes = requests of 57 to 72.
     Require(!InRange(config, 56U) && InRange(config, 57U) && InRange(config, 72U) &&
                 !InRange(config, 73U),
             "default range must be exactly the 0x50 chunk class");
@@ -79,7 +79,7 @@ void TestCanary() {
     Require(FindCanaryChanges(object, snapshot, sizeof(object), ranges, 2U, changed) == 0U &&
                 changed == 0U,
             "untouched object");
-    // A escrita dos tours 16-20: 0x00ed5391'0000001a no byte 8.
+    // The write from tours 16-20: 0x00ed5391'0000001a at byte 8.
     const uint8_t write[8] = {0x1a, 0, 0, 0, 0x91, 0x53, 0xed, 0};
     for (size_t index = 0; index < 8U; ++index) object[8U + index] = write[index];
     object[70] = static_cast<uint8_t>(snapshot[70] + 1U);
@@ -90,9 +90,9 @@ void TestCanary() {
             "ranges are merged and capped; every changed byte is counted");
     Require(sizeof(CanaryHeader) == 384U, "canary header is 384 bytes");
     Config config;
-    Require(ParseConfig("57 129 1 1 canario", config) == false,
+    Require(ParseConfig("57 129 1 1 canary", config) == false,
             "canary range must fit the snapshot");
-    Require(ParseConfig("57 129 1 1 pagina", config), "page mode has no snapshot limit");
+    Require(ParseConfig("57 129 1 1 page", config), "page mode has no snapshot limit");
 
     uintptr_t storage[2];
     PointerRing ring(storage, 2U);

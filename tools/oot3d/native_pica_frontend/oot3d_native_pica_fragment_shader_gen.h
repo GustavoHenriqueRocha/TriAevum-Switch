@@ -55,6 +55,13 @@ uint64_t ComputeOot3dPicaFragmentShaderStateKey(
 Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
     const Oot3dPicaDrawPacket& packet);
 
+// The same uniform state written into `uniforms`, which must be
+// default-constructed. reuseFogTable: the converted fog table comes from
+// this thread's previous call when the raw table is equal (exact).
+void BuildOot3dPicaFragmentUniformStateInto(
+    const Oot3dPicaDrawPacket& packet, Oot3dPicaFragmentUniformState& uniforms,
+    bool reuseFogTable);
+
 // OfflineSource emits identical code without draw-time uniforms or resident
 // lighting LUTs. It rejects missing data that would be embedded into source.
 bool GenerateOot3dPicaFragmentShader(
@@ -66,12 +73,13 @@ bool GenerateOot3dPicaFragmentShader(
     Oot3dPicaTevMode mode = Oot3dPicaTevMode::Specialized);
 
 // The parametric program of one structural configuration. Its text depends
-// only on native fragment lighting, an integer (shadow) texture 0 and the
-// procedural texture unit; every parametric draw program is one of these,
-// with draw-specific hooks.
+// only on native fragment lighting (with or without lookup tables), an
+// integer (shadow) texture 0 and the procedural texture unit; every
+// parametric draw program is one of these, with draw-specific hooks. `lightingLuts` false: the lit family whose
+// decoded state disables every lookup table (no LUT texture).
 bool GenerateOot3dPicaParametricBaseFragmentShader(
     bool fragmentLighting, bool integerTexture0,
     Oot3dPicaGeneratedFragmentShader& shader, std::string* error = nullptr,
-    bool procTex = true);
+    bool lightingLuts = true, bool procTex = true);
 
 } // namespace Oot3dNativeGame

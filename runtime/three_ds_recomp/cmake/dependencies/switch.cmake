@@ -13,10 +13,14 @@ if(NOT nlohmann_json_FOUND)
     FetchContent_MakeAvailable(nlohmann_json)
 endif()
 
-# The portlibs package does not currently export a tinyxml2 CMake target.
+# Older portlibs do not export a tinyxml2 CMake package at all; switch-tinyxml2
+# 6.0.0-2 exports one whose only target is tinyxml2_static, without the
+# tinyxml2::tinyxml2 name the runtime links.
 set(tinyxml2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 find_package(tinyxml2 QUIET)
-if(NOT tinyxml2_FOUND)
+if(tinyxml2_FOUND AND NOT TARGET tinyxml2::tinyxml2 AND TARGET tinyxml2_static)
+    add_library(tinyxml2::tinyxml2 ALIAS tinyxml2_static)
+elseif(NOT tinyxml2_FOUND)
     FetchContent_Declare(
         tinyxml2
         GIT_REPOSITORY https://github.com/leethomason/tinyxml2.git
@@ -76,7 +80,7 @@ find_library(GLAPI_LIBRARY glapi
     HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
 find_library(DRM_NOUVEAU_LIBRARY drm_nouveau
     HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
-# deko3d backend (config/renderer = deko3d; docs/DEKO3D_PROGRESSO.md).
+# deko3d backend (config/renderer = deko3d; docs/DEKO3D_PROGRESS.md).
 find_library(DEKO3D_LIBRARY deko3d
     HINTS "${DEVKITPRO}/libnx/lib" REQUIRED)
 # Debug variant (libdeko3dd): validates every call and reports GPU faults

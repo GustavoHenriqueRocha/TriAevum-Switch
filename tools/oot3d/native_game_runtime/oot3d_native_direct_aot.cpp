@@ -253,6 +253,11 @@ std::span<const uint32_t> Oot3dWholeAotEntryPoints() noexcept {
                                                         program->DispatchCount);
 }
 
+Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept {
+  // Plugins export only default-lowering code (every block is gated).
+  return {};
+}
+
 bool ExecuteOot3dWholeAotFunction(
     uint32_t pc, a32::GuestState &state, NativeA32Memory &memory,
     a32::ExecutionResult *result, Oot3dWholeAotStats *stats,

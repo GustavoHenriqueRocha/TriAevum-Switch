@@ -26,6 +26,24 @@ represented as copied Azahar implementation. Later TriAevum commits add
 save-state validation and runtime integration; Git history preserves those
 changes separately from the donor baseline.
 
+## Switch port changes
+
+The Switch port (GustavoHenriqueRocha/TriAevum-Switch and its English fork)
+changes these GPL-2.0-or-later files further; each carries a notice:
+
+- 2026-10-17, `4282aae7`: optional per-source interpolation (cubic and sinc)
+  in `audio_core/interpolate.cpp`, `interpolate.h` and `hle/source.cpp`;
+- 2026-10-17, `8ee3f632`: cheaper HLE DSP mixing, bit-for-bit identical, in
+  `audio_core/codec.cpp`, `codec.h`, `hle/mixers.cpp`, `hle/mixers.h`,
+  `hle/source.cpp`, `interpolate.cpp` and `sample_queue.h`;
+- 2026-11-05, `f8b96aa2`: mixing in place, ADPCM decodes shared between
+  sources and two outputs per step in `audio_core/interpolate.cpp`,
+  `hle/source.cpp`, `hle/source.h` and `sample_queue.h`, with the new
+  TriAevum file `audio_core/adpcm_decode_cache.h`.
+
+`sample_queue.h` and `adpcm_decode_cache.h` are TriAevum storage code (their
+headers say so); the audio algorithms they serve remain Azahar's.
+
 ## Reproduction
 
 With the Azahar repository available locally, compare the trees with:

@@ -22,9 +22,9 @@ struct AtomicConfigWriteResult {
     nlohmann::json block);
 
 // Writes a complete document to a sibling temporary and atomically replaces
-// the destination. A failed write never truncates the last valid config.
-// No Switch a troca leva dois passos (ship/config/FileReplace.h): os leitores
-// chamam Ship::RestoreInterruptedReplace(path) antes de ler.
+// the destination. A failed write never truncates the last valid config. On
+// the Switch the replace takes two moves (ship/config/FileReplace.h): loaders
+// call Ship::RestoreInterruptedReplace(path) before reading.
 [[nodiscard]] AtomicConfigWriteResult WriteConfigFileAtomically(
     const std::filesystem::path& target,
     std::string_view contents);

@@ -1,4 +1,4 @@
-// Watchdog de travamento: ver oot3d_hang_watchdog.h.
+// Hang watchdog: see oot3d_hang_watchdog.h.
 #include "oot3d_hang_watchdog.h"
 
 #include <chrono>
@@ -15,7 +15,7 @@
 
 namespace Oot3dNativeGame::HangWatch {
 
-// ---- relógio -----------------------------------------------------------------
+// ---- clock -------------------------------------------------------------------
 
 uint64_t NowTicks() noexcept {
 #if defined(__SWITCH__)
@@ -35,7 +35,7 @@ uint64_t TicksToMicroseconds(uint64_t ticks) noexcept {
 #endif
 }
 
-// ---- texto -------------------------------------------------------------------
+// ---- text --------------------------------------------------------------------
 
 Text& Text::Char(char value) noexcept {
     if (mSize + 1U < mCapacity) {
@@ -86,7 +86,7 @@ Text& Text::Hex(uint64_t value) noexcept {
     return *this;
 }
 
-// ---- política ----------------------------------------------------------------
+// ---- policy ------------------------------------------------------------------
 
 StallTracker::Result StallTracker::Observe(const Observation& observation) noexcept {
     constexpr size_t kThreads = static_cast<size_t>(Thread::Count);
@@ -94,7 +94,7 @@ StallTracker::Result StallTracker::Observe(const Observation& observation) noexc
     const uint64_t now = observation.NowMilliseconds;
     const bool resumed = mStarted && now - mLastObservation > mPolicy.SuspendGapMilliseconds;
     if (!mStarted || !observation.Active || resumed || now < mLastObservation) {
-        // Começo, fora de foco ou volta de uma suspensão: nada parado conta.
+        // Start, out of focus or back from a suspend: no stall counts.
         for (size_t index = 0; index < kThreads; ++index) {
             mLastProgress[index] = observation.Progress[index];
             mLastChange[index] = now;
@@ -119,7 +119,7 @@ StallTracker::Result StallTracker::Observe(const Observation& observation) noexc
         }
     }
     if (mReported) {
-        // Recuperou quando toda thread que estava parada no relatório andou.
+        // Recovered when every thread that was stalled in the report moved.
         for (size_t index = 0; index < kThreads; ++index) {
             if ((mReportedMask & (1U << index)) != 0U &&
                 observation.Progress[index] == mProgressAtReport[index]) {
@@ -160,7 +160,7 @@ void ReportEvent(const char*, const char*) noexcept {}
 namespace {
 
 constexpr const char* kDisablePath = "sdmc:/switch/oot3dre/config/no_hang_watchdog";
-constexpr const char* kHangPath = "/switch/oot3dre/logs/hang.txt";  // no sdmc
+constexpr const char* kHangPath = "/switch/oot3dre/logs/hang.txt";  // without sdmc
 constexpr uint32_t kMaximumReports = 8U;
 constexpr size_t kMaximumThreads = 48U;
 
@@ -175,7 +175,7 @@ uint64_t gStartTicks = 0;
 uintptr_t gTextBegin = 0;
 uintptr_t gTextEnd = 0;
 
-// Um relatório por vez (watchdog ou ReportEvent), sem lock que bloqueie.
+// One report at a time (watchdog or ReportEvent), with no blocking lock.
 std::atomic<bool> gWriting{false};
 char gReportBuffer[64 * 1024];
 
@@ -183,7 +183,7 @@ uint64_t UptimeMilliseconds() noexcept {
     return TicksToMicroseconds(NowTicks() - gStartTicks) / 1000U;
 }
 
-// ---- memória do próprio processo ----------------------------------------------
+// ---- the process's own memory -------------------------------------------------
 
 struct Region {
     uintptr_t Begin = 0;
@@ -229,9 +229,9 @@ void AppendCode(Text& text, uint64_t address) {
     if (InText(address)) text.Str("(+").Hex(address - gTextBegin).Char(')');
 }
 
-// ---- estado de uma thread ------------------------------------------------------
+// ---- state of a thread ---------------------------------------------------------
 
-// Cadeia de frame pointers e varredura da pilha atrás de endereços de código.
+// Frame pointer chain and stack scan for code addresses.
 struct FrameTrace {
     uint64_t Chain[16] = {};
     size_t ChainCount = 0U;
@@ -282,21 +282,21 @@ void AppendFrame(Text& text, const FaultFrame& frame, const FrameTrace& trace) {
 void AppendThreadContext(Text& text, Handle handle) {
     const Handle self = threadGetCurHandle();
     if (handle == self) {
-        text.Str("  ctx: (thread que grava o relatório)\n");
+        text.Str("  ctx: (thread writing the report)\n");
         return;
     }
     if (!envIsSyscallHinted(0x32) || !envIsSyscallHinted(0x33)) {
-        text.Str("  ctx: svcSetThreadActivity/svcGetThreadContext3 não permitidos pelo NPDM\n");
+        text.Str("  ctx: svcSetThreadActivity/svcGetThreadContext3 not allowed by the NPDM\n");
         return;
     }
     Result result = svcSetThreadActivity(handle, ThreadActivity_Paused);
     if (R_FAILED(result)) {
-        text.Str("  ctx: pausa falhou rc=").Hex(result).Char('\n');
+        text.Str("  ctx: pause failed rc=").Hex(result).Char('\n');
         return;
     }
     ThreadContext context{};
     result = svcGetThreadContext3(&context, handle);
-    // Lido com a thread parada; ela volta a rodar logo depois.
+    // Read with the thread stopped; it resumes right after.
     FrameTrace trace;
     if (R_SUCCEEDED(result)) trace.Collect(context.fp, context.sp);
     svcSetThreadActivity(handle, ThreadActivity_Runnable);
@@ -336,19 +336,19 @@ void AppendThreads(Text& text, const StallTracker::Result* verdict) {
             .Str(StageName(slot.CurrentStage.load(std::memory_order_relaxed)))
             .Str(" progress=").Dec(slot.Progress.load(std::memory_order_relaxed));
         if (verdict != nullptr) {
-            text.Str(" parada_ms=").Dec(verdict->StalledFor[index]);
-            if ((verdict->StalledMask & (1U << index)) != 0U) text.Str(" PARADA");
+            text.Str(" stall_ms=").Dec(verdict->StalledFor[index]);
+            if ((verdict->StalledMask & (1U << index)) != 0U) text.Str(" STALLED");
         }
         text.Str(" handle=").Hex(handle).Char('\n');
         AppendThreadContext(text, handle);
     }
-    // As demais threads registradas (serviço: Mesa, spdlog, carregadores...):
-    // quem segura um lock que o jogo espera aparece aqui.
+    // The other registered threads (service: Mesa, spdlog, loaders...):
+    // whoever holds a lock the game is waiting on shows up here.
     uint32_t handles[kMaximumThreads];
     SwitchThreadRole roles[kMaximumThreads];
     const size_t count = SnapshotSwitchThreads(handles, roles, kMaximumThreads);
     if (count == 0U) {
-        text.Str("outras threads: registro ocupado ou vazio\n");
+        text.Str("other threads: registry busy or empty\n");
         return;
     }
     for (size_t index = 0; index < count; ++index) {
@@ -366,17 +366,17 @@ void AppendCommon(Text& text) {
         const uint64_t start = service.StartTicks.load(std::memory_order_relaxed);
         const uint64_t end = service.EndTicks.load(std::memory_order_relaxed);
         const uint64_t now = NowTicks();
-        text.Str("ultima_chamada_servico=").Str(name)
-            .Str(" chamadas=").Dec(service.Calls.load(std::memory_order_relaxed))
-            .Str(" ha_ms=").Dec(TicksToMicroseconds(now - start) / 1000U);
+        text.Str("last_service_call=").Str(name)
+            .Str(" calls=").Dec(service.Calls.load(std::memory_order_relaxed))
+            .Str(" ago_ms=").Dec(TicksToMicroseconds(now - start) / 1000U);
         if (end == 0U || end < start) {
-            text.Str(" EM_ANDAMENTO");
+            text.Str(" IN_PROGRESS");
         } else {
-            text.Str(" duracao_us=").Dec(TicksToMicroseconds(end - start));
+            text.Str(" duration_us=").Dec(TicksToMicroseconds(end - start));
         }
         text.Char('\n');
     } else {
-        text.Str("ultima_chamada_servico=nenhuma\n");
+        text.Str("last_service_call=none\n");
     }
     if (gExtra != nullptr) {
         gExtra(gExtraUser, text);
@@ -386,10 +386,10 @@ void AppendCommon(Text& text) {
 
 void AppendHeader(Text& text, const char* title) {
     text.Str("=== ").Str(title).Str(" ===\n");
-    text.Str("uptime_ms=").Dec(UptimeMilliseconds()).Str(" relatorio=")
+    text.Str("uptime_ms=").Dec(UptimeMilliseconds()).Str(" report=")
         .Dec(gReports.load(std::memory_order_relaxed) + 1U).Str(" nro_text=").Hex(gTextBegin)
         .Str("..").Hex(gTextEnd)
-        .Str(" (addr2line -e oot3d_native_game.elf <offset entre parênteses>)\n");
+        .Str(" (addr2line -e oot3d_native_game.elf <offset in parentheses>)\n");
 }
 
 bool AppendToFile(const char* data, size_t size) noexcept {
@@ -398,7 +398,7 @@ bool AppendToFile(const char* data, size_t size) noexcept {
     for (size_t index = 0; kHangPath[index] != '\0' && index + 1U < sizeof(path); ++index) {
         path[index] = kHangPath[index];
     }
-    fsFsCreateFile(gSdmc, path, 0, 0);  // já existe: erro ignorado
+    fsFsCreateFile(gSdmc, path, 0, 0);  // already exists: error ignored
     FsFile file;
     if (R_FAILED(fsFsOpenFile(gSdmc, path, FsOpenMode_Write | FsOpenMode_Append, &file))) {
         return false;
@@ -411,7 +411,7 @@ bool AppendToFile(const char* data, size_t size) noexcept {
     return R_SUCCEEDED(result);
 }
 
-// Exclusão do buffer de relatório; espera até ~1 s pelo outro escritor.
+// Report buffer exclusion; waits up to ~1 s for the other writer.
 bool AcquireWriter() noexcept {
     for (int attempt = 0; attempt < 100; ++attempt) {
         bool expected = false;
@@ -430,8 +430,8 @@ void ReleaseWriter() noexcept {
 void WriteHang(const StallTracker::Result& verdict) {
     if (gReports.load(std::memory_order_relaxed) >= kMaximumReports || !AcquireWriter()) return;
     Text text(gReportBuffer, sizeof(gReportBuffer));
-    AppendHeader(text, "TRAVAMENTO (hang watchdog)");
-    text.Str("parada_max_ms=").Dec(verdict.Milliseconds).Char('\n');
+    AppendHeader(text, "HANG (hang watchdog)");
+    text.Str("max_stall_ms=").Dec(verdict.Milliseconds).Char('\n');
     AppendCommon(text);
     AppendThreads(text, &verdict);
     text.Char('\n');
@@ -445,7 +445,7 @@ void WriteRecovered(const StallTracker::Result& verdict) {
     if (!AcquireWriter()) return;
     char buffer[256];
     Text text(buffer, sizeof(buffer));
-    text.Str("--- recuperou após ").Dec(verdict.Milliseconds).Str(" ms (uptime_ms=")
+    text.Str("--- recovered after ").Dec(verdict.Milliseconds).Str(" ms (uptime_ms=")
         .Dec(UptimeMilliseconds()).Str(")\n\n");
     AppendToFile(text.Data(), text.Size());
     ReleaseWriter();
@@ -458,7 +458,7 @@ bool InFocus() noexcept {
 void WatchdogLoop() {
     StallTracker tracker;
     while (!gStop.load(std::memory_order_acquire)) {
-        // ~1 s, em fatias, para o Stop não esperar.
+        // ~1 s, in slices, so Stop does not wait.
         for (int slice = 0; slice < 10 && !gStop.load(std::memory_order_acquire); ++slice) {
             svcSleepThread(100'000'000LL);
         }
@@ -469,9 +469,9 @@ void WatchdogLoop() {
         for (size_t index = 0; index < static_cast<size_t>(Thread::Count); ++index) {
             const Slot& slot = gSlots[index];
             const bool bound = slot.Bound.load(std::memory_order_acquire) != 0U;
-            // Vigiadas: o jogo e a render thread (as outras só aparecem no
-            // relatório). A render thread ociosa (sem comando na fila) não
-            // está travada: espera o jogo.
+            // Watched: the game and the render thread (the others only appear in
+            // the report). An idle render thread (no command queued) is not
+            // hung: it is waiting on the game.
             const bool renderIdle =
                 index == static_cast<size_t>(Thread::Render) &&
                 slot.CurrentStage.load(std::memory_order_relaxed) ==
@@ -517,7 +517,7 @@ void Start(ExtraReporter extra, void* user) noexcept {
     gExtraUser = user;
     gStop.store(false, std::memory_order_release);
     try {
-        // Nasce como thread de serviço (0x3B, núcleos 1|2: oot3d_switch_threads.cpp).
+        // Starts as a service thread (0x3B, cores 1|2: oot3d_switch_threads.cpp).
         gThread = std::thread(WatchdogLoop);
         gRunning.store(true, std::memory_order_release);
     } catch (...) {
@@ -568,7 +568,7 @@ void ReportFault(const char* title, const char* details, const FaultFrame& frame
     Text text(gReportBuffer, sizeof(gReportBuffer));
     AppendHeader(text, title);
     text.Str(details).Char('\n');
-    text.Str("thread_que_falhou=").Hex(threadGetCurHandle());
+    text.Str("failed_thread=").Hex(threadGetCurHandle());
     if (const char* name = SlotNameForHandle(threadGetCurHandle())) text.Char(' ').Str(name);
     text.Char('\n');
     FrameTrace trace;

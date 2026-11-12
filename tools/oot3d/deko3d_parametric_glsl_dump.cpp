@@ -1,8 +1,11 @@
-// Writes the GLSL 4.3 text of the eight parametric (uber) fragment programs
-// the deko3d backend falls back to, as frag_<key>.glsl, the same names the
-// game records for shaders missing from shadercache/deko3d.pack. Then
-// tools/oot3d/deko3d_shader_pack.py --glsl <dir> compiles them into the pack,
-// so the always-available programs are there from the first launch.
+// Writes the GLSL 4.3 text of the twelve parametric (uber) fragment programs
+// the deko3d backend falls back to (unlit, lit with lookup tables, lit
+// without, each with a float or an integer texture 0, each with or without
+// the procedural texture unit), as frag_<key>.glsl,
+// the same names the game records for shaders missing from
+// shadercache/deko3d.pack. Then tools/oot3d/deko3d_shader_pack.py --glsl <dir>
+// compiles them into the pack, so the always-available programs are there
+// from the first launch.
 //
 //   oot3d_deko3d_parametric_glsl_dump <dir>
 #include "fast/backends/gfx_deko3d_shader_pack.h"
@@ -12,36 +15,47 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::fprintf(stderr, "uso: %s <diretório>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <directory>\n", argv[0]);
         return 2;
     }
     const std::filesystem::path directory(argv[1]);
     std::filesystem::create_directories(directory);
+    struct Base {
+        bool Lighting;
+        bool IntegerTexture0;
+        bool LightingLuts;
+    };
+    constexpr Base kBases[] = {{false, false, true}, {true, false, true},  {false, true, true},
+                               {true, true, true},   {true, false, false}, {true, true, false}};
     int written = 0;
-    for (unsigned index = 0; index < 8U; ++index) {
+    for (unsigned index = 0; index < 2U * std::size(kBases); ++index) {
+        const Base& base = kBases[index % std::size(kBases)];
+        const bool procTex = index >= std::size(kBases);
         Oot3dNativeGame::Oot3dPicaGeneratedFragmentShader generated;
         std::string error;
-        if (!Oot3dNativeGame::GenerateOot3dPicaParametricBaseFragmentShader((index & 1U) != 0U, (index & 2U) != 0U,
-                                                                              generated, &error, (index & 4U) != 0U)) {
-            std::fprintf(stderr, "base %u: sem programa paramétrico (%s)\n", index, error.c_str());
+        if (!Oot3dNativeGame::GenerateOot3dPicaParametricBaseFragmentShader(
+                base.Lighting, base.IntegerTexture0, generated, &error, base.LightingLuts, procTex)) {
+            std::fprintf(stderr, "base %u: no parametric program (%s)\n", index, error.c_str());
             continue;
         }
         std::string translated;
         if (!Fast::Renderer3ds::TranslatePicaShaderToOpenGl43(generated.Source, translated, &error)) {
-            std::fprintf(stderr, "base %u: tradução GL 4.3 falhou (%s)\n", index, error.c_str());
+            std::fprintf(stderr, "base %u: GL 4.3 translation failed (%s)\n", index, error.c_str());
             return 1;
         }
         const uint64_t key = Fast::Deko3d::ShaderTextKey(Fast::Deko3d::ShaderStage::Fragment, translated);
         char name[64];
         std::snprintf(name, sizeof(name), "frag_%016llx.glsl", static_cast<unsigned long long>(key));
         std::ofstream(directory / name, std::ios::binary | std::ios::trunc) << translated;
-        std::printf("base %u (luz=%u, textura0 inteira=%u, proctex=%u): %s, %zu bytes\n", index, index & 1U,
-                    (index >> 1) & 1U, (index >> 2) & 1U, name, translated.size());
+        std::printf("base %u (light=%u, luts=%u, integer texture0=%u, proctex=%u): %s, %zu bytes\n", index,
+                    base.Lighting ? 1U : 0U, base.Lighting && base.LightingLuts ? 1U : 0U,
+                    base.IntegerTexture0 ? 1U : 0U, procTex ? 1U : 0U, name, translated.size());
         ++written;
     }
-    return written == 8 ? 0 : 1;
+    return written == static_cast<int>(2U * std::size(kBases)) ? 0 : 1;
 }

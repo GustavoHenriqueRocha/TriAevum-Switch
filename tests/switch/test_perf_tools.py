@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regressão das ferramentas de análise do perf.txt (sem build)."""
+"""Regression tests for the perf.txt analysis tools (no build)."""
 import sys
 from pathlib import Path
 
@@ -14,31 +14,31 @@ def check(name, condition):
 
 
 def main():
-    # tour22 (23/10): o perf.txt tinha o tour21 lento antes; a média do arquivo
-    # inteiro deu 48 refresh perdidos por janela, a sessão certa dava 4.
+    # tour22 (23/10): the perf.txt had the slow tour21 before it; the whole-file
+    # average gave 48 missed refreshes per window, the right session gave 4.
     lines = [
         "host_frames=150 fps=30 missed_refresh=90 guest=39.5\n",
         "host_frames=300 fps=30 missed_refresh=90 guest=39.5\n",
-        "outra linha qualquer\n",
+        "some other line\n",
         "host_frames=150 fps=59 missed_refresh=4 guest=8.5\n",
         "host_frames=300 fps=60 missed_refresh=2 guest=8.0\n",
         "host_frames=450 fps=58 missed_refresh=6 guest=9.0\n",
     ]
     ok = True
     count, avg = summary.summarize(lines, ["fps", "missed_refresh", "guest"])
-    ok &= check("só a última sessão entra na média (perf.txt acumulado)",
+    ok &= check("only the last session goes into the average (accumulated perf.txt)",
                 count == 3 and abs(avg["missed_refresh"] - 4.0) < 1e-9)
     count, avg = summary.summarize(lines, ["missed_refresh"], first=2)
-    ok &= check("--first conta janelas da última sessão",
+    ok &= check("--first counts windows of the last session",
                 count == 2 and abs(avg["missed_refresh"] - 3.0) < 1e-9)
-    ok &= check("campo ausente não quebra", "x" not in summary.summarize(lines, ["x"])[1])
-    # tour21: limite de 14 ms com a instrumentação ligada (39,5 ms/quadro).
-    header = ["# limite_ms=14.00 corte_carregamento_ms=50.00 quadros=13051 picos=12659 picos_carregamento=728\n"]
+    ok &= check("missing field doesn't break", "x" not in summary.summarize(lines, ["x"])[1])
+    # tour21: 14 ms limit with instrumentation on (39.5 ms/frame).
+    header = ["# threshold_ms=14.00 load_cutoff_ms=50.00 frames=13051 spikes=12659 load_spikes=728\n"]
     ratio = summary.guest_spike_saturation(header)
-    ok &= check("perfil de picos saturado é detectado (tour21)", ratio is not None and ratio > 0.5)
-    ok &= check("perfil útil não é marcado",
-                summary.guest_spike_saturation(["quadros=1000 picos=40\n"]) < 0.5)
-    # 24/10: spikes.txt acumula sessões (tour20: 591 linhas, 428 do tour19).
+    ok &= check("saturated spike profile is detected (tour21)", ratio is not None and ratio > 0.5)
+    ok &= check("useful profile is not flagged",
+                summary.guest_spike_saturation(["frames=1000 spikes=40\n"]) < 0.5)
+    # 24/10: spikes.txt accumulates sessions (tour20: 591 lines, 428 from tour19).
     spikes = [
         "session_start pacer_vsync=0\n",
         "spike host=500 guest=500 expected=1 stage=guest guest_ms=30 game_ms=40 ctx=-\n",
@@ -50,18 +50,18 @@ def main():
         "spike host=1201 guest=1201 expected=1 stage=guest guest_ms=22 game_ms=27 ctx=-\n",
     ]
     rows = spike_report.last_session(spikes)
-    ok &= check("picos: só a última sessão do spikes.txt", len(rows) == 5)
+    ok &= check("spikes: only the last session of spikes.txt", len(rows) == 5)
     out = spike_report.outside_load(rows)
-    ok &= check("picos: ctx=load fica de fora", len(out) == 4)
+    ok &= check("spikes: ctx=load is left out", len(out) == 4)
     iso, seq = spike_report.split_isolated(out)
-    ok &= check("picos: boot fora, isolado vs sequência",
+    ok &= check("spikes: boot excluded, isolated vs sequence",
                 [int(r["host"]) for r in iso] == [700] and len(seq) == 2)
-    # som/DSP noutro núcleo (~1,7 ms) só salva estouro pequeno (3/95 no tour20+22).
-    ok &= check("picos: redução necessária por pico de guest",
+    # sound/DSP on another core (~1.7 ms) only saves small overruns (3/95 in tour20+22).
+    ok &= check("spikes: reduction needed per guest spike",
                 spike_report.fixed_by(out, 1.7) == 1 and spike_report.fixed_by(out, 10) == 3)
     acks = [{"id": 6, "frame": 600}, {"id": "m6", "frame": 800}]
     spans = spike_report.area_spans(acks)
-    ok &= check("picos: área pelo quadro do guest (acks)",
+    ok &= check("spikes: area by guest frame (acks)",
                 spike_report.area_of(out[1], spans) == 6 and spike_report.area_of(out[2], spans) is None)
     return 0 if ok else 1
 

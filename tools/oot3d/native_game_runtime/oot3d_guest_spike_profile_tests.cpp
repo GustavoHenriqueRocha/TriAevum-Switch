@@ -1,6 +1,6 @@
-// Perfil de pico do guest (oot3d_guest_spike_profile.h): limite, agregação
-// por função, top N, anel, resumo, carregamentos, overflow e o parser de
-// config/guest_spike_ms.
+// Guest spike profile (oot3d_guest_spike_profile.h): threshold, aggregation
+// per function, top N, ring, summary, loads, overflow and the
+// config/guest_spike_ms parser.
 #include "oot3d_guest_spike_profile.h"
 
 #include <cmath>
@@ -23,7 +23,7 @@ void Check(bool condition, const char *what, int line) {
 #define CHECK(condition) Check((condition), #condition, __LINE__)
 
 constexpr uint32_t kBase = 0x00100000U;
-constexpr double kTicksPerMs = 19200.0; // cntpct_el0 a 19,2 MHz
+constexpr double kTicksPerMs = 19200.0; // cntpct_el0 at 19.2 MHz
 
 uint64_t Ms(double ms) { return static_cast<uint64_t>(ms * kTicksPerMs); }
 uint32_t Slot(uint32_t pc) { return (pc - kBase) / 4U; }
@@ -58,14 +58,14 @@ void TestParser() {
   ParseGuestSpikeConfig("abc", &e);
   CHECK(e.ThresholdMs == 14.0);
   GuestSpikeConfig f;
-  ParseGuestSpikeConfig("0.2", &f); // abaixo de 1 ms: padrão
+  ParseGuestSpikeConfig("0.2", &f); // below 1 ms: default
   CHECK(f.ThresholdMs == 14.0);
   GuestSpikeConfig g;
-  ParseGuestSpikeConfig("60", &g); // corte padrão abaixo do limite: 4x
+  ParseGuestSpikeConfig("60", &g); // default cutoff below threshold: 4x
   CHECK(g.ThresholdMs == 60.0 && g.LoadMs == 240.0);
 }
 
-// Quadro normal (9 ms): nada registrado, e os acumuladores voltam a zero.
+// Normal frame (9 ms): nothing recorded, and the accumulators go back to zero.
 void TestNormalFrameNotRecorded() {
   auto p = Make();
   p.Add(Slot(0x00110010U), Ms(5.0));
@@ -73,24 +73,24 @@ void TestNormalFrameNotRecorded() {
   CHECK(!p.EndFrame(1U, 1000U));
   CHECK(p.Pending() == 0U);
   CHECK(p.Totals().Frames == 1U && p.Totals().Spikes == 0U);
-  // O quadro seguinte começa do zero: 9 ms de novo não somam 18.
+  // The next frame starts from zero: 9 ms again doesn't add up to 18.
   p.Add(Slot(0x00110010U), Ms(5.0));
   p.Add(Slot(0x00120004U), Ms(4.0));
   CHECK(!p.EndFrame(2U, 1000U));
 }
 
-// Water Temple (tour19): quadro de 22 ms. Blocos da mesma função somam;
-// o top vem em ordem de tempo, com nome e porcentagem.
+// Water Temple (tour19): 22 ms frame. Blocks of the same function add up;
+// the top comes in time order, with name and percentage.
 void TestSpikeAggregatesByFunction() {
   auto p = Make();
-  // Actor_UpdateAll: 3 blocos, 12 ms; BgCheck: 2 blocos, 7 ms; Skin: 3 ms.
+  // Actor_UpdateAll: 3 blocks, 12 ms; BgCheck: 2 blocks, 7 ms; Skin: 3 ms.
   p.Add(Slot(0x00110000U), Ms(4.0));
   p.Add(Slot(0x00110040U), Ms(5.0));
   p.Add(Slot(0x00110080U), Ms(3.0));
   p.Add(Slot(0x00120010U), Ms(6.0));
   p.Add(Slot(0x00120014U), Ms(1.0));
   p.Add(Slot(0x00130000U), Ms(3.0));
-  // Mesmo bloco duas vezes no quadro.
+  // Same block twice in the frame.
   p.Add(Slot(0x00110040U), Ms(0.5));
   CHECK(p.EndFrame(77U, 250000U));
   CHECK(p.Totals().Spikes == 1U);
@@ -107,8 +107,8 @@ void TestSpikeAggregatesByFunction() {
   CHECK(first < second && second < third);
 }
 
-// Sem mapa de funções: agrega por bloco; código antes da primeira função
-// conta pelo próprio PC.
+// Without a function map: aggregates per block; code before the first function
+// counts by its own PC.
 void TestWithoutFunctionMap() {
   GuestSpikeProfile p;
   p.Configure({}, kBase, 0x003CA000U / 4U, kTicksPerMs, {});
@@ -121,15 +121,15 @@ void TestWithoutFunctionMap() {
   CHECK(text.find("fn=0x00110080 ms=6.000") != std::string::npos);
   CHECK(text.find("name=-") != std::string::npos);
   auto q = Make();
-  q.Add(Slot(0x00100100U), Ms(20.0)); // antes de 0x00110000
+  q.Add(Slot(0x00100100U), Ms(20.0)); // before 0x00110000
   CHECK(q.EndFrame(6U, 10U));
   std::string other;
   (void)q.DrainLines(other, Name);
   CHECK(other.find("fn=0x00100100 ms=20.000") != std::string::npos);
 }
 
-// Top N limitado; o resumo soma todas as funções dos picos fora de
-// carregamento e ordena por tempo total.
+// Limited top N; the summary adds up all functions from spikes outside of
+// loads and sorts by total time.
 void TestTopLimitAndSummary() {
   GuestSpikeConfig config;
   config.TopPerSpike = 2U;
@@ -140,7 +140,7 @@ void TestTopLimitAndSummary() {
     p.Add(Slot(0x00130000U), Ms(2.0));
     CHECK(p.EndFrame(10U + frame, 1U));
   }
-  // Um carregamento (120 ms): no log com load=1, fora do resumo.
+  // A load (120 ms): in the log with load=1, out of the summary.
   p.Add(Slot(0x00130000U), Ms(120.0));
   CHECK(p.EndFrame(20U, 1U));
   std::string text;
@@ -153,7 +153,7 @@ void TestTopLimitAndSummary() {
   CHECK(text.find("load=1") != std::string::npos);
   std::string summary;
   p.FormatSummary(summary, Name);
-  CHECK(summary.find("picos=4 picos_carregamento=1") != std::string::npos);
+  CHECK(summary.find("spikes=4 load_spikes=1") != std::string::npos);
   const auto actor = summary.find("0x00110000     24.00");
   const auto bg = summary.find("0x00120000     18.00");
   const auto skin = summary.find("0x00130000      6.00");
@@ -161,11 +161,11 @@ void TestTopLimitAndSummary() {
         skin != std::string::npos);
   CHECK(actor < bg && bg < skin);
   CHECK(summary.find("Actor_UpdateAll") != std::string::npos);
-  // guest_ms_medio_pico = (15 + 16 + 17) / 3.
-  CHECK(summary.find("guest_ms_medio_pico=16.000") != std::string::npos);
+  // guest_ms_avg_spike = (15 + 16 + 17) / 3.
+  CHECK(summary.find("guest_ms_avg_spike=16.000") != std::string::npos);
 }
 
-// Anel cheio: o mais antigo sai e é contado.
+// Full ring: the oldest goes out and is counted.
 void TestRingOverflow() {
   GuestSpikeConfig config;
   config.RingCapacity = 4U;
@@ -182,8 +182,8 @@ void TestRingOverflow() {
   CHECK(text.find("host_frame=2 ") < text.find("host_frame=5 "));
 }
 
-// Mais blocos que a lista de tocados: o tempo do quadro conta inteiro, os
-// blocos a mais ficam fora do top e nada vaza para o quadro seguinte.
+// More blocks than the touched list: the frame time counts in full, the
+// extra blocks stay out of the top and nothing leaks into the next frame.
 void TestTouchedOverflow() {
   GuestSpikeConfig config;
   config.TouchedCapacity = 8U;
@@ -197,12 +197,12 @@ void TestTouchedOverflow() {
   CHECK(text.find("guest_ms=20.00") != std::string::npos);
   CHECK(text.find("blocks=8 ") != std::string::npos);
   CHECK(text.find("overflow=1") != std::string::npos);
-  // Quadro seguinte limpo.
+  // Next frame clean.
   p.Add(Slot(0x00110000U), Ms(1.0));
   CHECK(!p.EndFrame(2U, 1U));
 }
 
-// Muitos quadros com 1 pico a cada 10: contagens certas e o anel esvazia.
+// Many frames with 1 spike every 10: correct counts and the ring empties.
 void TestManyFrames() {
   auto p = Make();
   std::string text;

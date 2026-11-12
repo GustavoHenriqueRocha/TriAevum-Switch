@@ -289,6 +289,10 @@ public:
   static constexpr size_t kMaxMissWindow = 240U;
   static constexpr size_t kGamePairRing = 64U;
 
+  // Everything but the cumulative Stats starts over: a new rate (L3+R3 >
+  // Video > FPS at once, oot3d_native_rate_pacing.h) leaves the governor as
+  // a start at that rate would, with no interval measured against the old
+  // refresh.
   void Configure(const Fps60ModeConfig &config, double refreshMs) noexcept {
     mConfig = config;
     mConfig.MissWindow = std::clamp<uint32_t>(
@@ -308,6 +312,15 @@ public:
     mGameRing = {};
     mGameCount = 0U;
     mGameIndex = 0U;
+    mHasPresent = false;
+    mLastPresent = 0.0;
+    mLastStepPresent = 0.0;
+    mHasPicture = false;
+    mPictureRefreshes = 0U;
+    mLastHold = 0U;
+    mLastInBetweenMs = 0.0;
+    mHasLastInBetween = false;
+    mOverheadEmaMs = 0.0;
   }
 
   [[nodiscard]] const Fps60ModeConfig &Config() const noexcept {

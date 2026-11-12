@@ -230,11 +230,14 @@ std::vector<Oot3dPicaVulkanDrawPlan> SerialPlans(
 
 // The guest-side sequence of the drain loop: placeholders into the
 // accumulator, publish, close a frame, resolve it where the renderer would.
-void TestDeferredMatchesSerial(bool worker) {
+// parallel: the console's plan build options (config/plan_*): the prefix of
+// the dependency flush and the frame resolve build beside the worker.
+void TestDeferredMatchesSerial(bool worker, bool parallel = false) {
     constexpr size_t kDraws = 24U;
     const auto expected = SerialPlans(MakeSubmissions(1U, kDraws));
     Oot3dPicaVulkanShaderSourceCache cache;
     Oot3dPicaDeferredPlanBuilder builder(cache);
+    if (parallel) builder.SetBuildOptions(false, true, true);
     builder.Configure(true, worker);
     Require(builder.Deferred() && builder.WorkerEnabled() == worker,
             "builder configuration");
@@ -319,9 +322,10 @@ void TestDeferredMatchesSerial(bool worker) {
             "deferred builds were not counted once each");
 }
 
-void TestSkippedAndFailedSlots() {
+void TestSkippedAndFailedSlots(bool parallel) {
     Oot3dPicaVulkanShaderSourceCache cache;
     Oot3dPicaDeferredPlanBuilder builder(cache);
+    if (parallel) builder.SetBuildOptions(false, true, true);
     builder.Configure(true, true);
     auto submissions = MakeSubmissions(40U, 3U);
     // No vertex snapshot: the serial build fails, so must the deferred one.
@@ -342,9 +346,10 @@ void TestSkippedAndFailedSlots() {
             "a skipped slot was built");
 }
 
-void TestUnpublishedAndStoppedWorker() {
+void TestUnpublishedAndStoppedWorker(bool parallel) {
     Oot3dPicaVulkanShaderSourceCache cache;
     Oot3dPicaDeferredPlanBuilder builder(cache);
+    if (parallel) builder.SetBuildOptions(false, true, true);
     builder.Configure(true, true);
     auto batch = BeginOwned(builder, MakeSubmissions(60U, 2U));
     auto early = builder.MakeDeferredPlan(batch, 0U);
@@ -393,7 +398,7 @@ void TestConcurrentBatches() {
 
 } // namespace
 
-constexpr uint64_t kMaxPlanAllocations = 2U;  // medido em 2026-10-22
+constexpr uint64_t kMaxPlanAllocations = 2U;  // measured on 2026-10-22
 constexpr uint64_t kMaxPlanAllocationsTextured = 3U;
 
 // Allocations of one plan build once the shader cache is warm. The
@@ -493,8 +498,12 @@ int main() {
     TestResolvedFrameOutlivesItsBatch(false);
     TestDeferredMatchesSerial(true);
     TestDeferredMatchesSerial(false);
-    TestSkippedAndFailedSlots();
-    TestUnpublishedAndStoppedWorker();
+    TestDeferredMatchesSerial(true, true);
+    TestDeferredMatchesSerial(false, true);
+    for (const bool parallel : {false, true}) {
+        TestSkippedAndFailedSlots(parallel);
+        TestUnpublishedAndStoppedWorker(parallel);
+    }
     TestConcurrentBatches();
     std::cout << "oot3d_native_pica_deferred_plan_tests: ok\n";
     return 0;

@@ -10,6 +10,9 @@ add_library(oot3d_ui_topscreen STATIC EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_controls.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_gameplay_actions.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp
+    tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_items.cpp
+    tools/oot3d/ui_topscreen/oot3d_host_menu_touch.cpp
+    tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_camera.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp
@@ -27,7 +30,7 @@ target_include_directories(oot3d_ui_topscreen PUBLIC
     tools/oot3d/native_game_runtime
     tools/oot3d/ui_topscreen
 )
-# A troca no save (ship/config/FileReplace.h, só cabeçalho).
+# The HUD touch targets use the renderer's UI fit (ui_presentation_layout.h).
 target_include_directories(oot3d_ui_topscreen PRIVATE
     runtime/three_ds_recomp/include
 )
@@ -49,10 +52,24 @@ add_executable(oot3d_top_screen_mod_profile_tests EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_item_dispatch_tests.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_ocarina_tests.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation_tests.cpp
+    tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_items_tests.cpp
 )
 target_link_libraries(oot3d_top_screen_mod_profile_tests PRIVATE
     oot3d_ui_topscreen)
 oot3d_target_defaults(oot3d_top_screen_mod_profile_tests FOLDER Tests)
+
+add_executable(oot3d_top_screen_hud_touch_tests EXCLUDE_FROM_ALL
+    tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch_tests.cpp
+)
+target_link_libraries(oot3d_top_screen_hud_touch_tests PRIVATE
+    oot3d_ui_topscreen)
+oot3d_target_defaults(oot3d_top_screen_hud_touch_tests FOLDER Tests)
+
+add_executable(oot3d_host_menu_touch_tests EXCLUDE_FROM_ALL
+    tools/oot3d/ui_topscreen/oot3d_host_menu_touch.cpp
+    tools/oot3d/ui_topscreen/oot3d_host_menu_touch_tests.cpp
+)
+oot3d_target_defaults(oot3d_host_menu_touch_tests FOLDER Tests)
 
 add_executable(oot3d_top_screen_items_hint_tests EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint_tests.cpp
@@ -218,6 +235,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 set_property(TARGET oot3d_top_screen_pause_transaction_tests PROPERTY FOLDER Tests)
 
+# TopScreen pause menu at 60 FPS: in-between frames hold the step image while a
+# pause page is up (oot3d_top_screen_menu_cadence.h).
+add_executable(oot3d_top_screen_menu_cadence_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_top_screen_menu_cadence_tests.cpp)
+target_link_libraries(oot3d_top_screen_menu_cadence_tests PRIVATE
+    oot3d_ui_topscreen oot3d_native_a32_process)
+target_compile_options(oot3d_top_screen_menu_cadence_tests PRIVATE "${WARNING_OVERRIDE}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(oot3d_top_screen_menu_cadence_tests PRIVATE NOMINMAX)
+    set_property(TARGET oot3d_top_screen_menu_cadence_tests PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+set_property(TARGET oot3d_top_screen_menu_cadence_tests PROPERTY FOLDER Tests)
+
 add_executable(oot3d_top_screen_item_description_runtime_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_top_screen_item_description_runtime.cpp
     tools/oot3d/native_game_runtime/oot3d_top_screen_item_description_runtime_tests.cpp)
@@ -308,7 +339,7 @@ add_library(oot3d_native_control_config STATIC EXCLUDE_FROM_ALL
 target_include_directories(oot3d_native_control_config PUBLIC
     tools/oot3d/native_game_runtime
 )
-# A troca no save (ship/config/FileReplace.h, só cabeçalho).
+# The replace on save (ship/config/FileReplace.h, header-only).
 target_include_directories(oot3d_native_control_config PRIVATE
     runtime/three_ds_recomp/include
 )
@@ -319,9 +350,9 @@ target_compile_options(oot3d_native_control_config PRIVATE
     "${WARNING_OVERRIDE}")
 oot3d_target_defaults(oot3d_native_control_config NO_WARNING_OVERRIDE FOLDER Tools)
 
-# Regravar um arquivo no Switch: os gravadores de config e de cache contra a
-# semântica de rename do Horizon (EEXIST sobre arquivo existente), simulada
-# pelo rename() do próprio teste. Hosts Linux (renameat2).
+# Saving a file again on the Switch (ship/config/FileReplace.h): the config and
+# cache writers against Horizon's rename semantics (EEXIST over an existing
+# file), simulated by the test's own rename(). Linux hosts (renameat2).
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(oot3d_config_file_replace_tests EXCLUDE_FROM_ALL
         tools/oot3d/native_game_runtime/oot3d_config_file_replace_tests.cpp
@@ -363,9 +394,12 @@ add_executable(oot3d_native_a32_input_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(oot3d_native_a32_input_tests PRIVATE
     oot3d_native_a32_input)
+# The Switch page-touch test places a page with the renderer's own plans.
+target_include_directories(oot3d_native_a32_input_tests PRIVATE
+    runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_native_a32_input_tests FOLDER Tests)
 
-# Seis eixos do Switch -> movimento do 3DS: conversão e média (oot3d_switch_motion.h).
+# Switch six-axis -> 3DS motion conversion and averaging (oot3d_switch_motion.h).
 add_executable(oot3d_switch_motion_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_switch_motion_tests.cpp
     tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp
@@ -373,6 +407,42 @@ add_executable(oot3d_switch_motion_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_switch_motion_tests PRIVATE
     three_ds_recomp_input)
 oot3d_target_defaults(oot3d_switch_motion_tests FOLDER Tests)
+
+# First-launch ROM import core (oot3d_rom_import.h): synthetic NCSD/NCCH,
+# LZSS, COPY program, RomFS adaptation and manifest. `--import <dump> <dir>`
+# runs a real import on the PC. nlohmann_json reads the generated manifest as
+# the runtime does (process.title_id).
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    find_package(nlohmann_json REQUIRED)
+endif()
+add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_rom_import_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+)
+target_link_libraries(oot3d_rom_import_tests PRIVATE nlohmann_json::nlohmann_json)
+oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
+
+# TopScreen HUD texture import core (oot3d_topscreen_import.h): ZIP and RomFS
+# readers, texture codecs, QBF pairing, font pack, PNG codec, HD UI atlas
+# reduction, offer rules and verified writes.
+# `--build <archive> <romfs.bin> <pack.o3tu> <font_coverage.zip> [<atlas.png>]`
+# builds the outputs from the real mod archive, to compare with the Python
+# builders and check the HD atlas against the native one.
+find_package(ZLIB)
+if (ZLIB_FOUND)
+    add_executable(oot3d_topscreen_import_tests EXCLUDE_FROM_ALL
+        tools/oot3d/native_game_runtime/oot3d_topscreen_import_tests.cpp
+        tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp
+        tools/oot3d/native_game_runtime/oot3d_top_screen_link_ext.cpp
+        tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+        runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_scale.cpp
+    )
+    target_compile_features(oot3d_topscreen_import_tests PRIVATE cxx_std_20)
+    target_include_directories(oot3d_topscreen_import_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
+    target_link_libraries(oot3d_topscreen_import_tests PRIVATE ZLIB::ZLIB)
+    oot3d_target_defaults(oot3d_topscreen_import_tests FOLDER Tests)
+endif()
 
 # Input bench: a walk recorded after the boot warp replays frame for frame
 # (oot3d_input_bench.h; config/bench_record, config/bench_replay).
@@ -383,16 +453,13 @@ target_link_libraries(oot3d_input_bench_tests PRIVATE
     oot3d_native_a32_input)
 oot3d_target_defaults(oot3d_input_bench_tests FOLDER Tests)
 
-# Núcleo da importação do dump no primeiro início (oot3d_rom_import.h):
-# NCSD/NCCH sintético, LZSS, programa COPY, adaptação da RomFS e manifesto,
-# sem ROM. `--import <dump> <pasta>` faz uma importação real no PC. O
-# nlohmann_json lê o manifesto gerado como o runtime lê (process.title_id).
-if (NOT TARGET nlohmann_json::nlohmann_json)
-    find_package(nlohmann_json REQUIRED)
-endif()
-add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
-    tools/oot3d/native_game_runtime/oot3d_rom_import_tests.cpp
-    tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+# OTA updater rules: versions, channels, release.json, release selection and
+# the install/rollback steps (oot3d_update_release.h).
+add_executable(oot3d_update_release_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_update_release_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_update_release.cpp
 )
-target_link_libraries(oot3d_rom_import_tests PRIVATE nlohmann_json::nlohmann_json)
-oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
+target_compile_features(oot3d_update_release_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_update_release_tests PRIVATE
+    nlohmann_json::nlohmann_json)
+oot3d_target_defaults(oot3d_update_release_tests FOLDER Tests)

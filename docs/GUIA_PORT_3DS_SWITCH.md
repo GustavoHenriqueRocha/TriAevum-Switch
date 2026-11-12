@@ -1,3 +1,5 @@
+> English version: [PORTING_GUIDE_3DS_SWITCH.md](PORTING_GUIDE_3DS_SWITCH.md)
+
 # Guia de port 3DS → Switch (receita reutilizável)
 
 Receita e checklist para portar o **próximo** jogo de 3DS para o Nintendo Switch homebrew
@@ -14,8 +16,8 @@ console.)
 
 Fontes deste guia: [SWITCH_PORT.md](../SWITCH_PORT.md) (fonte principal),
 [OOT3D_SWITCH_WHOLE_AOT_PORT.md](OOT3D_SWITCH_WHOLE_AOT_PORT.md),
-[SWITCH_PESQUISA_2026-10-17.md](SWITCH_PESQUISA_2026-10-17.md),
-[SWITCH_PESQUISA_XBOX360_2026-10-17.md](SWITCH_PESQUISA_XBOX360_2026-10-17.md),
+[SWITCH_RESEARCH_2026-10-17.md](SWITCH_RESEARCH_2026-10-17.md),
+[SWITCH_RESEARCH_XBOX360_2026-10-17.md](SWITCH_RESEARCH_XBOX360_2026-10-17.md),
 [TRIAEVUM_AOT_LEVERS_RESULTS.md](TRIAEVUM_AOT_LEVERS_RESULTS.md),
 [TRIAEVUM_NATIVE_CPU_COSTS.md](TRIAEVUM_NATIVE_CPU_COSTS.md), o código e as mensagens de commit
 do branch `switch-port` (a partir de `eba0b4b7`, 2026-10-16). Números sem fonte no repositório estão
@@ -164,7 +166,7 @@ Dois tipos:
 2. Criar `config/guest_profile` (chaves opcionais: `sample_every=4`, `dump_frames=900`,
    `top_functions`, `top_blocks`, `window=1`, `max_gap_us=200`). Jogar a cena pesada alguns minutos.
    Sai `logs/guest_profile.txt`: tempo exclusivo por bloco e por função (contador de 19,2 MHz),
-   mais o apêndice `# substituicoes nativas` com `nativa=N recusou=M` por substituição.
+   mais o apêndice `# native overrides` com `native=N declined=M` por substituição.
 3. Agregar por função:
    `python summarize_guest_profile.py --program aot_program.json --switch-profile guest_profile.txt --top 40 --markdown`.
    O script junta dados estáticos (instruções, blocos, VFP, acessos à memória, chamadas, folha) e
@@ -268,7 +270,7 @@ função (500 mil na CirSquare) no lote de blocos (e26eb2d1); 1M por função em
 ASan/UBSan e qemu-aarch64: o harness não tem modo pronto (lacuna 9: `--extra-flags` não vai para o
 link). O padrão de qemu do repo é `run_vfp_aarch64_tests_qemu.sh` (devkitA64 + flags dos shards +
 `qemu_aarch64_test_runtime.cpp`, binário estático `-nostartfiles`), também usado por
-`run_audio_dsp_mix_tests_qemu.sh` e `memory_lean_diff/run_store_sequence_diff.sh` (`ALVO=switch`).
+`run_audio_dsp_mix_tests_qemu.sh` e `memory_lean_diff/run_store_sequence_diff.sh` (`TARGET=switch`).
 
 ### 2.5 As 23 substituições atuais (OoT3D)
 
@@ -506,7 +508,7 @@ substituições + fps60).
 > Contexto já documentado: no Windows, `--local-state` em todas as funções + PGO não ganhou nada
 > (1,000, módulo de 318 MB, TRIAEVUM_AOT_LEVERS_RESULTS.md). No Switch o nfsmw-nx mediu o
 > salvar/restaurar de registradores guest em ~14% da thread principal
-> (SWITCH_PESQUISA_XBOX360_2026-10-17.md), e a lógica do OoT3D é o gargalo na floresta Kokiri com
+> (SWITCH_RESEARCH_XBOX360_2026-10-17.md), e a lógica do OoT3D é o gargalo na floresta Kokiri com
 > fps60.
 
 ---
@@ -985,7 +987,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 
 ### 4.11 deko3d: shaders DKSH pré-compilados (sem compilar no console)
 
-*(2026-10-24, ramo `deko3d`, ver `docs/DEKO3D_PROGRESSO.md`)* No deko3d não existe compilador de
+*(2026-10-24, ramo `deko3d`, ver `docs/DEKO3D_PROGRESS.md`)* No deko3d não existe compilador de
 GLSL no console: os shaders vão prontos (DKSH, do `uam` do devkitPro) num pacote só,
 `shadercache/deko3d.pack`. A técnica é reaproveitável em qualquer port com backend GL:
 
@@ -1047,7 +1049,7 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 - **Nome = hash do conteúdo nativo:** `tex1_{L}x{A}_{HASH}_{fmt}_mip0.png`, com `HASH` = CityHash64
   (`Fast::Renderer::ContentHash64`, só cabeçalho) dos bytes do **nível base** no formato PICA
   (bits por texel: RGBA8 32, RGB8 24, 5551/565/RGBA4/LA8 16, L8/A8/LA4 8, L4/A4/ETC1 4, ETC1A4 8).
-  Ferramenta de host: `tools/oot3d/ptbr/hash_textura.cpp` (vetor de teste: "hello" →
+  Ferramenta de host: `tools/oot3d/ptbr/texture_hash.cpp` (vetor de teste: "hello" →
   `B48BE5A931380CE8`). Mudou a textura na romfs (tradução), mudou o hash: refazer o pack.
 - **Liga por arquivo:** `config/texture_pack` existe → `Configure` com `LoadCustomTextures`; a
   primeira linha é a pasta (padrão `sdmc:/switch/oot3dre/textures`). A varredura é **recursiva**:
@@ -1059,8 +1061,8 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 - **Armadilhas:** referência ao `Texture` nativo, não ao iterador (o `emplace` da substituta pode
   rehash); dentro de `namespace Fast` o nome `Oot3d::Renderer` resolve para `Fast::Oot3d` — use
   `::Oot3d::Renderer::`. A thread de carga é `join()`, nunca `detach()`.
-- **Gerar o pack:** `pacote_texturas.py exportar` (menus 06/07, `menu/map/*`, títulos de área) →
-  Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, roda sem GPU NVIDIA) → `montar` reduz para 2x
+- **Gerar o pack:** `texture_pack.py export` (menus 06/07, `menu/map/*`, títulos de área) →
+  Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, roda sem GPU NVIDIA) → `assemble` reduz para 2x
   com Lanczos e **devolve o alfa da nativa** (bicúbico): o upscaler borra bordas transparentes.
   OoT3D EU: 384 texturas, ~15 MB.
 - **Fonte HD** não precisa do pack: `config/font_coverage.zip` já é neutro de backend; gerar a
@@ -1107,8 +1109,8 @@ O NRO usa o backend de pasta do PC sobre o devoptab da libnx (`SaveDataDirectory
 | `logs/guest_profile.txt` | perfil por função (com `config/guest_profile`) |
 | `logs/failed_pica_*.glsl` | fonte de shader PICA que falhou |
 | `logs/spikes.txt` | com `config/frame_spikes` ou `config/gpu_timing`: `session_start vsync_clock= vsync_source=event\|acquire\|none vsync_rc= vsync_rc_module= vsync_rc_desc= vsync_stage= pacer_vsync= offset_ms=` e uma linha por quadro que perdeu o vsync (4.5): `spike t= host= guest= kind=step\|interp\|hold refreshes= expected= stage=guest\|render\|gpu\|pacer guest_ms= game_ms= render_ms= render_wait_ms= pacer_ms= swap_ms= gpu_ms= top=<etapa glperf> top_ms= ctx=load,tex,shader,program,gl_oom,evict,drs tex_new= prog_new= shader_new=`. `game_ms` = thread do jogo ocupada; `render_wait_ms` = acquire; `top` só com `gpu_timing` (`-` sem); `ctx=load` = troca de cena nos últimos ~2 s; `shader_new` = `glsl_compiles`+`nvc0_translates` do Mesa |
-| `logs/guest_spikes.txt` | com `config/guest_spike_ms` (2.2): `session_start limite_ms= corte_carregamento_ms= top= funcoes_no_mapa=` e, por quadro do jogo acima do limite, `spike host_frame= guest_ms= entries= blocks= functions= load=0\|1 overflow=0\|1` seguido de até 10 linhas `  fn=0x<entrada> ms= pct= name=` (mais caras primeiro; `pct` = % do quadro; `entries` = entradas de bloco, para descontar a sobrecarga; `overflow=1` = mais de 65536 blocos, os excedentes ficaram fora do top) |
-| `logs/guest_spikes_summary.txt` | reescrito a cada 150 quadros: cabeçalho `# limite_ms= corte_carregamento_ms= quadros= picos= picos_carregamento=`, `# guest_ms_medio= guest_ms_medio_pico= anel_descartados= quadros_overflow= resumo_cheio=` e as 30 funções de maior tempo total nos picos fora de carregamento: `entrada ms_total %tempo_pico quadros ms/quadro ms_max nome` |
+| `logs/guest_spikes.txt` | com `config/guest_spike_ms` (2.2): `session_start threshold_ms= load_cutoff_ms= top= functions_in_map=` e, por quadro do jogo acima do limite, `spike host_frame= guest_ms= entries= blocks= functions= load=0\|1 overflow=0\|1` seguido de até 10 linhas `  fn=0x<entrada> ms= pct= name=` (mais caras primeiro; `pct` = % do quadro; `entries` = entradas de bloco, para descontar a sobrecarga; `overflow=1` = mais de 65536 blocos, os excedentes ficaram fora do top) |
+| `logs/guest_spikes_summary.txt` | reescrito a cada 150 quadros: cabeçalho `# threshold_ms= load_cutoff_ms= frames= spikes= load_spikes=`, `# guest_ms_avg= guest_ms_avg_spike= ring_dropped= overflow_frames= summary_full=` e as 30 funções de maior tempo total nos picos fora de carregamento: `entry ms_total %spike_time frames ms/frame ms_max name` |
 | `logs/hang.txt` | watchdog de travamento: etapa e PC/LR/pilha de cada thread quando o jogo ou a render thread param > 3 s; "HEAP CORROMPIDO" da varredura do heap |
 
 ### 5.2 Campos importantes do `perf.txt`
@@ -1122,8 +1124,10 @@ O NRO usa o backend de pasta do PC sobre o devoptab da libnx (`SaveDataDirectory
 - `clocks:` `cpu_mhz gpu_mhz mem_mhz` (clock real medido pelo sys-clk; `clk_src=sysclk_real`, ou
   `sysclk` = alvo, `none` = sys-clk ausente → MHz -1), `op_mode=handheld|docked`,
   `perf_mode=normal|boost`, `sysclk_profile`, `sysclk_enabled`, `sysclk_api`, `clk_ipc_us`. Só
-  leitura: uma chamada `GetCurrentContext` ao `sys:clk` por janela, sessão aberta uma vez; o app
-  nunca abre clkrst/pcv nem altera clock (SwitchWakerHD issue #33).
+  leitura: uma chamada `GetCurrentContext` ao `sys:clk` por janela, sessão aberta uma vez; o leitor
+  nunca abre clkrst/pcv (SwitchWakerHD issue #33). Mudar clock é opcional, L3+R3 > Video >
+  Performance mode (`oot3d_switch_performance.cpp`, SWITCH_PORT.md): com CPU High os MHz vêm do
+  clkrst (`clk_src=clkrst`) e a linha ganha `req_cpu/gpu/mem`, `cpu_reapply`, `cpu_override`, `cpu_err`.
 - Planos: `plan_worker_ms`, `plan_late_ms`, `plan_late_draws`, `plan_batches_live/queued/allocated`
   (pequenos e constantes), `plan_lock_wait_*`.
 - Picos (com `config/frame_spikes`/`gpu_timing`, por janela): `missed_refresh` (refreshes perdidos

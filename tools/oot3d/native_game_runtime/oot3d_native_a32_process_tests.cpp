@@ -1,5 +1,6 @@
 #include "oot3d_native_a32_process.h"
 #include "oot3d_native_a32_memory_region.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_native_compiled_functions.h"
 #include "oot3d_native_owner_call_adapter.h"
 #include "oot3d_native_true_aot_blocks.h"
@@ -15,6 +16,8 @@
 #include <exception>
 #include <iostream>
 #include <span>
+#include <chrono>
+#include <thread>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -593,6 +596,176 @@ void TestPrioritySchedulerAndTls(bool testScheduler = true) {
            "foreground service work must retain its full dispatch budget");
 }
 
+// Each SVC spends a known host time, so both guest threads accrue time.
+class SleepingHostServices final
+    : public Oot3dNativeGame::NativeA32HostServices {
+  public:
+    Oot3dNativeGame::NativeA32HostResult HandleSvc(
+        uint32_t immediate, oot3d::recomp::a32::GuestState&,
+        Oot3dNativeGame::NativeA32Memory&,
+        Oot3dNativeGame::NativeA32HostContext&) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (immediate == 1U) return {Oot3dNativeGame::NativeA32HostAction::Wait};
+        if (immediate == 2U || immediate == 3U) {
+            return {Oot3dNativeGame::NativeA32HostAction::Terminate};
+        }
+        return {Oot3dNativeGame::NativeA32HostAction::Fault, std::nullopt, 0,
+                "unexpected profile SVC"};
+    }
+};
+
+void TestGuestThreadProfile() {
+    const auto registry = MakeTestRegistry();
+    SleepingHostServices services;
+    Oot3dNativeGame::NativeA32Process process(registry, services);
+    const std::array<uint8_t, 0x20> code{};
+    std::string error;
+    Expect(process.MapRegion(
+               {"text", kEntry, code.size(), false, true, code}, &error) &&
+               process.MapRegion({"data", kData, 0x100U, true, false, {}}, &error) &&
+               process.CreatePrimaryThread(
+                   {kEntry, kStack, 0x1000U, kTls, 0x1000U, 0,
+                    0, 0x10U, 0x03C00010U, 0x30U},
+                   &error),
+           "profile process setup");
+    const auto worker = process.CreateThread(
+        {kEntry + 0x10U, 0U, kData + 0x100U, 0x10U, 0x03C00000U, 0x18U, 1}, &error);
+    Expect(worker == 1U, "profile worker thread");
+    const Oot3dNativeGame::NativeA32GuestThreadProfile start =
+        process.GuestThreadProfile();
+
+    // Worker first (higher priority) until it terminates, then the primary
+    // until it waits; then the primary again until it terminates.
+    const auto wallStart = std::chrono::steady_clock::now();
+    const auto first = process.Run();
+    Expect(first.Kind == Oot3dNativeGame::NativeA32ProcessRunKind::Waiting &&
+               process.ResumePrimaryThread(std::nullopt, &error),
+           "profile run 1: worker then primary");
+    const auto second = process.Run();
+    const auto wallNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wallStart).count());
+    Expect(second.Kind == Oot3dNativeGame::NativeA32ProcessRunKind::Terminated,
+           "profile run 2: primary terminates");
+
+    const auto& profile = process.GuestThreadProfile();
+    uint64_t threadSum = 0U;
+    for (const uint64_t ticks : profile.Ticks) threadSum += ticks;
+    const uint64_t mainNs =
+        Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.Ticks[0]);
+    const uint64_t workerNs =
+        Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.Ticks[1]);
+    Expect(threadSum == profile.RunTicks,
+           "thread totals must add up to the time inside Run()");
+    Expect(Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.RunTicks) <=
+               wallNs,
+           "time inside Run() cannot exceed the wall time around it");
+    Expect(mainNs >= 4'000'000U && workerNs >= 2'000'000U,
+           "each thread is charged its SVC host time (main 2 SVCs, worker 1)");
+    Expect(profile.Switches == 2U,
+           "switches: entry onto the worker, worker -> primary; run 2 stays on primary");
+
+    const std::string line = Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
+        process, start, 300U, 1U);
+    Expect(line.starts_with("guest_threads: host_frames=300 run_ms=") &&
+               line.find(" switches=2.0 ") != std::string::npos &&
+               line.find(" 0:0x00001000:0x30:-2=") != std::string::npos &&
+               line.find(" 1:0x00001010:0x18:1=") != std::string::npos &&
+               line.find(" 2:") == std::string::npos,
+           "guest_threads line: id:entry:prio:proc=ms/frame of threads that ran");
+    const std::string idle = Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
+        process, profile, 450U, 150U);
+    Expect(idle == "guest_threads: host_frames=450 run_ms=0.000 switches=0.0",
+           "a window where no guest thread ran lists none");
+
+    Expect(Oot3dNativeGame::FormatNativeA32GuestThreadCreated(
+               3U, 0x00123456U, 0x18U, -2, 0x0FF00000U) ==
+               "guest_thread: id=3 entry=0x00123456 prio=0x18 processor=-2 "
+               "stack_top=0x0FF00000",
+           "guest_thread log line format");
+
+    // The split of each thread's time: SVCs (2 ms each), guest code, the
+    // rest the scheduler's; no kernel-lock retakes without the second core.
+    for (const uint32_t id : {0U, 1U}) {
+        const uint64_t svcNs =
+            Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.SvcTicks[id]);
+        Expect(profile.SvcCalls[id] == (id == 0U ? 2U : 1U) &&
+                   svcNs >= profile.SvcCalls[id] * 2'000'000U &&
+                   profile.GuestTicks[id] + profile.SvcTicks[id] <= profile.Ticks[id] &&
+                   profile.LockTicks[id] == 0U,
+               "per-thread split: SVC calls and time inside the thread's time");
+    }
+    Expect(profile.SvcCallsByImmediate[1] == 1U && profile.SvcCallsByImmediate[2] == 1U &&
+               profile.SvcCallsByImmediate[3] == 1U &&
+               profile.SvcTicksByImmediate[1] + profile.SvcTicksByImmediate[2] +
+                       profile.SvcTicksByImmediate[3] ==
+                   profile.SvcTicks[0] + profile.SvcTicks[1],
+           "the game thread's SVCs by immediate");
+    const std::string kernel =
+        Oot3dNativeGame::FormatNativeA32GuestKernelLine(process, start, 1U);
+    Expect(kernel.starts_with("guest_kernel: svc_calls=3.00 svc_ms=") &&
+               kernel.find(" lock_ms=0.000 0:guest=") != std::string::npos &&
+               kernel.find(",calls=2.00 1:guest=") != std::string::npos &&
+               kernel.find(",calls=1.00 top=0x0") != std::string::npos &&
+               kernel.find(" 2:") == std::string::npos,
+           ("guest_kernel line: " + kernel).c_str());
+    Expect(Oot3dNativeGame::FormatNativeA32GuestKernelLine(process, profile, 150U) ==
+               "guest_kernel: svc_calls=0.00 svc_ms=0.000 lock_ms=0.000",
+           "a window where no guest thread ran lists none");
+}
+
+// Ported from coccofresco/TriAevum 034405bd (GPL-3.0-or-later),
+// tools/oot3d/native_game_runtime/oot3d_native_a32_process_tests.cpp.
+void TestStoppedThreadRunKind() {
+    using Kind = Oot3dNativeGame::NativeA32ProcessRunKind;
+    using Oot3dNativeGame::ResolveStoppedThreadRunKind;
+    Expect(ResolveStoppedThreadRunKind(Kind::Terminated, false) ==
+                   Kind::Waiting &&
+               ResolveStoppedThreadRunKind(Kind::Terminated, true) ==
+                   Kind::Terminated &&
+               ResolveStoppedThreadRunKind(Kind::Waiting, false) ==
+                   Kind::Waiting &&
+               ResolveStoppedThreadRunKind(Kind::Waiting, true) ==
+                   Kind::Terminated &&
+               ResolveStoppedThreadRunKind(Kind::Faulted, false) ==
+                   Kind::Faulted,
+           "a thread's exit must end the process only with its last thread");
+}
+
+void TestThreadExitWhileOthersWait() {
+    const auto registry = MakeTestRegistry();
+    TestHostServices services;
+    Oot3dNativeGame::NativeA32Process process(registry, services);
+    const std::array<uint8_t, 0x20> code{};
+    std::string error;
+    Expect(process.MapRegion(
+               {"text", kEntry, code.size(), false, true, code}, &error),
+           "map thread-exit text");
+    Expect(process.MapRegion({"data", kData, 0x100U, true, false, {}},
+                             &error),
+           "map thread-exit data");
+    Expect(process.CreatePrimaryThread(
+               {kEntry, kStack, 0x1000U, kTls, 0x1000U, 0,
+                0, 0x10U, 0x03C00010U, 48U},
+               &error),
+           "create thread-exit primary thread");
+    // The primary thread waits (SVC 1); the lower-priority worker then
+    // exits (SVC 3), as the movie decoder's thread does when a vision ends.
+    const auto worker = process.CreateThread(
+        {kEntry + 0x10U, 0U, kData + 0x100U, 0x10U, 0x03C00000U, 50U},
+        &error);
+    Expect(worker.has_value(), "create thread-exit worker");
+
+    const auto result = process.Run();
+    Expect(process.ThreadStatus(*worker) ==
+                   Oot3dNativeGame::NativeA32ThreadStatus::Terminated &&
+               process.PrimaryThreadStatus() ==
+                   Oot3dNativeGame::NativeA32ThreadStatus::Waiting &&
+               result.Kind ==
+                   Oot3dNativeGame::NativeA32ProcessRunKind::Waiting,
+           "one thread's exit must not end a process whose threads wait");
+}
+
 void TestProcessStateRoundTrip() {
     const auto registry = MakeTestRegistry();
     TestHostServices services;
@@ -710,10 +883,18 @@ void TestMemoryContract() {
     Expect(memory.LoadExclusive(0x2000U, 4, &loaded, &token, nullptr) &&
                loaded == 11U,
            "load-exclusive contract");
-    Expect(memory.Write32(0x2004U, 12U), "intervening guest write");
-    Expect(memory.StoreExclusive(0x2000U, 4, 13U, token, nullptr) ==
-               oot3d::recomp::a32::ExclusiveStoreResult::ReservationLost,
-           "intervening write must invalidate exclusive token");
+    // The global monitor's value token (single-core too): a write to another
+    // word keeps the reservation, a write that changes the reserved word
+    // loses it.
+    Expect(memory.Write32(0x2004U, 12U) &&
+               memory.StoreExclusive(0x2000U, 4, 13U, token, nullptr) ==
+                   oot3d::recomp::a32::ExclusiveStoreResult::Success,
+           "a write to another word keeps the reservation");
+    Expect(memory.LoadExclusive(0x2000U, 4, &loaded, &token, nullptr) && loaded == 13U &&
+               memory.Write32(0x2000U, 14U) &&
+               memory.StoreExclusive(0x2000U, 4, 15U, token, nullptr) ==
+                   oot3d::recomp::a32::ExclusiveStoreResult::ReservationLost,
+           "a write that changes the reserved word must invalidate the reservation");
 }
 
 void TestMemoryFastBlockEquivalence() {
@@ -882,15 +1063,152 @@ void TestMemoryRangeGenerations() {
                    region.WriteFast<uint32_t>(0x2000U, 17U),
                "batched stores across a page boundary");
         Expect(!region.ReadFast<uint32_t>(0U, &word),
-               "a checked fault must commit preceding batched stores");
+               "a checked fault after batched stores");
     }
     uint16_t halfword = 0;
+    // The architectural generation steps once per observation that saw
+    // writes (the exclusive token compares for equality only).
     Expect(batched.Read16(0x2FFFU, &halfword) && halfword == 0x1234U &&
                batched.Read32(0x2000U, &word) && word == 17U &&
-               batched.WriteGeneration() == beforeBatch + 2U &&
+               batched.WriteGeneration() == beforeBatch + 1U &&
                batched.RangeWriteGeneration(0x1000U, 4U) == untouched &&
                batched.RangeWriteGeneration(0x2FFFU, 2U) != crossing,
-           "batched fault exits preserve bytes, write counts and range-local invalidation");
+           "batched fault exits preserve bytes, the written cards and range-local invalidation");
+}
+
+// Store cards: a store marks the two-bit cards of the pages it touched;
+// generations are derived when asked.
+void TestMemoryStoreCards() {
+    using Oot3dNativeGame::NativeA32Memory;
+    using oot3d::recomp::a32::ExclusiveStoreResult;
+    NativeA32Memory memory;
+    std::string error;
+    Expect(memory.MapRegion({"data", 0x10000U, 0x4000U, true, false, {}}, &error) &&
+               memory.MapRegion({"rom", 0x20000U, 0x1000U, false, false, {}}, &error),
+           "map card memory");
+    const auto pageA = memory.RangeWriteGeneration(0x10000U, 4U);
+    const auto pageB = memory.RangeWriteGeneration(0x11000U, 4U);
+    Expect(pageA && pageB && *pageA != 0U &&
+               memory.RangeWriteGeneration(0x10000U, 4U) == pageA,
+           "certificates are nonzero and stable without writes");
+
+    // A same-value store changes its page's certificate and no other.
+    Expect(memory.WriteFast<uint32_t>(0x11010U, 0U), "same-value store");
+    const auto pageB1 = memory.RangeWriteGeneration(0x11000U, 4U);
+    Expect(pageB1 && pageB1 != pageB && memory.RangeWriteGeneration(0x10000U, 4U) == pageA &&
+               memory.RangeWriteGeneration(0x11000U, 4U) == pageB1,
+           "a store changes only its page, once");
+    // A certificate never comes back: write the page again.
+    Expect(memory.WriteFast<uint8_t>(0x11FFFU, 1U), "second store");
+    const auto pageB2 = memory.RangeWriteGeneration(0x11000U, 4U);
+    Expect(pageB2 && pageB2 != pageB && pageB2 != pageB1, "certificates do not repeat");
+
+    // A multi-page range changes when any of its pages is written, even if
+    // another query folded that page's card first.
+    const auto both = memory.RangeWriteGeneration(0x10000U, 0x2000U);
+    Expect(memory.WriteFast<uint32_t>(0x10004U, 5U) &&
+               memory.RangeWriteGeneration(0x10000U, 4U) != pageA &&
+               memory.RangeWriteGeneration(0x10000U, 0x2000U) != both,
+           "a range sees a page folded by another query");
+
+    // A store crossing a page boundary marks both pages: each page alone
+    // and the range starting on the previous page all change.
+    const auto lowPage = memory.RangeWriteGeneration(0x11000U, 4U);
+    const auto highPage = memory.RangeWriteGeneration(0x12000U, 4U);
+    const auto spanning = memory.RangeWriteGeneration(0x11FF0U, 0x20U);
+    Expect(memory.WriteFast<uint32_t>(0x11FFEU, 0xA1B2C3D4U), "crossing store");
+    Expect(memory.RangeWriteGeneration(0x12000U, 4U) != highPage &&
+               memory.RangeWriteGeneration(0x11000U, 4U) != lowPage,
+           "a crossing store marks both pages");
+    Expect(memory.WriteBytes(0x12FFCU, std::array<uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8}) &&
+               memory.RangeWriteGeneration(0x11FF0U, 0x20U) != spanning,
+           "a crossing byte write marks both pages");
+    const auto beforeNote = memory.RangeWriteGeneration(0x13000U, 4U);
+    const auto beforeNotePrevious = memory.RangeWriteGeneration(0x12000U, 4U);
+    memory.NoteWrite(0x12FFFU, 2U);
+    Expect(memory.RangeWriteGeneration(0x13000U, 4U) != beforeNote &&
+               memory.RangeWriteGeneration(0x12000U, 4U) != beforeNotePrevious,
+           "NoteWrite marks every page it covers");
+
+    // Span and byte fast paths mark their page. The word spans complete
+    // inline only in the fastmem window (TRIAEVUM_FASTMEM_WINDOW); outside
+    // it they decline with no effect and the caller stores word by word.
+    const uint32_t words[4] = {1U, 2U, 3U, 4U};
+    const auto beforeSpan = memory.RangeWriteGeneration(0x13000U, 4U);
+    const uint64_t contentBeforeSpan = memory.ContentFingerprint();
+    const bool spanInline = memory.WriteWordsFast(0x13100U, words, 4U);
+    Expect(spanInline == memory.InGuestWindow(), "a word span is inline exactly in the window");
+    Expect(spanInline || (memory.RangeWriteGeneration(0x13000U, 4U) == beforeSpan &&
+                          memory.ContentFingerprint() == contentBeforeSpan),
+           "a declined word span has no effect");
+    for (uint32_t index = 0; !spanInline && index < 4U; ++index)
+        Expect(memory.WriteFast<uint32_t>(0x13100U + 4U * index, words[index]), "per-word path");
+    Expect(memory.RangeWriteGeneration(0x13000U, 4U) != beforeSpan, "a word span marks its page");
+    const auto beforeBytes = memory.RangeWriteGeneration(0x13000U, 4U);
+    Expect(memory.WriteBytesFast(0x13200U, std::array<uint8_t, 3>{9, 9, 9}) &&
+               memory.RangeWriteGeneration(0x13000U, 4U) != beforeBytes,
+           "a fast byte span marks its page");
+
+    // The architectural generation changes exactly when something was
+    // written between two observations; failed writes leave it alone.
+    const uint64_t g0 = memory.WriteGeneration();
+    Expect(memory.WriteGeneration() == g0 && !memory.WriteFast<uint32_t>(0x20000U, 1U) &&
+               !memory.WriteFast<uint32_t>(0x30000U, 1U) && memory.WriteGeneration() == g0,
+           "no write, no generation change");
+    Expect(memory.WriteFast<uint16_t>(0x10100U, 7U) && memory.WriteGeneration() != g0,
+           "a store changes the generation");
+    const uint64_t g1 = memory.WriteGeneration();
+    Expect(memory.WriteGeneration() == g1 && memory.StateFingerprint() == memory.StateFingerprint(),
+           "observing the generation does not change it");
+
+    // Exclusive monitor: the global monitor with the second core on or off.
+    // The token is the loaded value and the reservation the core's granule;
+    // a store elsewhere no longer loses it (no memory-wide written mark).
+    uint64_t loaded = 0, token = 0, other = 0;
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) && token == loaded &&
+               memory.RangeWriteGeneration(0x10000U, 4U) && memory.WriteGeneration() != 0U &&
+               memory.StoreExclusive(0x10200U, 4, 1U, token, nullptr) == ExclusiveStoreResult::Success,
+           "a reservation without intervening writes succeeds, observations included");
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.WriteFast<uint32_t>(0x13F00U, 3U) &&
+               memory.StoreExclusive(0x10200U, 4, 2U, token, nullptr) == ExclusiveStoreResult::Success,
+           "a fast store on another page keeps the reservation");
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.WriteFast<uint32_t>(0x10200U, 9U) &&
+               memory.StoreExclusive(0x10200U, 4, 3U, token, nullptr) ==
+                   ExclusiveStoreResult::ReservationLost,
+           "a store that changes the reserved word loses the reservation");
+    // Thread A reserves, the scheduler switches (the kernel clears the
+    // monitor), thread B reserves the same granule and stores; back on A,
+    // its reservation is gone.
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr), "A's LDREX");
+    Oot3dNativeGame::SecondCore::ClearExclusive();
+    Expect(memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
+               memory.StoreExclusive(0x10204U, 4, 4U, other, nullptr) ==
+                   ExclusiveStoreResult::Success,
+           "B's pair succeeds");
+    Oot3dNativeGame::SecondCore::ClearExclusive();
+    Expect(memory.StoreExclusive(0x10200U, 4, 3U, token, nullptr) ==
+               ExclusiveStoreResult::ReservationLost,
+           "a context switch loses the first reservation");
+    Expect(memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
+               memory.StoreExclusive(0x10204U, 4, 5U, other, nullptr) == ExclusiveStoreResult::Success,
+           "a fresh reservation succeeds");
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.StoreExclusive(0x10200U, 4, 6U, token, nullptr) == ExclusiveStoreResult::Success &&
+               memory.StoreExclusive(0x10200U, 4, 7U, token, nullptr) ==
+                   ExclusiveStoreResult::ReservationLost,
+           "a STREX is itself a write");
+
+    // Copies and moves restamp: no certificate of the source repeats.
+    const auto sourceCertificate = memory.RangeWriteGeneration(0x10000U, 4U);
+    NativeA32Memory copy = memory;
+    Expect(copy.RangeWriteGeneration(0x10000U, 4U) != sourceCertificate &&
+               copy.WriteGeneration() == memory.WriteGeneration(),
+           "a copy keeps the architectural generation with new certificates");
+    Expect(copy.WriteFast<uint32_t>(0x10000U, 1U) &&
+               memory.RangeWriteGeneration(0x10000U, 4U) == sourceCertificate,
+           "a copy's store does not mark the source");
 }
 
 #if defined(OOT3D_NATIVE_A32_AOT_TESTS)
@@ -1143,6 +1461,14 @@ void TestFallbackBoundary() {
                services.FallbackCount == 1 &&
                result.Error == "expected test fallback fault",
            "missing block must cross the typed host boundary and fail closed");
+    // The game log gets the faulting thread, its stack and registers (this
+    // thread never pushed: sp is the end of its stack, which the process named).
+    Expect(result.GuestReport.find("guest fault report: thread=0 entry=0x00001000") == 0U &&
+               result.GuestReport.find(
+                   "  stack: sp in primary_stack rw [00007000-00008000) at its end\n") !=
+                   std::string::npos &&
+               result.GuestReport.find("  backtrace: pc=") != std::string::npos,
+           "a fault carries the guest report");
 }
 
 struct BlockEntryProbe {
@@ -1910,6 +2236,7 @@ int main(int argc, char** argv) {
             TestMemoryContract();
             TestMemoryFastBlockEquivalence();
             TestMemoryRangeGenerations();
+            TestMemoryStoreCards();
             std::cout << "oot3d_native_a32_process_tests: memory ok\n";
             return 0;
         }
@@ -1921,6 +2248,8 @@ int main(int argc, char** argv) {
         TestMemoryContract();
         TestMemoryFastBlockEquivalence();
         TestMemoryRangeGenerations();
+        TestMemoryStoreCards();
+        TestStoppedThreadRunKind();
 #if defined(OOT3D_NATIVE_A32_AOT_TESTS)
         TestWholeAotShiftAndFlagSemantics();
 #if defined(OOT3D_NATIVE_WHOLE_AOT_TESTS)
@@ -1937,6 +2266,8 @@ int main(int argc, char** argv) {
         TestSourceOwnerCallAdapterPerCallBudget();
         TestPersistentProcess();
         TestPrioritySchedulerAndTls();
+        TestGuestThreadProfile();
+        TestThreadExitWhileOthersWait();
         TestProcessStateRoundTrip();
         TestFallbackBoundary();
         TestBlockEntryCallback();
@@ -1949,7 +2280,7 @@ int main(int argc, char** argv) {
         // round trips and block-entry callbacks in this one). Thread and TLS
         // initialization does not dispatch.
         TestPrioritySchedulerAndTls(false);
-        std::cout << "oot3d_native_a32_process_tests: 12 interpreter-dispatcher cases "
+        std::cout << "oot3d_native_a32_process_tests: 13 interpreter-dispatcher cases "
                      "do not apply in whole-AOT product mode\n";
 #endif
         TestCompiledRuntimeMemcpy();

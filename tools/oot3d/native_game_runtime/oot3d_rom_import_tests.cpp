@@ -1,9 +1,9 @@
-// Testes de host do oot3d_rom_import (NCSD/NCCH sintético, LZSS, programa COPY,
-// adaptação da RomFS, manifesto). Sem ROM. main() simples; sai com código != 0 na falha.
+// Host tests for oot3d_rom_import (synthetic NCSD/NCCH, LZSS, COPY program,
+// RomFS adaptation, manifest). Plain main(); exits non-zero on failure.
 //
-//   oot3d_rom_import_tests                         roda os testes
-//   oot3d_rom_import_tests --import <orig> <game>  importa um dump real (arquivo .3ds/.cci
-//                                                  ou pasta extraída) para <game>
+//   oot3d_rom_import_tests                         run the tests
+//   oot3d_rom_import_tests --import <src> <game>   import a real dump (a .3ds/.cci
+//                                                  file or an extracted folder) into <game>
 
 #include "oot3d_rom_import.h"
 #include "ctr_title_profile.h"
@@ -76,7 +76,7 @@ void TestSha256() {
     const Bytes two = Ascii("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
     CHECK(ri::Hex(ri::Sha256Of(two)) ==
           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-    // Um milhão de 'a', em pedaços desiguais que cruzam os limites de bloco.
+    // One million 'a', fed in uneven pieces across block boundaries.
     const Bytes million(1000000, 'a');
     ri::Sha256 hash;
     std::size_t offset = 0;
@@ -91,8 +91,8 @@ void TestSha256() {
 
 // ------------------------------------------------------------ LZSS
 
-// "HEAD" + "ABC" * 34 em LZSS reverso: três literais, depois cinco referências
-// para trás de 18 bytes e uma de 9 bytes na menor distância (3).
+// "HEAD" + "ABC" * 34 as backwards LZSS: three literals, then five 18-byte
+// and one 9-byte back-references at the shortest distance (3).
 Bytes CompressedCode() {
     Bytes reading = {0x1F, 'C', 'B', 'A'};
     for (int i = 0; i < 5; ++i) { reading.push_back(0xF0); reading.push_back(0x00); }
@@ -116,13 +116,13 @@ Bytes ExpectedCode() {
 void TestDecompress() {
     CHECK(ri::DecompressExeFsCode(CompressedCode()) == ExpectedCode());
     Bytes broken = CompressedCode();
-    Put32(broken, broken.size() - 8, (4U << 24) | 3U); // rodapé menor que 8 bytes
+    Put32(broken, broken.size() - 8, (4U << 24) | 3U); // footer below 8 bytes
     bool threw = false;
     try { (void)ri::DecompressExeFsCode(broken); } catch (const ri::ImportError&) { threw = true; }
     CHECK(threw);
 }
 
-// ------------------------------------------------------------ programa COPY
+// ------------------------------------------------------------ COPY program
 
 void TestCopyProgram() {
     const Bytes source = Ascii("hello world");
@@ -133,7 +133,7 @@ void TestCopyProgram() {
     }
     CHECK(ri::ApplyCopyProgram(source, program, 3, 11) == Ascii("world hello"));
 
-    // Varints de vários bytes.
+    // Multi-byte varints.
     Bytes big(1000);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::uint8_t>(i * 7);
     Bytes program2;
@@ -176,7 +176,7 @@ Bytes QmFile() {
             Put32(qm, entry + 16 + slot * 8, tableEnd + record * 32 + slot);
             Put32(qm, entry + 20 + slot * 8, 4);
         }
-        Put32(qm, entry + 16 + 0 * 8, tableEnd); // slot japonês, intocado
+        Put32(qm, entry + 16 + 0 * 8, tableEnd); // Japanese slot, untouched
         Put32(qm, entry + 20 + 0 * 8, 2);
     }
     return qm;
@@ -226,7 +226,7 @@ Built BuildRomFs(bool ivfc) {
         Put32(dirTable, at + 4, sibling);
         Put32(dirTable, at + 8, childDir);
         Put32(dirTable, at + 12, childFile);
-        Put32(dirTable, at + 16, 0x12345678); // elo de hash velho, refeito pelo adaptador
+        Put32(dirTable, at + 16, 0x12345678); // stale hash link, rebuilt by the adapter
         Put32(dirTable, at + 20, static_cast<std::uint32_t>(dirs[i].Name.size() * 2));
         const Bytes name = Utf16(dirs[i].Name);
         std::copy(name.begin(), name.end(), dirTable.begin() + at + 24);
@@ -274,7 +274,7 @@ Bytes Apply(const Bytes& image, const ri::RomFsAdaptation& adaptation) {
     return out;
 }
 
-// Procura um nome pela cadeia de hash refeita, como o leitor de RomFS do jogo.
+// Looks a name up through the rebuilt hash chain, as the game's RomFS reader does.
 std::uint32_t Lookup(const Bytes& level3, bool file, std::uint32_t parent, std::string_view name) {
     const std::uint32_t hashOff = Get32(level3, file ? 20 : 4), hashSize = Get32(level3, file ? 24 : 8);
     const std::uint32_t metaOff = Get32(level3, file ? 28 : 12);
@@ -320,9 +320,9 @@ void TestRomFs(bool ivfc) {
     CHECK(Lookup(out, true, movie, "hint187.moflex") == built.FileOffsets[5]);
     CHECK(Lookup(out, true, movie, "hint182.moflex") == 0xFFFFFFFF);
 
-    // Slots QM 2/4/6 agora apontam para os conteúdos USA 1/5/7; o resto não muda.
+    // QM slots 2/4/6 now reference the USA 1/5/7 payloads; the rest is unchanged.
     const std::uint32_t dataOff = Get32(out, 36);
-    const std::size_t qm = dataOff; // conteúdo do primeiro arquivo
+    const std::size_t qm = dataOff; // first file payload
     for (int record = 0; record < 2; ++record) {
         const std::size_t entry = qm + 16 + record * 96 + 16;
         for (auto [destination, source] : {std::pair{2, 1}, {4, 5}, {6, 7}}) {
@@ -331,11 +331,11 @@ void TestRomFs(bool ivfc) {
         }
         CHECK(Get32(out, entry) == Get32(built.Image, adaptation.Base + entry));
     }
-    // Conteúdos intocados.
+    // Payloads untouched.
     CHECK(std::equal(out.begin() + dataOff + 16 + 2 * 96, out.end(),
                      built.Image.begin() + static_cast<std::ptrdiff_t>(adaptation.Base + dataOff + 16 + 2 * 96)));
 
-    // Rodar de novo sobre a própria saída falha: os nomes EU já existem.
+    // Running it on its own output fails: the EU names already exist.
     bool threw = false;
     try {
         (void)ri::PlanUsaToEurRomFs(
@@ -356,25 +356,25 @@ void TestQmRejectsPopulatedSlot() {
     CHECK(threw);
 }
 
-// ------------------------------------------------------------ NCSD/NCCH + manifesto
+// ------------------------------------------------------------ NCSD/NCCH + manifest
 
 Bytes Exheader(bool compressed, std::uint64_t titleId = kOot3dUsa) {
     Bytes x(0x800, 0);
     std::memcpy(x.data(), "CtrApp", 6);
     x[0x0D] = compressed ? 1 : 0;
-    // text: 1 página, ro: 1 página, data: 1 página (o code tem 3 páginas).
+    // text: 1 page, ro: 1 page, data: 1 page (code is 3 pages).
     Put32(x, 0x10, 0x00100000); Put32(x, 0x14, 1); Put32(x, 0x18, 0x0F00);
-    Put32(x, 0x1C, 0x4000);     // pilha
+    Put32(x, 0x1C, 0x4000);     // stack
     Put32(x, 0x20, 0x00101000); Put32(x, 0x24, 1); Put32(x, 0x28, 0x0800);
     Put32(x, 0x30, 0x00102000); Put32(x, 0x34, 1); Put32(x, 0x38, 0x0100);
     Put32(x, 0x3C, 0x1800);     // bss
-    x[0x20D] = 0;               // modo de memória 0 (aplicativo de 64 MB)
+    x[0x20D] = 0;               // memory mode 0 (64 MB application)
     x[0x20F] = 48;
     Put64(x, 0x200, titleId);
     return x;
 }
 
-// NCSD com uma partição NCCH em 0x4000: ExHeader, ExeFS com .code, RomFS.
+// NCSD with one NCCH partition at 0x4000: ExHeader, ExeFS with .code, RomFS.
 Bytes BuildNcsd(const Bytes& code, bool compressed, bool encrypted,
                 std::uint64_t titleId = kOot3dUsa) {
     constexpr std::size_t base = 0x4000;
@@ -423,12 +423,12 @@ void WriteFile(const fs::path& path, const Bytes& data) {
 }
 
 void TestContainer(const fs::path& directory) {
-    // .code comprimido: o Identify lê NCSD -> NCCH, descomprime e então
-    // rejeita a revisão desconhecida citando o hash do code descomprimido.
+    // Compressed .code: Identify parses NCSD -> NCCH, decompresses and then
+    // rejects the unknown revision, quoting the decompressed code hash.
     const fs::path rom = directory / "synthetic.cci";
     WriteFile(rom, BuildNcsd(CompressedCode(), true, false));
     std::string message = IdentifyError(rom);
-    CHECK(message.find("jogo ou revisão não suportada") != std::string::npos);
+    CHECK(message.find("unsupported game or revision") != std::string::npos);
     CHECK(message.find("0004000000033500") != std::string::npos);
     CHECK(message.find(ri::Hex(ri::Sha256Of(ExpectedCode())).substr(0, 16)) != std::string::npos);
 
@@ -438,17 +438,17 @@ void TestContainer(const fs::path& directory) {
 
     WriteFile(rom, BuildNcsd(ExpectedCode(), false, true));
     message = IdentifyError(rom);
-    CHECK(message.find("encriptad") != std::string::npos);
+    CHECK(message.find("encrypted") != std::string::npos);
 
     WriteFile(rom, Bytes(0x400, 0x5A));
-    CHECK(IdentifyError(rom).find("não é uma imagem NCSD/NCCH") != std::string::npos);
+    CHECK(IdentifyError(rom).find("not a Nintendo 3DS") != std::string::npos);
 
-    // Outro jogo de 3DS (perfil genérico em ctr_title_profile.h): recusado pelo
-    // program id antes de qualquer hash, apontando o conversor do PC. O game/
-    // do OoT3D nunca recebe outro título.
+    // Another 3DS game (generic profile in ctr_title_profile.h): refused by its
+    // program id before any hash, pointing at the PC converter. OoT3D's game/
+    // never receives another title.
     WriteFile(rom, BuildNcsd(CompressedCode(), true, false, kOtherTitle));
     message = IdentifyError(rom);
-    CHECK(message.find("não é o Ocarina of Time 3D") != std::string::npos);
+    CHECK(message.find("is not Ocarina of Time 3D") != std::string::npos);
     CHECK(message.find("0004000000053F00") != std::string::npos);
     CHECK(message.find("tools/ctr/ctr_convert.py") != std::string::npos);
     fs::create_directories(directory / "other");
@@ -460,11 +460,11 @@ void TestContainer(const fs::path& directory) {
     message.clear();
     try { (void)ri::Identify({ri::SourceKind::Extracted, directory / "other"}); }
     catch (const ri::ImportError& error) { message = error.what(); }
-    CHECK(message.find("não é o Ocarina of Time 3D") != std::string::npos);
+    CHECK(message.find("is not Ocarina of Time 3D") != std::string::npos);
     fs::remove_all(directory / "other");
     WriteFile(rom, BuildNcsd(CompressedCode(), true, false));
 
-    // Busca de origens: dumps ordenados pelo nome, depois import/.
+    // Source discovery: dumps sorted by name, then import/.
     WriteFile(directory / "b.3DS", Bytes(16));
     WriteFile(directory / "notes.txt", Bytes(16));
     fs::create_directories(directory / "import");
@@ -479,7 +479,7 @@ void TestContainer(const fs::path& directory) {
     const auto extracted = ri::FindSources(directory).back();
     bool threw = false;
     try { (void)ri::Identify(extracted); } catch (const ri::ImportError& error) {
-        threw = std::string(error.what()).find("falta o code.bin") != std::string::npos;
+        threw = std::string(error.what()).find("code.bin is missing") != std::string::npos;
     }
     CHECK(threw);
     CHECK(!ri::ImportIsCurrent(sources[1], directory / "game"));
@@ -514,23 +514,11 @@ void TestManifest() {
           Oot3dNativeGame::CtrTitleKind::Oot3d);
 }
 
-// O console do libnx não desenha UTF-8: o texto das telas passa por ConsoleAscii.
-void TestConsoleAscii() {
-    CHECK(ri::ConsoleAscii("Aperte + para sair.\n") == "Aperte + para sair.\n");
-    CHECK(ri::ConsoleAscii("importação não ÇÃO ÉÊÍÓÔÕÚ àâü ñ") == "importacao nao CAO EEIOOOU aau n");
-    CHECK(ri::ConsoleAscii("Zelda – 3D ★.3ds") == "Zelda ? 3D ?.3ds");
-    CHECK(ri::ConsoleAscii("\xC3") == "?");                // sequência cortada
-    CHECK(ri::ConsoleAscii("a\xFF" "b") == "a?b");          // byte inválido
-    for (const ri::Revision& revision : ri::SupportedRevisions())
-        for (const char c : ri::ConsoleAscii(revision.Name))
-            CHECK(static_cast<unsigned char>(c) < 0x80);
-}
-
 int RealImport(const fs::path& source, const fs::path& game) {
     const auto started = std::chrono::steady_clock::now();
     const ri::Source input{fs::is_directory(source) ? ri::SourceKind::Extracted : ri::SourceKind::Cartridge, source};
     const ri::Plan plan = ri::Identify(input);
-    std::printf("receita %s (%s)\n", plan.Recipe->Id, plan.Recipe->Name);
+    std::printf("recipe %s (%s)\n", plan.Recipe->Id, plan.Recipe->Name);
     int lastPercent = -1;
     const ri::Result result = ri::Import(plan, game, [&](const ri::Progress& progress) {
         const int percent = static_cast<int>(progress.Done * 100 / progress.Total);
@@ -540,12 +528,12 @@ int RealImport(const fs::path& source, const fs::path& game) {
         }
     });
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
-    std::printf("code.bin     %s\nexheader.bin %s\nromfs.bin    %s (%llu bytes, %u arquivos, %u registros QM)\n",
+    std::printf("code.bin     %s\nexheader.bin %s\nromfs.bin    %s (%llu bytes, %u files, %u QM records)\n",
                 ri::Hex(result.Code).c_str(), ri::Hex(result.Exheader).c_str(), ri::Hex(result.RomFs).c_str(),
                 static_cast<unsigned long long>(result.RomFsBytes), result.Resources.Files,
                 result.Resources.QmRecords);
-    std::printf("segundos %.2f; atual depois da importação: %s\n", seconds,
-                ri::ImportIsCurrent(input, game) ? "sim" : "não");
+    std::printf("seconds %.2f; current after import: %s\n", seconds,
+                ri::ImportIsCurrent(input, game) ? "yes" : "no");
     return 0;
 }
 
@@ -556,7 +544,7 @@ int main(int argc, char** argv) {
         try {
             return RealImport(argv[2], argv[3]);
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "importação falhou: %s\n", error.what());
+            std::fprintf(stderr, "import failed: %s\n", error.what());
             return 1;
         }
     }
@@ -572,14 +560,13 @@ int main(int argc, char** argv) {
         TestQmRejectsPopulatedSlot();
         TestContainer(directory);
         TestManifest();
-        TestConsoleAscii();
     } catch (const std::exception& error) {
-        std::fprintf(stderr, "FAIL: exceção inesperada: %s\n", error.what());
+        std::fprintf(stderr, "FAIL: unexpected exception: %s\n", error.what());
         ++gFailures;
     }
     fs::remove_all(directory);
     if (gFailures) {
-        std::fprintf(stderr, "%d falha(s)\n", gFailures);
+        std::fprintf(stderr, "%d failure(s)\n", gFailures);
         return 1;
     }
     std::printf("oot3d_rom_import_tests: ok\n");

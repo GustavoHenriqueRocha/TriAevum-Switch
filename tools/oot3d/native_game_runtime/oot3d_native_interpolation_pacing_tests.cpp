@@ -43,6 +43,15 @@ InterpolationPacingGovernor Make(bool keepSpeed = true, float reduced = 0.0F,
   return governor;
 }
 
+// config/pacer_entry_recover on (the default) or off ("0").
+InterpolationPacingGovernor MakeEntryRecover(bool on) {
+  InterpolationPacingConfig config;
+  config.EntryRecover = on;
+  InterpolationPacingGovernor governor;
+  governor.Configure(config, kPair, 2.0F, false);
+  return governor;
+}
+
 // One pair: the step frame, then the in-between decision and its cost.
 // interpolated(level) gives the cost of the in-between frame at that level.
 template <typename Cost>
@@ -376,13 +385,363 @@ void TestStartsFullAndDropsOnlyOnLastingMeasurements() {
           InterpolatedSampleLevel::Full);
 }
 
-// Below the preferred level, probes keep re-measuring the level above.
+// Below the preferred level, probes keep re-measuring the level above:
+// every ProbeInterval decisions without config/pacer_entry_recover, and
+// with it at 60, 120, 240, 240... decisions (the back-off).
 void TestProbesHappenWhileDropped() {
   auto governor = Make();
   for (int pair = 0; pair < 600; ++pair)
     Pair(governor, 19.0, [](auto level) { return Costs(level, 19.0, 19.0); });
   CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
-  CHECK(governor.Stats().Probes >= 8U);
+  CHECK(governor.Stats().Probes >= 3U);
+  CHECK(governor.Stats().FailedProbes == governor.Stats().Probes);
+  auto former = MakeEntryRecover(false);
+  for (int pair = 0; pair < 600; ++pair)
+    Pair(former, 19.0, [](auto level) { return Costs(level, 19.0, 19.0); });
+  CHECK(former.Level() == InterpolatedSampleLevel::Dropped);
+  CHECK(former.Stats().Probes >= 8U);
+}
+
+// config/pacer_entry_recover, logs20a Kokiri Forest (20a/perf.txt:625,632;
+// hitches.txt:79-97): 60 FPS before (pair ~26 ms); entering, about a second
+// of one-off work (texture uploads, slow fences: step ~16.5, in-between
+// ~19.3 ms) drops the in-between frames; afterwards a 16 + 16 pair fits
+// (32.0 of the 32.3 recovery threshold) but the ratio learnt in the work
+// stays: before, only the probe 60 decisions after the drop brought 60 back.
+// With `signal`, the entry work is announced (SetEntryWork) while it runs,
+// as the HD pack's preload and the grass placements do on deko3d.
+// Returns the pairs at dropped after the work ended (-1: never recovered).
+int EntrySpikeStay(bool entryRecover, bool signal, int workPairs,
+                   uint64_t *failed) {
+  auto governor = MakeEntryRecover(entryRecover);
+  for (int pair = 0; pair < 120; ++pair)
+    Pair(governor, 13.0, [](auto level) { return Costs(level, 13.0, 13.0); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  governor.NoteEntry();
+  for (int pair = 0; pair < workPairs; ++pair) {
+    governor.SetEntryWork(signal);
+    Pair(governor, 16.5, [](auto level) { return Costs(level, 19.3, 19.3); });
+  }
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  int stay = -1;
+  for (int pair = 0; pair < 120; ++pair) {
+    governor.SetEntryWork(false);
+    const auto level = Pair(governor, 16.0, [](auto level) {
+      return Costs(level, 16.0, 16.0, 0.6);
+    });
+    if (level == InterpolatedSampleLevel::Full && stay < 0)
+      stay = pair;
+  }
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  CHECK(governor.Stats().Entries == 1U);
+  if (failed != nullptr)
+    *failed = governor.Stats().FailedProbes;
+  return stay;
+}
+
+void TestEntrySpikeThenRecovery() {
+  // Work of 15, 30 and 45 pairs (0.5, 1 and 1.5 s). Before, the stay
+  // lasted until the probe 60 decisions after the drop. With the work
+  // announced, the probe EntryWorkSettle decisions after its end brings 60
+  // back; without the signal, the entry probes (10, 20, 40, 60 decisions
+  // apart) do within 30 pairs (1 s).
+  for (const int work : {15, 30, 45}) {
+    uint64_t failedSignal = 0, failedBlind = 0, failedOff = 0;
+    const int signal = EntrySpikeStay(true, true, work, &failedSignal);
+    const int blind = EntrySpikeStay(true, false, work, &failedBlind);
+    const int off = EntrySpikeStay(false, true, work, &failedOff);
+    std::printf("entry spike of %d pairs: %d pairs at dropped after it with "
+                "the work signal (failed probes %llu), %d without (%llu), "
+                "formerly %d (%llu)\n",
+                work, signal, static_cast<unsigned long long>(failedSignal),
+                blind, static_cast<unsigned long long>(failedBlind), off,
+                static_cast<unsigned long long>(failedOff));
+    CHECK(signal >= 0 &&
+          signal <= static_cast<int>(InterpolationPacingGovernor::kEntryWorkSettle));
+    CHECK(blind >= 0 && blind <= 30);
+    CHECK(off > signal);
+    CHECK(failedSignal <= 1U);
+    CHECK(failedBlind <= 3U);
+  }
+  // The entry window ends: the shorter interval is for entries only.
+  auto governor = MakeEntryRecover(true);
+  governor.NoteEntry();
+  CHECK(governor.InEntry());
+  for (int pair = 0; pair < 300; ++pair)
+    Pair(governor, 13.0, [](auto level) { return Costs(level, 13.0, 13.0); });
+  CHECK(!governor.InEntry());
+  CHECK(governor.ProbeIntervalNow(false) == 60U);
+}
+
+// A view that really is too heavy (20c 6900-7350, the Hyrule Field grove at
+// Full: 18 + 18 ms, 1.08 of the budget; 20a 6450, the field entrance with
+// its grass at the cap: 19.5 + 21 ms, 1.22) entered (its entry work
+// announced for 1.2 s, as the pack's preload of 1.1-1.35 s) and held for
+// 20 s: one drop and no oscillation; at most 2 more failed probes (each a
+// late in-between frame) than the former every 60 decisions in the 10 s
+// entry window, and fewer over the 20 s.
+void TestSustainedHeavyViewDoesNotOscillate() {
+  struct View {
+    double Step, Full;
+  };
+  for (const View view : {View{18.0, 18.0}, View{19.5, 21.0}}) {
+    uint64_t probes[2]{}, failed[2]{}, failedEntry[2]{}, entryProbes[2]{},
+        changes[2]{};
+    for (const bool on : {false, true}) {
+      auto governor = MakeEntryRecover(on);
+      for (int pair = 0; pair < 120; ++pair)
+        Pair(governor, 13.0, [](auto level) { return Costs(level, 13.0, 13.0); });
+      const auto before = governor.Stats();
+      governor.NoteEntry();
+      for (int pair = 0; pair < 600; ++pair) {
+        governor.SetEntryWork(pair < 36);
+        Pair(governor, view.Step, [&](auto level) {
+          return Costs(level, view.Full, view.Full, 0.6);
+        });
+        if (pair == 299)
+          failedEntry[on] = governor.Stats().FailedProbes - before.FailedProbes;
+      }
+      CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+      const auto &stats = governor.Stats();
+      probes[on] = stats.Probes - before.Probes;
+      failed[on] = stats.FailedProbes - before.FailedProbes;
+      entryProbes[on] = stats.EntryProbes;
+      changes[on] = stats.LevelChanges - before.LevelChanges;
+      CHECK(failed[on] == probes[on]);
+      // One drop, never back: the probes do not change the level.
+      CHECK(changes[on] == 1U);
+      CHECK(stats.EntryBelowDecisions >= 290U);
+    }
+    std::printf("heavy view %.1f + %.1f ms: failed probes %llu in the entry "
+                "window, %llu in 20 s (%llu entry probes); formerly %llu, "
+                "%llu\n",
+                view.Step, view.Full,
+                static_cast<unsigned long long>(failedEntry[1]),
+                static_cast<unsigned long long>(failed[1]),
+                static_cast<unsigned long long>(entryProbes[1]),
+                static_cast<unsigned long long>(failedEntry[0]),
+                static_cast<unsigned long long>(failed[0]));
+    CHECK(failedEntry[1] <= failedEntry[0] + 2U);
+    CHECK(failed[1] <= failed[0]);
+    CHECK(entryProbes[0] == 0U);
+  }
+  // Over the entry fraction (1.22): no entry probe at all.
+  auto governor = MakeEntryRecover(true);
+  governor.NoteEntry();
+  for (int pair = 0; pair < 300; ++pair)
+    Pair(governor, 19.5, [](auto level) { return Costs(level, 21.0, 21.0); });
+  CHECK(governor.Stats().EntryProbes == 0U);
+}
+
+// Outside an entry: each failed probe doubles the interval (60, 120, 240,
+// capped), a probe that fits or a return to full resets it.
+void TestFailedProbeBacksOff() {
+  auto governor = MakeEntryRecover(true);
+  std::vector<int> probeAt;
+  for (int pair = 0; pair < 900; ++pair) {
+    const auto probes = governor.Stats().Probes;
+    Pair(governor, 18.0, [](auto level) { return Costs(level, 18.0, 18.0); });
+    if (governor.Stats().Probes != probes)
+      probeAt.push_back(pair);
+  }
+  CHECK(probeAt.size() >= 4U);
+  std::vector<int> gaps;
+  for (size_t index = 1U; index < probeAt.size(); ++index)
+    gaps.push_back(probeAt[index] - probeAt[index - 1U]);
+  CHECK(gaps.size() >= 3U && gaps[0] == 120 && gaps[1] == 240 &&
+        gaps[2] == 240);
+  CHECK(governor.FailedProbesInRow() == probeAt.size());
+  CHECK(governor.ProbeIntervalNow(false) == 240U);
+  // Lighter: the estimate brings full back (no probe needed) and the
+  // back-off starts over.
+  for (int pair = 0; pair < 30; ++pair)
+    Pair(governor, 11.0, [](auto level) { return Costs(level, 11.0, 11.0); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  CHECK(governor.FailedProbesInRow() == 0U);
+  CHECK(governor.ProbeIntervalNow(false) == 60U);
+  // A probe that fits resets it too (the full frame got cheaper than its
+  // stale estimate; TestProbeRefreshesAStaleEstimate).
+  auto stale = MakeEntryRecover(true);
+  for (int pair = 0; pair < 20; ++pair)
+    Pair(stale, 10.0, [](auto level) { return Costs(level, 30.0, 30.0); });
+  CHECK(stale.Level() == InterpolatedSampleLevel::Dropped);
+  for (int pair = 0; pair < 100; ++pair)
+    Pair(stale, 10.0, [](auto level) { return Costs(level, 10.0, 10.0); });
+  CHECK(stale.Level() == InterpolatedSampleLevel::Full);
+  CHECK(stale.Stats().FailedProbes == 0U);
+  // Without config/pacer_entry_recover: always ProbeInterval.
+  auto former = MakeEntryRecover(false);
+  for (int pair = 0; pair < 600; ++pair)
+    Pair(former, 18.0, [](auto level) { return Costs(level, 18.0, 18.0); });
+  CHECK(former.FailedProbesInRow() >= 8U);
+  CHECK(former.ProbeIntervalNow(false) == 60U);
+  CHECK(former.ProbeIntervalNow(true) == 60U);
+}
+
+// Learns a full-frame ratio of about 1.24 (22a 6150-6300, the Hyrule Field
+// entry: est_full 26.2 against est_step 21.1) and drops.
+void LearnHighRatio(InterpolationPacingGovernor &governor) {
+  for (int pair = 0; pair < 60; ++pair)
+    Pair(governor, 11.0, [](auto level) { return Costs(level, 12.3, 12.3); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  // The full frames measured while the step average still climbs: the
+  // ratio settles at about 1.24.
+  for (int pair = 0; pair < 10; ++pair)
+    Pair(governor, 21.0, [](auto level) { return Costs(level, 20.5, 20.5); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  const double ratio =
+      governor.Estimate(InterpolatedSampleLevel::Full) / governor.StepCostMs();
+  CHECK(ratio > 1.2 && ratio < 1.3);
+}
+
+struct StaleRun {
+  int RecoveredAt = -1; // pair of the fall at which full came back
+  uint64_t Probes = 0, StaleProbes = 0, LevelChanges = 0;
+};
+
+// logs22a/perf.txt:359-373: after the drop a long heavy stretch with
+// nothing drawn (pair 42-47 ms: no probe, `probes=0` in 6450 and 6600),
+// then the step falls to 11 ms while the full frame really costs 1.12 x
+// the step (as 6750 measured). heavyPairs sets where the fall lands in the
+// 60-decision probe schedule.
+StaleRun StaleRatioFall(bool on, int heavyPairs) {
+  auto governor = MakeEntryRecover(on);
+  LearnHighRatio(governor);
+  for (int pair = 0; pair < heavyPairs; ++pair)
+    Pair(governor, 19.5, [](auto level) { return Costs(level, 19.5, 19.5); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  CHECK(governor.Estimate(InterpolatedSampleLevel::Full) >
+        1.2 * governor.StepCostMs());
+  CHECK(governor.RatioAge(InterpolatedSampleLevel::Full) >=
+        static_cast<uint32_t>(heavyPairs));
+  const auto before = governor.Stats();
+  StaleRun run;
+  for (int pair = 0; pair < 120; ++pair) {
+    const double step = std::max(11.0, 19.5 - 0.15 * pair);
+    const auto level = Pair(governor, step, [&](auto level) {
+      return Costs(level, 1.12 * step, 1.12 * step, 0.6);
+    });
+    if (level == InterpolatedSampleLevel::Full && run.RecoveredAt < 0 &&
+        governor.Level() == InterpolatedSampleLevel::Full)
+      run.RecoveredAt = pair;
+  }
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  run.Probes = governor.Stats().Probes - before.Probes;
+  run.StaleProbes = governor.Stats().StaleProbes - before.StaleProbes;
+  run.LevelChanges = governor.Stats().LevelChanges - before.LevelChanges;
+  return run;
+}
+
+void TestStaleRatioRecoversWithinOneProbe() {
+  // The fall at every phase of the 60-decision schedule: with the stale
+  // probe, full comes back after one probe, at the first decision whose
+  // step alone fits with a fresh ratio; formerly at the next scheduled
+  // probe or when the step fits the stale 1.24.
+  int worstOn = 0, worstOff = 0;
+  uint64_t staleProbes = 0;
+  for (int heavy = 150; heavy < 210; heavy += 6) {
+    const auto on = StaleRatioFall(true, heavy);
+    const auto off = StaleRatioFall(false, heavy);
+    std::printf("stale ratio 1.24, %d heavy pairs, step falling 19.5 -> 11 "
+                "ms: back at full after %d pairs (probes %llu, stale %llu), "
+                "formerly %d (%llu)\n",
+                heavy, on.RecoveredAt, static_cast<unsigned long long>(on.Probes),
+                static_cast<unsigned long long>(on.StaleProbes), off.RecoveredAt,
+                static_cast<unsigned long long>(off.Probes));
+    CHECK(on.RecoveredAt >= 0 && on.RecoveredAt <= off.RecoveredAt);
+    // One probe and one level change: back to full.
+    CHECK(on.Probes == 1U);
+    CHECK(on.LevelChanges == 1U);
+    CHECK(off.StaleProbes == 0U);
+    worstOn = std::max(worstOn, on.RecoveredAt);
+    worstOff = std::max(worstOff, off.RecoveredAt);
+    staleProbes += on.StaleProbes;
+  }
+  CHECK(worstOn < worstOff);
+  CHECK(staleProbes >= 5U);
+  // The step settles between the two thresholds (15.0 ms: 32.33 / 2.24 =
+  // 14.43 < 15.0 < 32.33 / 2.10 = 15.40) after regular probes failed in a
+  // heavier view whose in-between frame really cost 1.24 x (the back-off
+  // at 240 decisions): at every phase of that schedule the stale probe
+  // still comes within about a second.
+  int plateauOn = 0, plateauOff = 0;
+  for (int heavy = 600; heavy < 840; heavy += 12) {
+    for (const bool on : {false, true}) {
+      auto governor = MakeEntryRecover(on);
+      for (int pair = 0; pair < 60; ++pair)
+        Pair(governor, 11.0, [](auto level) { return Costs(level, 12.3, 12.3); });
+      for (int pair = 0; pair < heavy; ++pair)
+        Pair(governor, 17.0, [](auto level) { return Costs(level, 21.1, 21.1); });
+      CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+      if (on)
+        CHECK(governor.ProbeIntervalNow(false) == 240U);
+      int recovered = -1;
+      for (int pair = 0; pair < 300; ++pair) {
+        const auto level = Pair(governor, 15.0, [](auto level) {
+          return Costs(level, 15.0, 15.0, 0.6);
+        });
+        if (level == InterpolatedSampleLevel::Full && recovered < 0 &&
+            governor.Level() == InterpolatedSampleLevel::Full)
+          recovered = pair;
+      }
+      CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+      CHECK(recovered >= 0);
+      int &worst = on ? plateauOn : plateauOff;
+      worst = std::max(worst, recovered);
+    }
+  }
+  std::printf("stale ratio 1.24 after failed probes, step settling at 15.0 "
+              "ms: back at full within %d pairs at any phase, formerly %d\n",
+              plateauOn, plateauOff);
+  CHECK(plateauOn <= 40 && plateauOn < plateauOff);
+}
+
+// The heavy views of Perf21 and Perf22 (steps of 15.9-22 ms; the step alone
+// keeps the pair out even with a fresh ratio) with a stale ratio of 1.24
+// first: no stale probe and no extra level change. A view whose ratio
+// really is high (15 ms, 1.2: pair 33.0, over 32.33) gets stale probes with
+// the back-off and never changes level.
+void TestStaleRatioHeavyViewsDoNotFlap() {
+  struct View {
+    double Step, Ratio, Noise;
+  };
+  for (const View view : {View{16.8, 1.02, 0.0}, View{16.0, 1.0, 0.45},
+                          View{17.4, 1.01, 0.0}, View{20.4, 1.08, 0.0},
+                          View{15.0, 1.2, 0.0}}) {
+    uint64_t changes[2]{}, stale[2]{}, probes[2]{};
+    for (const bool on : {false, true}) {
+      auto governor = MakeEntryRecover(on);
+      LearnHighRatio(governor);
+      const auto before = governor.Stats();
+      uint32_t seed = 4242U;
+      for (int pair = 0; pair < 600; ++pair) {
+        seed = seed * 1664525U + 1013904223U;
+        const double noise =
+            view.Noise * (((seed >> 8) % 1000U) / 500.0 - 1.0);
+        const double step = view.Step + noise;
+        Pair(governor, step, [&](auto level) {
+          return Costs(level, view.Ratio * step, view.Ratio * step, 0.6);
+        });
+      }
+      changes[on] = governor.Stats().LevelChanges - before.LevelChanges;
+      stale[on] = governor.Stats().StaleProbes - before.StaleProbes;
+      probes[on] = governor.Stats().Probes - before.Probes;
+    }
+    std::printf("heavy view %.1f ms x %.2f (noise %.2f): %llu level changes, "
+                "%llu stale probes of %llu; formerly %llu changes, %llu "
+                "probes\n",
+                view.Step, view.Ratio, view.Noise,
+                static_cast<unsigned long long>(changes[1]),
+                static_cast<unsigned long long>(stale[1]),
+                static_cast<unsigned long long>(probes[1]),
+                static_cast<unsigned long long>(changes[0]),
+                static_cast<unsigned long long>(probes[0]));
+    CHECK(changes[1] <= changes[0]);
+    if (view.Step * (1.0 + 1.10) > 0.97 * kPair)
+      CHECK(stale[1] == 0U);
+    else
+      CHECK(stale[1] <= 5U && changes[1] == 0U);
+  }
 }
 
 void TestSampleClearsEveryTarget() {
@@ -448,6 +807,22 @@ void TestParseReducedScale() {
   CHECK(ParseInterpolationReducedScale("1.5", 1.0F) == 0.0F);
 }
 
+// deko3d: a reduced in-between frame is a dynamic-resolution step of its
+// own; without config/interp_scale, only a scene held at the full scale at
+// 60 FPS gets one, one 0.25 step lower.
+void TestDynamicStepReducedScale() {
+  using Oot3dNativeGame::DynamicStepReducedScale;
+  CHECK(DynamicStepReducedScale("", 3.0F, true) == 2.75F);
+  CHECK(DynamicStepReducedScale("", 2.5F, true) == 2.25F);
+  CHECK(DynamicStepReducedScale("", 2.6F, true) == 2.5F);
+  CHECK(DynamicStepReducedScale("", 1.0F, true) == 0.0F);
+  CHECK(DynamicStepReducedScale("", 3.0F, false) == 0.0F);
+  CHECK(DynamicStepReducedScale("2.5", 3.0F, false) == 2.5F);
+  CHECK(DynamicStepReducedScale("off", 3.0F, true) == 0.0F);
+  CHECK(DynamicStepReducedScale("0", 3.0F, true) == 0.0F);
+  CHECK(DynamicStepReducedScale("3", 3.0F, true) == 0.0F);
+}
+
 } // namespace
 
 // tour15 (pgo5j, margin 0): a measured pair of 29-30 ms "fit" 33.3 and the
@@ -491,6 +866,7 @@ int main() {
   TestMarginDropsPairsNearTheBudget();
   TestNoMeasurementsKeepsPreferredLevel();
   TestLightLoadDrawsEveryInBetweenFrame();
+  TestDynamicStepReducedScale();
   TestHeavyLoadDropsWithoutReducedLevel();
   TestHeavyLoadReducesWhenTheReducedFrameFits();
   TestEvenReducedTooSlowDrops();
@@ -506,6 +882,11 @@ int main() {
   TestConsoleStuckAtDroppedComesBackToFull();
   TestStartsFullAndDropsOnlyOnLastingMeasurements();
   TestProbesHappenWhileDropped();
+  TestEntrySpikeThenRecovery();
+  TestSustainedHeavyViewDoesNotOscillate();
+  TestFailedProbeBacksOff();
+  TestStaleRatioRecoversWithinOneProbe();
+  TestStaleRatioHeavyViewsDoNotFlap();
   TestSampleClearsEveryTarget();
   TestParseReducedScale();
   if (gFailures != 0) {

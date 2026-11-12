@@ -6,11 +6,13 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Oot3dNativeGame {
 
 class NativeA32Memory;
+struct Oot3dWholeAotHookGateSet;
 
 struct Oot3dCompiledFunctionStats {
     uint64_t Calls = 0;
@@ -45,18 +47,31 @@ struct Oot3dWholeAotExternalTarget {
 };
 
 bool Oot3dWholeAotAvailable() noexcept;
+// The block-entry gates of the linked whole-AOT code (Oot3dWholeAotHookGates):
+// every block for the default lowering and builds without whole-AOT; the
+// gate list for code generated with --sparse-block-entries (N4). A
+// block-entry callback whose list the gates do not cover is refused
+// (Oot3dWholeAotHookGatesError in oot3d_native_whole_aot_runtime.h).
+Oot3dWholeAotHookGateSet Oot3dLinkedWholeAotHookGates() noexcept;
 
-// Substituições nativas de funções guest (oot3d_native_guest_overrides).
-// Sem efeito quando o build não as compila (módulo whole-AOT pré-compilado).
+// Native overrides of guest functions (oot3d_native_guest_overrides).
+// No effect when the build doesn't compile them (precompiled whole-AOT module).
 void SetOot3dGuestOverridesActive(bool enabled) noexcept;
-// Liga o perfil guest às substituições nativas (Oot3dGuestOverrideProfileHook
-// em oot3d_native_guest_overrides.h); sem substituições no build, nada faz.
+// Connects the guest profile to the native overrides (Oot3dGuestOverrideProfileHook
+// in oot3d_native_guest_overrides.h); without overrides in the build, does nothing.
 void RegisterOot3dGuestOverrideProfileHook(
     oot3d::recomp::a32::BlockEntryCallback callback,
     bool (*forwards)(const void* user, uint32_t first, uint32_t last) noexcept,
     void (*mark)(void* user, uint32_t pc) noexcept) noexcept;
-// Uma linha por substituição: entrada, nome, execuções nativas e recusas.
+// One line per override: entry, name, native executions and refusals.
 std::string DescribeOot3dGuestOverrides();
+// config/guest_overrides_disable: per-replacement kill switches (hex entries
+// and/or "mirror"; see DisableOot3dGuestOverrides). Returns how many it
+// disabled (0 when the overrides are not compiled in).
+size_t DisableOot3dGuestOverridesFromList(std::string_view list);
+// logs/perf.txt "natives:" line: per window, executions and declines of
+// the mirror replacements (Profile18 round), each and in total.
+std::string FormatOot3dGuestOverridesPerfLine();
 std::span<const uint32_t> Oot3dCompiledFunctionEntryPoints(
     bool includeWholeAot = true,
     bool includeManualCompiledFunctions = true) noexcept;

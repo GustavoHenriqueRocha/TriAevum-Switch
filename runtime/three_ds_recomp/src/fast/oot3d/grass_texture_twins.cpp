@@ -6,6 +6,7 @@
 #include <cmath>
 #include <istream>
 #include <ostream>
+#include <tuple>
 
 namespace Fast::Oot3d {
 namespace {
@@ -268,11 +269,16 @@ void GrassTwinRules::Sync(const std::vector<GrassPlacementRule>& rules) {
         return;
     }
     // A texture whose own or rule textures' signatures were missing is
-    // resolved again once new signatures exist.
+    // resolved again once new signatures exist, at its next Resolve; until
+    // then it keeps its rule. Erasing it (0.1.2-test.9) took the Forest
+    // Temple entrance's rule away from AllInherited whenever a texture was
+    // first drawn after the ground in a frame: its placement left the frame
+    // and the grass flickered (logs17, oot3d_grass_switch_tests
+    // Oot3dGrassTempleEntry).
     if (mIncomplete) {
         if (const uint64_t generation = source.Generation(); generation != mGeneration) {
             mGeneration = generation;
-            std::erase_if(mEntries, [](const auto& entry) { return !entry.second.Complete; });
+            for (auto& [key, entry] : mEntries) entry.Stale |= !entry.Complete;
             mIncomplete = false;
         }
     }
@@ -283,7 +289,8 @@ const GrassTwinRules::Entry& GrassTwinRules::Resolve(
     uint16_t width, uint16_t height) {
     Sync(rules);
     const uint64_t key = Key(hash, width, height);
-    if (const auto found = mEntries.find(key); found != mEntries.end()) return found->second;
+    const auto found = mEntries.find(key);
+    if (found != mEntries.end() && !found->second.Stale) return found->second;
     Entry entry{hash, width, height};
     const bool own = std::any_of(rules.begin(), rules.end(), [&](const auto& rule) {
         return TargetsTexture(rule, hash, width, height);
@@ -291,27 +298,49 @@ const GrassTwinRules::Entry& GrassTwinRules::Resolve(
     auto& source = mSource != nullptr ? *mSource : GrassTextureSourceCache::Instance();
     if (!own) {
         const auto twin = source.Find(hash, false);
-        entry.Complete = twin != nullptr;
-        for (size_t i = 0; twin != nullptr && i < rules.size(); ++i) {
-            const auto& rule = rules[i];
+        // Found offline for the preset's rules: the same answer as the
+        // signatures, before the rule's texture has been drawn.
+        const auto known = std::equal_range(
+            GrassKnownTwins().begin(), GrassKnownTwins().end(), GrassKnownTwin{hash, width, height},
+            [](const GrassKnownTwin& a, const GrassKnownTwin& b) {
+                return std::tie(a.TwinHash, a.TwinWidth, a.TwinHeight) <
+                       std::tie(b.TwinHash, b.TwinWidth, b.TwinHeight);
+            });
+        for (const auto& rule : rules) {
             // Configured rules only: an inherited rule is never inherited.
             if (rule.InheritedFrom != 0U) continue;
-            const auto original = source.Find(rule.Target.Rgba8Hash, true);
-            if (original == nullptr) {
+            float score = -1.0F, sampleScale = 1.0F, sampleOffset = 0.0F;
+            const auto original = twin != nullptr ? source.Find(rule.Target.Rgba8Hash, true) : nullptr;
+            const auto offline = std::find_if(known.first, known.second, [&](const GrassKnownTwin& k) {
+                return k.RuleHash == rule.Target.Rgba8Hash && k.Channel == rule.Channel &&
+                       (rule.Target.Width == 0U || rule.Target.Width == k.RuleWidth) &&
+                       (rule.Target.Height == 0U || rule.Target.Height == k.RuleHeight);
+            });
+            if (original != nullptr) {
+                score = GrassTextureTwinScore(*original, *twin);
+                if (score >= kGrassTextureTwinThreshold) {
+                    const auto derived = DeriveGrassTwinRule(rule, *original, *twin, hash);
+                    sampleScale = derived.SampleScale;
+                    sampleOffset = derived.SampleOffset;
+                }
+            } else if (offline != known.second) {
+                score = offline->Score;
+                sampleScale = offline->SampleScale;
+                sampleOffset = offline->SampleOffset;
+            } else {
                 entry.Complete = false;
                 continue;
             }
-            const float score = GrassTextureTwinScore(*original, *twin);
             if (score >= kGrassTextureTwinThreshold && score > entry.Score) {
-                const auto derived = DeriveGrassTwinRule(rule, *original, *twin, hash);
                 entry.Score = score;
                 entry.SourceRuleId = rule.RuleId;
-                entry.SampleScale = derived.SampleScale;
-                entry.SampleOffset = derived.SampleOffset;
+                entry.SampleScale = sampleScale;
+                entry.SampleOffset = sampleOffset;
             }
         }
     }
     mIncomplete |= !entry.Complete;
+    if (found != mEntries.end()) return found->second = entry;
     return mEntries.emplace(key, std::move(entry)).first->second;
 }
 

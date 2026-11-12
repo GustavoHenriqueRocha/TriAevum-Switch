@@ -748,6 +748,7 @@ add_executable(oot3d_graphics_foundation_tests
     ../src/fast/oot3d/display_effect_resources.cpp
     ../src/fast/oot3d/ambient_occlusion_composite.cpp
     ../src/fast/oot3d/azahar_texture_pack.cpp
+    ../src/fast/oot3d/azahar_texture_scale.cpp
     ../src/fast/oot3d/azahar_pbr_materials.cpp
     ../src/fast/oot3d/grass_persistent_placement_cache.cpp
     ../src/fast/oot3d/grass_async_placement_builder.cpp
@@ -772,6 +773,7 @@ add_executable(oot3d_graphics_foundation_tests
     ../src/fast/oot3d/grass_surface_extractor.cpp
     ../src/fast/oot3d/grass_texture_source_cache.cpp
     ../src/fast/oot3d/grass_texture_twins.cpp
+    ../src/fast/oot3d/grass_texture_twin_table.cpp
     ../src/fast/oot3d/grass_visibility.cpp
     ../src/fast/oot3d/grass_wind.cpp
     ../src/fast/oot3d/graphics_capabilities.cpp
@@ -936,7 +938,7 @@ target_include_directories(gfx_opengl_pica_scale_tests
 target_link_libraries(gfx_opengl_pica_scale_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_scale_tests DISCOVERY_TIMEOUT 30)
 
-# Menus/2D no widescreen do backend OpenGL (quadro 5:3 centralizado).
+# Menus/2D in the OpenGL backend widescreen (centered 5:3 frame).
 add_executable(gl_widescreen_menu_policy_tests
     gl_widescreen_menu_policy_tests.cpp
 )
@@ -1004,7 +1006,7 @@ target_include_directories(gfx_opengl_pica_uniform_trim_tests
 target_link_libraries(gfx_opengl_pica_uniform_trim_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_uniform_trim_tests DISCOVERY_TIMEOUT 30)
 
-# Fases de CPU do draw PICA (glperf step_draw_<fase>_ms).
+# CPU phases of the PICA draw (glperf step_draw_<phase>_ms).
 add_executable(gl_pica_draw_phases_tests
     gl_pica_draw_phases_tests.cpp
 )

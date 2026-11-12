@@ -29,27 +29,77 @@
 #endif
 
 #if defined(__SWITCH__)
+#include "fast/oot3d/debug_menu.h"
+#include "oot3d_update_panel.h"
 #include "oot3d_whole_aot_gcov.h"
-#include "oot3d_native_status_file.h"
+#include "oot3d_switch_console_screen.h"
 #include "oot3d_switch_rom_import.h"
+#include "oot3d_switch_topscreen_import.h"
+#include "oot3d_native_status_file.h"
+#include "oot3d_game_log.h"
+#include "oot3d_native_a32_process_image.h"
+#include "oot3d_romfs_mods.h"
+#include "oot3d_switch_performance.h"
+#include "oot3d_game_log.h"
+#include "oot3d_switch_launch_environment.h"
+#include <cstring>
+#include <switch.h>
+// libnx (applet.c, weak, default 0): 1 makes libnx's exit end the application
+// through AM instead of returning to the homebrew loader.
+extern "C" u32 __nx_applet_exit_mode;
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
 
 namespace {
 
 #if defined(__SWITCH__)
-// Pelo escritor do boot-status.txt do processo (oot3d_native_status_file.h):
-// um heartbeat ainda na fila da thread de serviço é descartado, nunca escrito
-// por cima de completed/failed.
-void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
+// Through the process's boot-status writer (oot3d_native_status_file.h): a
+// heartbeat still queued on its service thread is dropped, never written
+// over completed/failed.
+void WriteSwitchBootStatus(const char* status, const std::string& detail = {},
+                           const std::string& extra = {}) {
     std::string text = std::string("status=") + status + '\n' +
                        "whole_aot_functions=12419\n"
                        "host_boundaries=3\n"
-                       "residual_a32=0\n";
+                       "residual_a32=0\n"
+                       "romfs_mods=" + Oot3dNativeGame::RomFsModsStartupState().BootStatus + '\n';
     if (!detail.empty()) {
         text += "detail=" + detail + '\n';
     }
+    text += extra;
     (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(text);
+}
+
+Oot3dNativeGame::SwitchLaunchEnvironment ReadSwitchLaunchEnvironment(int argc, char** argv) {
+    Oot3dNativeGame::SwitchLaunchEnvironment environment;
+    if (const char* info = envGetLoaderInfo(); info != nullptr) {
+        environment.Loader = Oot3dNativeGame::FirstLine(
+            std::string_view(info, strnlen(info, static_cast<size_t>(envGetLoaderInfoSize()))));
+    }
+    environment.AppletType = static_cast<int>(appletGetAppletType());
+    u64 value = 0;
+    if (R_SUCCEEDED(svcGetInfo(&value, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)))
+        environment.ProgramId = value;
+    if (envHasHeapOverride())
+        environment.HeapBytes = envGetHeapOverrideSize();
+    if (R_SUCCEEDED(svcGetInfo(&value, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0)))
+        environment.UsedMemory = value;
+    if (R_SUCCEEDED(svcGetInfo(&value, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0)))
+        environment.TotalMemory = value;
+    for (int index = 0; index < argc; ++index)
+        environment.Arguments.emplace_back(argv[index] != nullptr ? argv[index] : "");
+    return environment;
+}
+
+// A fatal error shows the system's error dialog before the game closes, so the
+// player learns why instead of getting a crash report from the homebrew loader.
+void ShowSwitchFatalError(const char* what) {
+    ErrorApplicationConfig config;
+    const std::string details = std::string(what) +
+                                "\n\nThe log is in switch/oot3dre/logs/oot3d_native_game.log.";
+    if (R_SUCCEEDED(errorApplicationCreate(
+            &config, "Ocarina of Time 3D stopped because of an error.", details.c_str())))
+        (void)errorApplicationShow(&config);
 }
 #endif
 
@@ -171,21 +221,70 @@ int main(int argc, char** argv) {
         Oot3dNativeGameLaunch launch;
         NativeGameArguments preparedArguments;
 #if defined(__SWITCH__)
+        // Before anything else, so a launch that ends before the game window
+        // leaves the stage it reached and how it was started.
+        const auto launchEnvironment = ReadSwitchLaunchEnvironment(argc, argv);
+        WriteSwitchBootStatus("starting", {},
+                              Oot3dNativeGame::FormatSwitchLaunchEnvironment(launchEnvironment));
+        Oot3dNativeGame::WriteGameLog(Oot3dNativeGame::FormatSwitchLaunchLine(launchEnvironment));
         PlaceSwitchMainThread();
-        Oot3dNativeGame::Oot3dWholeAotGcovInitialize();
-        // Primeiro início: monta o game/ a partir do dump decriptado do
-        // jogador antes que qualquer coisa leia o manifesto ou a RomFS. Só
-        // no lançamento padrão (sem argumentos), que é o do OoT3D em
-        // sdmc:/switch/oot3dre; um lançamento com argumentos próprios (outro
-        // título, testes) não passa por aqui.
-        if (argc <= 1) {
+        // Instrumented (PGO generate) build only: stream the counts to
+        // sdmc:/switch/oot3dre/pgo (oot3d_whole_aot_gcov.h).
+        Oot3dNativeGame::Oot3dWholeAotPgoStart();
+        // The import, the HUD textures and the RomFS mods only on the default
+        // launch (no arguments of its own), which is OoT3D's in
+        // sdmc:/switch/oot3dre; a launch with its own arguments (another
+        // title, tests) skips them.
+        const bool defaultLaunch =
+            argc <= 1 ||
+            Oot3dNativeGame::DropRedundantLaunchArguments(launchEnvironment.Arguments).size() == 1;
+        std::string romFsOverlayArgument;
+        if (defaultLaunch) {
+            // First launch: prepare game/ from the player's decrypted dump
+            // before anything reads the manifest or the RomFS.
             if (!Oot3dNativeGame::RunSwitchRomImport())
                 return 0;
+            // The TopScreen HUD textures come from a mod the release cannot ship:
+            // offer to download it and build config/atlas_overrides.o3tu from
+            // game/romfs.bin before the launch arguments look for the pack, on
+            // the same console as the import.
+            if (!Oot3dNativeGame::RunSwitchTopScreenImport())
+                return 0;
+            // RomFS mods (oot3d_romfs_mods.h): files in mods/<name>/romfs/
+            // replace the game's own through an overlay over game/romfs.bin.
+            // No mods folder or config/no_romfs_mods: no scan, no argument.
+            const Oot3dNativeGame::RomFsModsStartupResult romFsMods = Oot3dNativeGame::PrepareRomFsMods({
+                "sdmc:/switch/oot3dre/config",
+                "sdmc:/switch/oot3dre/mods",
+                [](std::string* error) -> std::optional<Oot3dNativeGame::RomFsServiceView> {
+                    const auto manifest = Oot3dNativeGame::LoadNativeA32ProcessImageManifest(
+                        "sdmc:/switch/oot3dre/game/oot3d_native_process_manifest.json", error);
+                    if (!manifest)
+                        return std::nullopt;
+                    return Oot3dNativeGame::RomFsServiceView{
+                        manifest->RomFsImagePath, manifest->RomFsImageOffset, manifest->RomFsImageSize};
+                },
+                "sdmc:/switch/oot3dre/game/romfs_mods.o3ro",
+                "sdmc:/switch/oot3dre/game/romfs_mods.json",
+                [] {
+                    Oot3dNativeGame::StartupScreen("Ocarina of Time 3D - mods").Show(
+                        "Applying the mods in switch/oot3dre/mods/ to the game's files...\n"
+                        "This happens again only when a mod file changes.\n");
+                }});
+            for (const std::string& line : romFsMods.LogLines)
+                Oot3dNativeGame::WriteGameLog(line);
+            Oot3dNativeGame::RomFsModsStartupState() = {romFsMods.BootStatus, romFsMods.PanelLine};
+            romFsOverlayArgument = romFsMods.Overlay ? romFsMods.Overlay->string() : std::string();
         }
+        // The start-up console gives the window back to SDL/deko3d.
+        Oot3dNativeGame::CloseStartupScreen();
         // A Mesa built with its Horizon disk cache (see docs) stores compiled
         // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
         setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);
         setenv("MESA_GLSL_CACHE_MAX_SIZE", "128M", 0);
+        // An update installed by the previous run swaps its remaining files
+        // now, before anything opens them (oot3d_update_release.h).
+        Oot3dNativeGame::FinishPendingUpdate("sdmc:/switch/oot3dre");
         // SDL's positional face-button convention is useful for portable PC
         // layouts, but the Switch build should follow the labels printed on
         // Joy-Con and Pro Controllers: A is A, B is B, and so on.
@@ -215,21 +314,55 @@ int main(int argc, char** argv) {
             const_cast<char*>(
                 "sdmc:/switch/oot3dre/config/oot3d_controls.json"),
             const_cast<char*>("--gameplay-timing"),
-            const_cast<char*>("native30_no_interpolation"),
+            const_cast<char*>("native30_interpolated"),
             const_cast<char*>("--presentation-rate"),
             const_cast<char*>("30"),
         };
         // config/fps60: game logic stays at 30 steps per second and the
         // runtime interpolates an extra frame between steps (60 Hz output).
         // Doubles the GPU and render-thread work; pair it with a lower
-        // config/resolution_scale.
+        // config/resolution_scale. Both rates launch native30_interpolated
+        // (at 30 it presents Original30, nothing interpolated): the timing
+        // contract must allow interpolation so L3+R3 > Video > FPS can
+        // switch to 60 while the game runs (oot3d_native_launch_frame_rate.h).
         if (std::ifstream("sdmc:/switch/oot3dre/config/fps60")) {
-            homebrewArguments[18] = const_cast<char*>("native30_interpolated");
             homebrewArguments[20] = const_cast<char*>("60");
         }
+        // config/atlas_overrides.o3tu is built on the console from the
+        // third-party TopScreen mod (RunSwitchTopScreenImport), which a release
+        // cannot ship: without it the TopScreen UI runs without texture
+        // overrides instead of refusing to start.
+        std::vector<char*> homebrewArgv(homebrewArguments.begin(), homebrewArguments.end());
+        if (!std::filesystem::is_regular_file(homebrewArguments[14])) {
+            homebrewArgv.erase(homebrewArgv.begin() + 13, homebrewArgv.begin() + 15);
+        } else {
+            if (std::filesystem::is_regular_file(
+                    "sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd.png")) {
+                // The HD HUD art beside the pack (built by the same import); a
+                // file the game cannot use falls back to the native atlas.
+                homebrewArgv.push_back(const_cast<char*>("--topscreen-ui-atlas-hd"));
+                homebrewArgv.push_back(
+                    const_cast<char*>("sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd.png"));
+            }
+            // The mod's HD images of the game's own HUD textures (hearts, B
+            // label, cursor), from the same import.
+            if (std::filesystem::is_directory("sdmc:/switch/oot3dre/config/topscreen_hd")) {
+                homebrewArgv.push_back(const_cast<char*>("--topscreen-hd-textures"));
+                homebrewArgv.push_back(const_cast<char*>("sdmc:/switch/oot3dre/config/topscreen_hd"));
+            }
+        }
+        // The overlay the RomFS mods step composed (absent: as before mods).
+        if (!romFsOverlayArgument.empty()) {
+            homebrewArgv.push_back(const_cast<char*>("--romfs-overlay"));
+            homebrewArgv.push_back(romFsOverlayArgument.data());
+        }
+        if (argc > 1 &&
+            Oot3dNativeGame::DropRedundantLaunchArguments(launchEnvironment.Arguments).size() == 1) {
+            argc = 1;
+        }
         if (argc <= 1) {
-            argc = static_cast<int>(homebrewArguments.size());
-            argv = homebrewArguments.data();
+            argc = static_cast<int>(homebrewArgv.size());
+            argv = homebrewArgv.data();
         }
 #else
         preparedArguments = PrepareNativeGameArguments(argc, argv);
@@ -255,8 +388,18 @@ int main(int argc, char** argv) {
         argv = runtimeArguments.data();
 #endif
         if (!ParseOot3dNativeGameArgs(argc, argv, launch)) {
+#if defined(__SWITCH__)
+            // Returning here would close the game without a word.
+            std::string arguments;
+            for (int index = 1; index < argc; ++index)
+                arguments += std::string(index > 1 ? " " : "") + argv[index];
+            throw std::runtime_error("the launch arguments were not understood: " + arguments +
+                                     ". Start the game from the homebrew menu (hold R on a game) "
+                                     "or with a Sphaira forwarder.");
+#else
             PrintOot3dNativeGameUsage();
             return 2;
+#endif
         }
 
 #if defined(OOT3D_REQUIRE_WHOLE_AOT_PLUGIN_V2)
@@ -273,11 +416,25 @@ int main(int argc, char** argv) {
 #ifdef OOT3D_NATIVE_A32_WINDOW_AVAILABLE
         RunOot3dNativeA32Window(launch);
         ClearLaunchMarkerForDemo();
+#if defined(__SWITCH__)
+        // CPU High (L3+R3 > Video > Performance mode): the earlier rate back
+        // while the game log still exists (its logger goes with the context).
+        Oot3dNativeGame::RestorePerformanceForExit();
+#endif
         // The A32 window owns objects that refer back to the host context.
         // Destroy those locals on return before tearing the context down.
         DestroyContextForDemo();
 #if defined(__SWITCH__)
         WriteSwitchBootStatus("completed");
+        // Exit game (L3+R3) ends the application instead of returning to the
+        // homebrew loader: on return hbl maps the next NRO into memory this
+        // process's services still hold and aborts (hbl + 0x3810, 2001-0106
+        // InvalidCurrentMemory). svcExitProcess (1.0.0-test.2) ended the process
+        // behind AM's back and the console still reported a crash on exit. With
+        // exit mode 1, libnx's exit sends AM ISelfController::Exit
+        // (_appletSelfExit), the way an application closes itself.
+        if (Fast::Oot3d::ExitGameRequested())
+            __nx_applet_exit_mode = 1;
 #endif
         return 0;
 #else
@@ -290,7 +447,16 @@ int main(int argc, char** argv) {
         WriteSwitchBootStatus("failed", ex.what());
 #endif
         LogFatalErrorForDemo(ex.what());
+#if defined(__SWITCH__)
+        Oot3dNativeGame::RestorePerformanceForExit();
+#endif
         DestroyContextForDemo();
+#if defined(__SWITCH__)
+        ShowSwitchFatalError(ex.what());
+        // Like Exit game: returning to the homebrew loader makes it abort
+        // (hbl + 0x3810, 2001-0106), so the application closes through AM.
+        __nx_applet_exit_mode = 1;
+#endif
         return 1;
     }
 }

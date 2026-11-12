@@ -56,6 +56,9 @@ struct Header {
     std::array<uint32_t, 13> Sizes{};
     std::array<uint64_t, 13> Counts{};
     std::array<uint32_t, 3> MidrangeStats{};
+    // Version 2: what the placement was made with (GrassPlacementDiskMatch).
+    uint64_t GeometryId = 0;
+    std::array<float, 16> ModelToWorld{};
 };
 template <class P, class F> void Vectors(P& p, F f) {
     f(p.Anchors);
@@ -148,12 +151,43 @@ bool Validate(const GrassWorldPlacement& p) {
             return false;
     return true;
 }
+// The model-to-world in the file name, rounded so camera rounding (~1e-6 of
+// a rotation element, ~1e-2 units of translation) stays in one step; the
+// offsets keep round values (0, 1, multiples of 8 units) off the step edges.
+std::array<int32_t, 16> RoundedTransform(const std::array<float, 16>& m) {
+    std::array<int32_t, 16> rounded{};
+    for (size_t i = 0; i < 16U; ++i) {
+        const bool translation = i == 3U || i == 7U || i == 11U;
+        const double scaled = translation ? double(m[i]) / 16.0 : double(m[i]) * 64.0;
+        rounded[i] = std::isfinite(scaled) ? int32_t(std::clamp(std::floor(scaled + 0.318), -2.0e9, 2.0e9)) : 0;
+    }
+    return rounded;
+}
 } // namespace
+GrassPlacementTransformOffset GrassPlacementTransformDifference(const std::array<float, 16>& a,
+                                                                const std::array<float, 16>& b) noexcept {
+    GrassPlacementTransformOffset offset;
+    for (size_t i = 0; i < 16U; ++i) {
+        const float d = std::abs(a[i] - b[i]);
+        if (i >= 12U) {
+            if (!(d == 0.0F))
+                return { INFINITY, INFINITY };
+        } else if (i == 3U || i == 7U || i == 11U) {
+            offset.Translation = std::isnan(d) ? INFINITY : std::max(offset.Translation, d);
+        } else {
+            offset.Rotation = std::isnan(d) ? INFINITY : std::max(offset.Rotation, d);
+        }
+    }
+    return offset;
+}
+GrassPlacementDiskMatch GrassPlacementDiskMatchFor(const GrassAsyncPlacementRequest& r, bool reuse) {
+    return { r.PlacementKey.GeometryId, r.ModelToWorld, reuse };
+}
 GrassPlacementDiskKey GrassPlacementPersistentKey(const GrassAsyncPlacementRequest& r) {
     Hash content, settings;
     content.Add(kGrassPlacementDiskVersion);
-    // GeometryId participates in the original random seed; retain it exactly.
-    content.Add(r.PlacementKey.GeometryId);
+    // The geometry identity (it seeds the anchors) is in the file, matched
+    // on load (GrassPlacementDiskMatch): it holds guest addresses.
     content.Add(r.TextureHash);
     content.Add(r.MapperSlot);
     if (r.Vertices)
@@ -208,7 +242,7 @@ GrassPlacementDiskKey GrassPlacementPersistentKey(const GrassAsyncPlacementReque
         content.Add(covering);
     }
     settings.Add(GrassPlacementRuleVersion(r.Rule, r.Generation));
-    settings.Add(r.ModelToWorld);
+    settings.Add(RoundedTransform(r.ModelToWorld));
     settings.Add(r.TransformBakedIntoVertices);
     settings.Add(r.MaterialWrapS);
     settings.Add(r.MaterialWrapT);
@@ -232,9 +266,11 @@ std::filesystem::path GrassPersistentPlacementCache::Path(GrassPlacementDiskKey 
     return mDirectory / name;
 }
 std::shared_ptr<GrassWorldPlacement> GrassPersistentPlacementCache::Load(GrassPlacementDiskKey key,
-                                                                         bool* rejected) const {
-    if (rejected)
-        *rejected = false;
+                                                                         const GrassPlacementDiskMatch& match,
+                                                                         GrassPlacementDiskResult* result) const {
+    GrassPlacementDiskResult local;
+    auto& outcome = result ? *result : local;
+    outcome = {};
     if (mDirectory.empty())
         return {};
     std::scoped_lock lock(diskMutex);
@@ -244,8 +280,7 @@ std::shared_ptr<GrassWorldPlacement> GrassPersistentPlacementCache::Load(GrassPl
         const auto size = std::filesystem::file_size(path, ec);
         if (ec)
             return {};
-        if (rejected)
-            *rejected = true;
+        outcome.Outcome = GrassPlacementDiskOutcome::Damaged;
         if (size < sizeof(Header) || size > kMaximumFileBytes)
             return {};
         std::ifstream in(path, std::ios::binary);
@@ -254,6 +289,21 @@ std::shared_ptr<GrassWorldPlacement> GrassPersistentPlacementCache::Load(GrassPl
         if (!in || h.Magic != kMagic || h.Version != kGrassPlacementDiskVersion || h.Endian != 0x01020304 ||
             h.Key != key || h.Bytes != size - sizeof(Header))
             return {};
+        // The same ground: made with this transform and identity? Checked
+        // before reading the payload (a miss costs one header read).
+        outcome.Offset = GrassPlacementTransformDifference(h.ModelToWorld, match.ModelToWorld);
+        outcome.OtherGeometry = h.GeometryId != match.GeometryId;
+        const bool sameTransform = match.Reuse ? outcome.Offset.Rotation <= kGrassPlacementReuseRotation &&
+                                                     outcome.Offset.Translation <= kGrassPlacementReuseTranslation
+                                               : h.ModelToWorld == match.ModelToWorld;
+        if (!sameTransform) {
+            outcome.Outcome = GrassPlacementDiskOutcome::OtherTransform;
+            return {};
+        }
+        if (outcome.OtherGeometry && !match.Reuse) {
+            outcome.Outcome = GrassPlacementDiskOutcome::OtherGeometry;
+            return {};
+        }
         auto p = std::make_shared<GrassWorldPlacement>();
         size_t i = 0;
         uint64_t bytes = 0;
@@ -272,6 +322,8 @@ std::shared_ptr<GrassWorldPlacement> GrassPersistentPlacementCache::Load(GrassPl
         hash.Add(h.Sizes);
         hash.Add(h.Counts);
         hash.Add(h.MidrangeStats);
+        hash.Add(h.GeometryId);
+        hash.Add(h.ModelToWorld);
         i = 0;
         Vectors(*p, [&](auto& v) {
             v.resize(size_t(h.Counts[i++]));
@@ -285,18 +337,23 @@ std::shared_ptr<GrassWorldPlacement> GrassPersistentPlacementCache::Load(GrassPl
         if (!in || hash.Value != h.Checksum || !Validate(*p))
             return {};
         std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now(), ec);
-        if (rejected)
-            *rejected = false;
+        // Drawn with the transform its anchors were made with (an exact
+        // match: the requested one).
+        p->ModelToWorld = h.ModelToWorld;
+        outcome.Outcome = GrassPlacementDiskOutcome::Loaded;
         return p;
     } catch (const std::exception&) { return {}; }
 }
-bool GrassPersistentPlacementCache::Store(GrassPlacementDiskKey key, const GrassWorldPlacement& p) const {
+bool GrassPersistentPlacementCache::Store(GrassPlacementDiskKey key, const GrassWorldPlacement& p,
+                                         const GrassPlacementDiskMatch& built) const {
     if (mDirectory.empty() || mEntryLimit == 0 || !Validate(p))
         return false;
     std::scoped_lock lock(diskMutex);
     try {
         Header h{};
         h.Key = key;
+        h.GeometryId = built.GeometryId;
+        h.ModelToWorld = built.ModelToWorld;
         h.MidrangeStats = { p.Midrange.LargeGroupCount, p.Midrange.MaximumMemberCount,
                             p.Midrange.CapacityLimitedRanges };
         size_t i = 0;
@@ -311,6 +368,8 @@ bool GrassPersistentPlacementCache::Store(GrassPlacementDiskKey key, const Grass
         hash.Add(h.Sizes);
         hash.Add(h.Counts);
         hash.Add(h.MidrangeStats);
+        hash.Add(h.GeometryId);
+        hash.Add(h.ModelToWorld);
         Vectors(p, [&](const auto& v) { hash.Bytes(v.data(), v.size() * sizeof(v[0])); });
         h.Checksum = hash.Value;
         std::filesystem::create_directories(mDirectory);

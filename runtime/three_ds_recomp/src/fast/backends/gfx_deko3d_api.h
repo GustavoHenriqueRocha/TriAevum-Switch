@@ -1,5 +1,5 @@
 #pragma once
-// GfxRenderingAPI on deko3d (Switch). Package 2 (docs/DEKO3D_PROGRESSO.md):
+// GfxRenderingAPI on deko3d (Switch). Package 2 (docs/DEKO3D_PROGRESS.md):
 // device, window image, clears and the present. Package 3: every PICA draw
 // resolves its shaders from deko3d.pack (specialized, else parametric).
 // Package 4: its textures, LUT, vertex/index streams and uniforms are
@@ -10,6 +10,8 @@
 // ImGui (the FPS counter) drawn on the window (gfx_deko3d_ui.cpp).
 
 #if defined(__SWITCH__)
+#include "fast/backends/gfx_deko3d_clear_draw.h"
+#include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/renderer3ds/pica_program_preparation.h"
@@ -18,13 +20,17 @@
 #include "gfx_deko3d_pica_targets.h"
 #include "gfx_deko3d_shaders.h"
 #include "fast/backends/gfx_deko3d_ui_plan.h"
+#include "fast/oot3d/grass_draw_point.h"
+#include "fast/oot3d/player_shadow.h"
 
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct ImDrawData;
@@ -68,6 +74,11 @@ struct Deko3dBackendCounters {
     uint64_t PicaTransfers = 0;
     uint64_t PicaTransfersRepeated = 0; // identical copy of an unchanged source (GL lean)
     uint64_t PicaTransfersRejected = 0;
+    uint64_t PicaTextureCopies = 0;       // raw copies out of a GPU target, captured (gfx_deko3d_pica_copies.h)
+    uint64_t PicaTextureCopiesReused = 0; // a replay of a captured copy
+    uint64_t PicaTextureCopiesFailed = 0; // completed without bytes (logged)
+    double PicaTextureCopyMilliseconds = 0.0;    // the captures' time, summed
+    double PicaTextureCopyMaxMilliseconds = 0.0; // the longest capture
     uint64_t PicaScanouts = 0;
     uint64_t PicaFills = 0;
     uint64_t PicaClears = 0;
@@ -133,15 +144,33 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     bool SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string* error = nullptr) override;
     bool SubmitPicaDisplayTransfer(const GfxNativePicaDisplayTransferView& transfer,
                                    std::string* error = nullptr) override;
+    // deko3d keeps no GPU image per raw copy, only each version's bytes
+    // (gfx_deko3d_pica_copies.h): the set says which versions draws may still sample.
+    bool SetPinnedPicaTextureCopies(std::span<const Renderer3ds::PicaTextureCopyReference> copies,
+                                    std::string* error = nullptr) override;
     bool ClearPicaRenderTarget(uint64_t renderTargetNamespace, uint32_t colorPhysicalAddress,
                                std::string* error = nullptr) override;
     bool SubmitPicaMemoryFill(const GfxNativePicaMemoryFillView& fill, std::string* error = nullptr) override;
     bool QueuePicaCompletion(uint64_t completionId, std::string* error = nullptr) override;
     std::vector<uint64_t> TakePicaCompletions() override;
     bool ResetPicaState(std::string* error = nullptr) override;
+    // Savestates (gfx_deko3d_pica_snapshot.h): every PICA target's colour,
+    // depth and stencil at the guest framebuffer extent, and back at this
+    // renderer's scale. Called with the render thread drained; nothing of it
+    // runs in a frame without a save or a load.
+    bool CapturePicaColorTargets(std::vector<GfxNativePicaRenderTargetColorSnapshot>& snapshots,
+                                 std::string* error = nullptr) override;
+    bool RestorePicaColorTargets(std::span<const GfxNativePicaRenderTargetColorSnapshot> snapshots,
+                                 std::string* error = nullptr) override;
+    // The native namespace's replay stays skipped: a savestate keeps whatever
+    // that namespace holds (what was drawn there for guest read-backs); the
+    // presented scene lives in the visual namespace, which no savestate keeps.
     [[nodiscard]] bool PicaNativeNamespaceObservable() const override {
         return false;
     }
+    // fps60: which presented frames are synthetic in-between samples (grass
+    // draws the last real frame's placements in them; gfx_deko3d_grass.cpp).
+    bool PublishPicaFrameTemporalSample(const Renderer3ds::PicaFrameTemporalSample& sample) override;
 
     void StartDrawToFramebuffer(int fbId, float noiseScale) override;
     void CopyFramebuffer(int fbDstId, int fbSrcId, int srcX0, int srcY0, int srcX1, int srcY1, int dstX0, int dstY0,
@@ -178,11 +207,36 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         Deko3d::PicaProgramPick Pick = Deko3d::PicaProgramPick::NoVertex;
         const DkShader* Vertex = nullptr;
         const DkShader* Fragment = nullptr;
+        // The class of the base (native) fragment program (per-frame
+        // breakdown, and a spilling base gets no lighting variant).
+        Deko3d::PicaBaseClass Base = Deko3d::PicaBaseClass::Normal;
+        // config/lighting: drawn with the mode's variant.
+        bool Lit = false;
+        // config/lighting perpixel: the draw binds mSurfaceLighting at
+        // Deko3d::kSurfaceLightingBinding.
+        bool SurfaceLighting = false;
+        // The per-pixel fragment variant's path (Deko3d::ClassifyPerPixelSurface).
+        Deko3d::PerPixelPath SurfacePath = Deko3d::PerPixelPath::Generic;
     };
     // The shaders of a draw (package 3); no draw ever compiles.
     PicaProgram ResolvePicaProgram(const GfxNativePicaDrawView& draw);
     const DkShader* ResolvePicaStage(Deko3d::ShaderStage stage, std::string_view canonical,
                                      Renderer3ds::PicaShaderSourceIdentity identity);
+    // config/lighting (gfx_deko3d_lighting.h): applies a new mode at the
+    // start of a frame, swaps an eligible draw's shaders for the mode's
+    // variants when the pack has them, and logs the mode and counters.
+    void ApplyLightingSettings();
+    void ApplyPicaLighting(const GfxNativePicaDrawView& draw, std::string_view fragmentSource,
+                           Renderer3ds::PicaShaderSourceIdentity fragmentIdentity, PicaProgram& program);
+    // Toon, or per-pixel of `path` (one cache per mode and path).
+    const DkShader* ResolveLightingFragment(Deko3d::LightingMode mode, std::string_view canonical,
+                                            Renderer3ds::PicaShaderSourceIdentity identity,
+                                            Deko3d::PerPixelPath path = Deko3d::PerPixelPath::Generic);
+    const DkShader* ResolvePerPixelVertex(const GfxNativePicaDrawView& draw);
+    void LogLightingCounters(const char* when);
+    // A temporal sample opens (PublishPicaFrameTemporalSample): its frame
+    // kind, and the one-frame lighting transients of the samples before it.
+    void BeginLightingSample(bool inBetween);
     void LogPicaProgramCounters(const char* when);
     // Package 5 (gfx_deko3d_pica_draw.cpp).
     void InitPica();
@@ -194,6 +248,8 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     void FlushPicaInvalidations();
     bool RecordPicaDraw(const GfxNativePicaDrawView& draw, const PicaProgram& program,
                         const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target);
+    // `reset draw:` line of a depth reset's plan (config/deko3d_clear_draw).
+    void LogPicaResetDraw(const GfxNativePicaDrawView& draw, const Deko3d::PicaClearDrawPlan& plan);
     void DrawPicaScanout(const GfxNativePicaDisplayTransferView& transfer, const Deko3d::PicaDisplay& display,
                          const Deko3d::PicaTransferPlan& plan, float allocScale);
     // Opens the device frame (if needed) and starts the resources' frame
@@ -240,10 +296,27 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* mScanoutFragment = nullptr;
     uint32_t mLinearClampSampler = 0;
     bool mCullInvert = false;    // config/deko3d_cull_invert
+    // config/deko3d_clear_draw (off by default, gfx_deko3d_clear_draw.h): the
+    // frame's depth reset (a full-target ALWAYS draw) turned into fast clears
+    // where that is provably exact.
+    bool mClearDraw = false;
+    // `reset draw:` lines (logs/deko3d.txt): when the plan changes (at most
+    // kResetLineLimit), and at the first reset after each periodic log.
+    static constexpr uint32_t kResetLineLimit = 64U;
+    uint64_t mResetSignature = ~0ULL;
+    uint32_t mResetLines = 0U;
+    bool mResetLineDue = false;
     // config/deko3d_barrier (diagnosis): the barrier after new images, as
-    // words "full|primitives|fragments|none image descriptors shader l2".
+    // words "full|primitives|fragments|none image descriptors shader l2
+    // frame". Default Full + Image|Descriptors: uploads and descriptor
+    // writes touch neither shader code, global memory nor uniforms (those
+    // are fresh stream memory per draw; new code sets its own Shader flag
+    // through ShaderStore::TakeCodeWritten). Full stays: the copy engine's
+    // writes must land before the 3D engine samples them.
     DkBarrier mImageBarrierMode = DkBarrier_Full;
-    uint32_t mImageBarrierFlags = DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader;
+    uint32_t mImageBarrierFlags = DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors;
+    // "frame": also the barrier at each frame's first draw (before 07/11).
+    bool mFrameBarrier = false;
     bool mFlipY = true;          // config/deko3d_flip_y ("0": the p6 orientation, upside down)
     // Every viewport goes through here: deko3d 0.5.0 always flips clip-space
     // y in the viewport (y up, like GL) while OriginUpperLeft stores row 0 at
@@ -263,6 +336,39 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Deko3d::PicaStageCache<DkShader> mVertexStages;
     Deko3d::PicaStageCache<DkShader> mFragmentStages;
     uint64_t mTranslationFailures = 0;
+    // Issued draws by base program class (logs/deko3d.txt, per frame).
+    Deko3d::PicaFrameDrawWindow mFrameDraws;
+    // config/lighting: the mode in use, the live settings revision applied,
+    // the variants per native fragment identity (one cache per mode, and per
+    // per-pixel path) and per vertex identity and hooks, the frame's
+    // environment profile (per-pixel) and the block of the draw being prepared.
+    Deko3d::LightingMode mLightingMode = Deko3d::LightingMode::Off;
+    uint64_t mLightingRevision = 0;
+    Deko3d::LightingCounters mLightingCounters{};
+    Deko3d::PicaStageCache<DkShader> mToonFragments;
+    std::array<Deko3d::PicaStageCache<DkShader>, static_cast<size_t>(Deko3d::PerPixelPath::Count)> mPerPixelFragments;
+    struct PerPixelVertex {
+        Renderer3ds::PicaShaderSourceIdentity Identity;
+        Renderer3ds::PicaVertexShaderHookLayout Hooks;
+        const DkShader* Shader = nullptr;
+    };
+    std::vector<PerPixelVertex> mPerPixelVertices;
+    Renderer3ds::PicaEnvironmentLighting mLightingEnvironment{};
+    std::optional<Renderer3ds::PicaSurfaceLightingView> mLightingView;
+    Renderer3ds::PicaSurfaceLightingUniforms mSurfaceLighting{};
+    // Per-pixel draws by frame kind (logs/deko3d.txt "lighting real" and
+    // "lighting in-between"):
+    // the temporal sample the draws belong to (PublishPicaFrameTemporalSample)
+    // is an fps60 in-between frame, or a real one.
+    bool mInBetweenSample = false;
+    Deko3d::FrameKindLighting mRealLighting{};
+    Deko3d::FrameKindLighting mInBetweenLighting{};
+    // Scene environment changes logged (on/off, scope, rim), at most 64.
+    uint32_t mEnvironmentChangesLogged = 0;
+    // One-frame per-pixel transients of the presented samples
+    // ("lighting transient:" lines, at most 48).
+    Deko3d::LightingTransientWatch mLightingWatch;
+    uint32_t mTransientsLogged = 0;
     bool mDeviceReady = false;
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;
@@ -294,13 +400,133 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     std::vector<uint64_t> mCompletions;
     Deko3dBackendCounters mCounters{};
     Deko3dPicaCalls mCalls{};
+
+    // config/grass = draw (gfx_deko3d_grass.cpp). mGrassDraws is false in
+    // every other case, and then nothing below is touched.
+    bool mGrassDraws = false;
+    // The opaque world draw of the frame that last reached a target: how the
+    // grass draws (viewport and scissor with dynamic resolution and
+    // widescreen applied, the scene's depth compare). Its target and frame are
+    // mGrassPoints' Scene.
+    struct GrassScene {
+        Deko3d::PicaRect Viewport;
+        DkScissor Scissor{};
+        uint8_t DepthCompare = 0;
+    };
+    GrassScene mGrassScene;
+    // Where the grass goes in the frame: before a translucent world draw, an
+    // overlay (HUD, minimap, title card) or the display transfer, whichever
+    // comes first (grass_draw_point.h).
+    Oot3d::GrassDrawPointGate<const Deko3d::PicaTarget*> mGrassPoints;
+    void RememberGrassScene(const Deko3d::PicaTarget& target, const Deko3d::PicaRect& viewport,
+                            const DkScissor& scissor, uint8_t depthCompare);
+    // Draws the culled tufts of this frame's sources into `target`, once per
+    // target and frame, if its opaque world and sources were drawn this frame.
+    void DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target, Oot3d::GrassDrawPoint point);
+
+    // config/simple_shadow (gfx_deko3d_player_shadow.cpp): Link's opaque draws
+    // of the frame, drawn again flattened onto the floor at the frame's first
+    // draw point after them (the grass's points), the way
+    // config/simple_shadow_method says.
+    struct PlayerShadowDraw {
+        const Deko3d::PicaTarget* Target = nullptr; // the frame's draws may go to several
+        const DkShader* Vertex = nullptr;
+        DkGpuAddr Uniforms = DK_GPU_ADDR_INVALID; // his uniforms with the flattening view rows
+        // Method texture: the same with the silhouette's projection rows.
+        DkGpuAddr SilhouetteUniforms = DK_GPU_ADDR_INVALID;
+        uint32_t UniformBytes = 0;
+        std::array<DkVtxAttribState, Deko3d::kPicaVertexAttributeCount> Attributes{};
+        std::array<DkVtxBufferState, Deko3d::kPicaVertexAttributeCount> Buffers{};
+        std::array<DkBufExtents, Deko3d::kPicaVertexAttributeCount> Extents{};
+        DkPrimitive Primitive = DkPrimitive_Triangles;
+        bool Indexed = false;
+        bool Indices16 = false;
+        DkGpuAddr IndexStream = DK_GPU_ADDR_INVALID;
+        uint32_t IndexCount = 0;
+        int32_t BaseVertex = 0;
+        uint32_t VertexCount = 0;
+        Deko3d::PicaRect Viewport;
+        DkScissor Scissor{};
+        uint8_t DepthCompare = 0;
+    };
+    struct PlayerShadowState {
+        // Of Selected, Method, Projection, Region, WorldToClip, Draws and StencilTaken.
+        uint64_t Frame = ~uint64_t{0};
+        std::optional<Oot3d::PlayerShadowFrame> Selected;
+        // The bridge's, at the frame's first draw.
+        Oot3d::PlayerShadowMethod Method = Oot3d::PlayerShadowMethod::TwoPass;
+        // One light and floor for all of the frame's meshes (taken at its first).
+        std::optional<std::array<float, 16>> Projection;
+        // Methods cover and texture: the floor region and the camera of his first draw.
+        std::optional<Oot3d::PlayerShadowRegion> Region;
+        std::optional<std::array<float, 16>> WorldToClip;
+        std::vector<PlayerShadowDraw> Draws;
+        // A draw of the frame tests or writes the top stencil bit, which two
+        // passes and cover borrow: that frame they draw in one pass.
+        bool StencilTaken = false;
+        // Whether that bit can be set outside the shadow. Targets start with
+        // it zero and the shadow's second pass leaves it so; once a game draw
+        // uses it or a savestate restores stencil, a pass clears it over its
+        // whole target once, and the target counts as clean again.
+        bool StencilShared = false;
+        std::unordered_set<const Deko3d::PicaTarget*> StencilClean; // since the last share
+        uint64_t FullClears = 0;
+        const DkShader* Fragment = nullptr;
+        const DkShader* CoverVertex = nullptr; // method cover
+        const DkShader* FloorVertex = nullptr; // method texture
+        const DkShader* FloorFragment = nullptr;
+        // Method texture: the silhouette, drawn and then sampled at each draw point.
+        DkMemBlock SilhouetteMemory = nullptr;
+        DkImage SilhouetteImage{};
+        DkImageView SilhouetteView{};
+        uint32_t SilhouetteSlot = 0;
+        uint64_t SilhouetteFrame = ~uint64_t{0}; // the last frame that drew it
+        uint64_t Frames = 0;
+        uint64_t Meshes = 0;
+        uint64_t Skipped = 0;
+        uint64_t StencilFrames = 0;
+        std::array<uint64_t, Oot3d::kPlayerShadowMethodCount> MethodFrames{}; // drawn with each method
+    };
+    PlayerShadowState mPlayerShadow;
+    // InitPica: the programs and the silhouette, and the bridge told whether
+    // the shadow can be drawn.
+    void InitPlayerShadow();
+    // Every PICA draw, after EnsureFrame: the frame's shadow and stencil use.
+    void ObservePlayerShadowDraw(const GfxNativePicaDrawView& draw);
+    // RecordPicaDraw, with the state it bound, before the draw call.
+    void CapturePlayerShadowDraw(const GfxNativePicaDrawView& draw, const PicaProgram& program,
+                                 const Deko3d::PicaTarget& target, const PlayerShadowDraw& bound);
+    // At a draw point into `target`: the captured draws, once per frame.
+    void DrawPlayerShadow(Deko3d::PicaTarget& target);
+    // Method texture, at a draw point: the draws flat into the silhouette,
+    // whose target stays bound (the caller binds the scene target again).
+    void DrawPlayerShadowSilhouette(const std::vector<PlayerShadowDraw>& draws);
+    // A captured draw's vertex input and draw call.
+    static void DrawPlayerShadowMesh(DkCmdBuf cmd, const PlayerShadowDraw& draw);
+    // SubmitPicaDisplayTransfer of a raw TextureCopy (TextureCopyBytes != 0).
+    bool SubmitPicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer, std::string* error);
+    // The copy's destination bytes, or why it has none.
+    const char* CapturePicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer,
+                                       Deko3d::PicaCopyStore::Version& version);
+    std::vector<uint8_t> mCopyRgba;    // a raw copy's source rows read back
 };
 
 namespace Deko3d {
 // gfx_deko3d_grass.cpp: a scene draw of the frame (opaque world draws become
-// grass sources) and the end of the frame (placements).
+// grass sources) and the end of the frame (placements, the next cull).
 void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame);
 void GrassEndFrame(uint64_t frame);
+// Frame start (EnsureFrame, after the texture hold): config/grass_hold's
+// wait for a scene's first grass (grass_scene_hold.h).
+void GrassBeginFrame();
+// The sample the next draws of `frame` belong to: synthetic (an fps60
+// in-between frame) or real.
+void GrassNoteSample(bool synthetic, uint64_t frame);
+// config/grass = draw and the preset loaded (EnsureFrame reads it per frame).
+[[nodiscard]] bool GrassDrawEnabled();
+// Placements requested and not made yet (config/grass = draw; render
+// thread): entry work for the pacing governor (Deko3dEntryWorkPending).
+[[nodiscard]] bool GrassWorkPending();
 } // namespace Deko3d
 
 } // namespace Fast

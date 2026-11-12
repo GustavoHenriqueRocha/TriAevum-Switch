@@ -930,10 +930,8 @@ bool ResolveTopScreenPauseIconBuild(TopScreenPauseIconBuild *build,
   if (build == nullptr || build->Argument3 != 0xC5U)
     return false;
 
-  const bool restoration =
-      config.HudLayout == TopScreenHudLayout::Restoration;
-  const float baseX = restoration ? 358.0F : 248.0F;
-  const float baseY = restoration ? 68.0F : 24.0F;
+  constexpr float baseX = 248.0F;
+  constexpr float baseY = 24.0F;
   const float scale = config.HudScale;
   const float insetX = static_cast<float>(config.HudMarginX);
   const float insetY = static_cast<float>(config.HudMarginY);

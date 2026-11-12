@@ -1,15 +1,25 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
+#include "oot3d/renderer/azahar_pack_scale.h"
+#include "oot3d/renderer/azahar_hud_image_list.h"
+#include "oot3d/renderer/azahar_scene_image_list.h"
+#include "oot3d/renderer/azahar_texture_scale.h"
 #include "fast/renderer/content_hash.h"
+#include "oot3d/renderer/pica_texture_decode.h"
 #include "azahar_pbr_materials.h"
 
 #include <nlohmann/json.hpp>
 #include <stb_image.h>
 #include <zlib.h>
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -431,8 +441,16 @@ std::unordered_map<uint64_t, IndexedTexture> IndexTexturePack(const std::filesys
     return index;
 }
 
+// What the worker does to a pack image after decoding it (the job's copy of
+// the configuration and the native texture's size; zero = unknown).
+struct DecodeOptions {
+    TextureSize Native;
+    uint32_t MaxScale = 0;
+    bool Mipmaps = false;
+};
+
 std::shared_ptr<const AzaharTextureReplacement> DecodeReplacement(
-    const IndexedTexture& indexed, uint64_t hash, uint64_t generation) {
+    const IndexedTexture& indexed, uint64_t hash, uint64_t generation, const DecodeOptions& options = {}) {
     const auto input = ReadBinaryFile(indexed.Path);
     int width = 0;
     int height = 0;
@@ -462,12 +480,24 @@ std::shared_ptr<const AzaharTextureReplacement> DecodeReplacement(
         FlipRows(*pixels, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 4U);
     }
 
+    TextureSize size{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    const TextureSize source = size;
+    if (const TextureSize capped = CappedReplacementSize(options.Native, size, options.MaxScale); capped != size) {
+        pixels = std::make_shared<std::vector<uint8_t>>(DownscaleRgba8(*pixels, size, capped));
+        size = capped;
+    }
+
     auto replacement = std::make_shared<AzaharTextureReplacement>();
-    replacement->Width = static_cast<uint32_t>(width);
-    replacement->Height = static_cast<uint32_t>(height);
+    replacement->Width = size.Width;
+    replacement->Height = size.Height;
+    replacement->SourceWidth = source.Width;
+    replacement->SourceHeight = source.Height;
     replacement->NativeHash = hash;
     replacement->PixelContentHash = AzaharCityHash64(*pixels);
     replacement->Generation = generation;
+    if (options.Mipmaps) {
+        replacement->Mips = BuildRgba8MipChain(*pixels, size, FullMipLevelCount(size));
+    }
     replacement->Rgba8 = std::move(pixels);
     replacement->SourcePath = indexed.Path;
     return replacement;
@@ -485,10 +515,83 @@ struct LoadJob {
     uint64_t Hash = 0;
     uint64_t Generation = 0;
     IndexedTexture Texture;
+    DecodeOptions Options;
+    bool UserInterface = false;
+    // A HUD image decoded ahead of its first draw (from the HUD list, or
+    // asked for Ahead by the UI).
+    bool Preload = false;
+    // An ahead HUD request not identified yet (AzaharTextureRequest::Ahead):
+    // its encoded base level, PICA format and the pack's hash mode. The HUD
+    // worker hashes it (decoding it for a legacy hash) and queues its image,
+    // so asking ahead costs the caller a copy, not a decode.
+    std::vector<uint8_t> AheadNative;
+    uint8_t AheadFormat = 0;
+    bool AheadUsesNewHash = true;
+    // A world image of the current scene's list, decoded when the game
+    // entered it (NoteScene), and the visit (scene serial) a world job was
+    // queued in: the queued ones of an earlier visit are dropped at a change.
+    bool ScenePreload = false;
+    uint64_t SceneSerial = 0;
     std::optional<IndexedAzaharPbrMaterial> Material;
     AzaharMaterialIdentity Identity;
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
 };
+
+// One folder of the pack, for its fingerprint (azahar_pack_scale.h): the size
+// of each regular file, and its folders. On the Switch from the directory
+// reads themselves (fsDirRead returns each file's size: no file is opened,
+// where a stat would open each one); elsewhere, or if that fails,
+// std::filesystem.
+struct PackFolderListing {
+    std::vector<std::pair<std::string, uint64_t>> Files;
+    std::vector<std::string> Folders;
+};
+
+PackFolderListing ListPackFolder(const std::filesystem::path& folder) {
+    PackFolderListing listing;
+#if defined(__SWITCH__)
+    FsFileSystem* device = nullptr;
+    char native[FS_MAX_PATH] = {};
+    FsDir directory;
+    if (fsdevTranslatePath(folder.string().c_str(), &device, native) != -1 && device != nullptr &&
+        R_SUCCEEDED(fsFsOpenDirectory(device, native, FsDirOpenMode_ReadDirs | FsDirOpenMode_ReadFiles, &directory))) {
+        std::vector<FsDirectoryEntry> entries(64U);
+        s64 count = 0;
+        while (R_SUCCEEDED(fsDirRead(&directory, &count, entries.size(), entries.data())) && count > 0) {
+            for (s64 index = 0; index < count; ++index) {
+                const auto& entry = entries[static_cast<size_t>(index)];
+                if (entry.type == FsDirEntryType_Dir) {
+                    listing.Folders.emplace_back(entry.name);
+                } else if (entry.type == FsDirEntryType_File) {
+                    listing.Files.emplace_back(entry.name, static_cast<uint64_t>(std::max<s64>(0, entry.file_size)));
+                }
+            }
+        }
+        fsDirClose(&directory);
+        return listing;
+    }
+#endif
+    std::error_code error;
+    for (std::filesystem::directory_iterator
+             iterator(folder, std::filesystem::directory_options::skip_permission_denied, error),
+         end;
+         iterator != end && !error; iterator.increment(error)) {
+        std::error_code entryError;
+        if (iterator->is_directory(entryError)) {
+            listing.Folders.push_back(iterator->path().filename().string());
+        } else if (iterator->is_regular_file(entryError)) {
+            const uint64_t size = iterator->file_size(entryError);
+            if (!entryError) listing.Files.emplace_back(iterator->path().filename().string(), size);
+        }
+    }
+    return listing;
+}
+
+// The pack's image scale (azahar_pack_scale.h) is measured a few PNG headers
+// at a time, so that a decode queued meanwhile waits for at most these; while
+// decodes are still running, the pack worker looks again this often.
+constexpr size_t kImageScaleHeadersPerStep = 16U;
+constexpr std::chrono::milliseconds kImageScaleRecheck{100};
 
 } // namespace
 
@@ -525,23 +628,72 @@ std::string MakeAzaharTextureFilename(uint16_t width, uint16_t height, uint64_t 
 
 class AzaharTexturePackRuntime::Impl {
   public:
-    Impl() { mWorker = std::thread([this] { WorkerMain(); }); }
+    // HUD images have their own worker: a HUD texture seen for the first time
+    // never waits behind the world images of a scene being loaded (1080p
+    // packs: tens of PNGs, some of them 4096 wide), only behind other HUD
+    // images, which are small. World images decode on the pack worker and
+    // kWorldDecodeWorkers - 1 more threads that only decode.
+    Impl() {
+        mWorker = std::thread([this] { WorkerMain(); });
+        mUiWorker = std::thread([this] { UiWorkerMain(); });
+        for (size_t index = 1U; index < kWorldDecodeWorkers; ++index)
+            mWorldWorkers.emplace_back([this] { WorldWorkerMain(); });
+    }
     ~Impl() {
         {
             std::scoped_lock lock(mMutex);
             mStopping = true;
         }
         mWorkAvailable.notify_all();
+        mUiWorkAvailable.notify_all();
         mWorker.join();
+        mUiWorker.join();
+        for (auto& worker : mWorldWorkers) worker.join();
     }
 
     void Configure(AzaharTexturePackConfiguration configuration) {
         configuration = NormalizeConfiguration(std::move(configuration));
         std::scoped_lock lock(mMutex);
         if (mConfigured && configuration == mConfiguration) return;
+        // HUD images do not depend on the size cap (kUiTextureMaxScale): a
+        // change of only the cap keeps them, so the HUD and the menus draw the
+        // pack's art at once instead of waiting for the HUD worker to decode
+        // them all again (test.14: first sights waited up to 702 ms, menu
+        // textures 684 ms, after the toggles; logs22a/deko3d.txt:373-374).
+        auto otherCap = configuration;
+        otherCap.MaxReplacementScale = mConfiguration.MaxReplacementScale;
+        otherCap.GenerateMipmaps = mConfiguration.GenerateMipmaps;
+        const bool keepHud = mConfigured && configuration.LoadCustomTextures && otherCap == mConfiguration;
+        // Only the cap: the index, the HUD images and the HUD's revision stay
+        // (test.15: every size change indexed the pack again, ~420 ms, bumped
+        // the HUD's revision twice and queued the scene's whole list, 75
+        // decodes). World images of the old cap go; of the scene's list only
+        // those the new cap draws otherwise are decoded again.
+        if (keepHud && mIndexReady && !mRebuildRequested && !mBuilding) {
+            const uint32_t previousCap = mConfiguration.MaxReplacementScale;
+            mConfiguration = std::move(configuration);
+            ++mGeneration; // queued and running world decodes of the old cap are dropped
+            mReplacementCache.clear();
+            mFailedLoadHashes.clear();
+            mPendingLoadGenerations.clear();
+            // HUD decodes in flight are of the old generation: queued again
+            // at their next poll (the HUD images done are kept).
+            mPendingUiLoadGenerations.clear();
+            ResetScenePreloadLocked();
+            ++mCapOnlyChanges;
+            QueueScenePreloadLocked(previousCap);
+            mIdle.notify_all();
+            return;
+        }
         mConfiguration = std::move(configuration);
         mConfigured = true;
         ++mGeneration;
+        ++mUiRevision;
+        mSourceSizes.clear();
+        if (!keepHud) {
+            mUiReplacementCache.clear();
+            mUiValidFromGeneration = mGeneration;
+        }
         ++mMaterialRevision;
         mPreview.reset();
         mPreviewSeamStatus.clear();
@@ -551,19 +703,32 @@ class AzaharTexturePackRuntime::Impl {
         mReplacementCache.clear();
         mMaterialCache.clear();
         mFailedLoadHashes.clear();
+        mFailedUiLoadHashes.clear();
+        mHudWaiting.clear();
+        mMenuWaiting.clear();
         mFailedMaterialHashes.clear();
         mDumpedHashes.clear();
+        ResetScenePreloadLocked();
+        mSceneListAppend.clear();
         const auto title = Hex16(mConfiguration.TitleId);
+        const auto previousLoadDirectory = std::move(mLoadDirectory);
         mLoadDirectory = mConfiguration.LoadDirectory.empty()
             ? mConfiguration.UserDirectory / "load" / "textures" / title : mConfiguration.LoadDirectory;
         mDumpDirectory = mConfiguration.DumpDirectory.empty()
             ? mConfiguration.UserDirectory / "dump" / "textures" / title : mConfiguration.DumpDirectory;
+        // A size cap change indexes the same folder again: the Video tab keeps
+        // the pack's sizes meanwhile. Another folder, or HD textures off,
+        // forgets them.
+        if (!mConfiguration.LoadCustomTextures || mLoadDirectory != previousLoadDirectory) ForgetImageScaleLocked();
         RequestRebuildLocked();
     }
 
     void Reload() {
         std::scoped_lock lock(mMutex);
-        if (mConfigured) RequestRebuildLocked();
+        if (!mConfigured) return;
+        // The files may have changed: HUD images are decoded again.
+        mUiValidFromGeneration = mGeneration + 1U;
+        RequestRebuildLocked();
     }
 
     std::shared_ptr<const AzaharTextureReplacement> ResolveAndMaybeDump(const AzaharTextureRequest& request) {
@@ -580,7 +745,14 @@ class AzaharTexturePackRuntime::Impl {
         {
             std::scoped_lock lock(mMutex);
             if (!mConfigured) return {};
-            if (!mIndexReady) return {AzaharTextureResolveState::Pending, 0U, nullptr};
+            if (!mIndexReady) {
+                // HD textures off (and no dump): nothing to wait for, the
+                // caller draws its own pixels at once; the hash (for
+                // authoring) is there once the index is.
+                if (!mConfiguration.LoadCustomTextures && !mConfiguration.DumpTextures) return {};
+                return {AzaharTextureResolveState::Pending, 0U, nullptr};
+            }
+            if (request.UserInterface && request.Ahead) return QueueAheadLocked(request);
             dumpEnabled = mConfiguration.DumpTextures;
             loadEnabled = mConfiguration.LoadCustomTextures;
             dumpUsesNewHash = mDumpUsesNewHash;
@@ -589,7 +761,7 @@ class AzaharTexturePackRuntime::Impl {
             if (dumpEnabled) dumpDirectory = mDumpDirectory;
         }
         std::string error;
-        std::optional<uint64_t> modern, legacy;
+        std::optional<uint64_t> modern = request.KnownModernHash, legacy = request.KnownLegacyHash;
         const auto hashFor = [&](bool modernMode) {
             auto& value = modernMode ? modern : legacy;
             if (!value) value = ComputeAzaharTextureHash(request, modernMode, &error);
@@ -611,26 +783,29 @@ class AzaharTexturePackRuntime::Impl {
         if (!loadEnabled) return {AzaharTextureResolveState::Disabled, hash, nullptr, true, loadUsesNewHash};
         std::scoped_lock lock(mMutex);
         if (generation != mGeneration || !mConfiguration.LoadCustomTextures) return {};
-        const auto indexed = mIndex.find(hash);
-        if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
-        const auto cached = mReplacementCache.find(hash);
-        if ((cached == mReplacementCache.end() || cached->second->Generation != mGeneration) &&
-            !mFailedLoadHashes.contains(hash) && !mPendingLoadGenerations.contains(hash)) {
-            mPendingLoadGenerations.emplace(hash, mGeneration);
-            LoadJob job;
-            job.Hash = hash;
-            job.Generation = mGeneration;
-            job.Texture = indexed->second;
-            mLoadJobs.push_back(std::move(job));
-            ++mPendingLoads;
-            mWorkAvailable.notify_one();
-        }
-        return PollLocked(hash);
+        return QueueOrPollLocked(hash, {request.Width, request.Height}, request.UserInterface, false,
+                                 request.UserInterface && request.Menu);
     }
 
     AzaharTextureResolveResult PollQueued(uint64_t hash) const {
         std::scoped_lock lock(mMutex);
         return PollLocked(hash);
+    }
+
+    AzaharTextureResolveResult PollOrQueue(uint64_t hash, TextureSize native, bool userInterface, bool menu) {
+        std::scoped_lock lock(mMutex);
+        if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
+        if (!mIndexReady) return {AzaharTextureResolveState::Pending, hash, nullptr, false, mPack.UseNewHash};
+        return QueueOrPollLocked(hash, native, userInterface, false, userInterface && menu);
+    }
+
+    void ReleaseDecoded(uint64_t hash, uint64_t generation) {
+        std::scoped_lock lock(mMutex);
+        if (const auto cached = mReplacementCache.find(hash);
+            cached != mReplacementCache.end() && cached->second->Generation == generation) {
+            mReplacementCache.erase(cached);
+            ForgetScenePreloadLocked(hash);
+        }
     }
 
     AzaharMaterialResolveResult ResolveMaterialOrQueue(uint64_t hash, uint64_t expectedGeneration) {
@@ -657,7 +832,7 @@ class AzaharTexturePackRuntime::Impl {
             mPendingMaterialGenerations.emplace(hash, mGeneration);
             mLoadJobs.push_back(std::move(job));
             ++mPendingLoads;
-            mWorkAvailable.notify_one();
+            mWorkAvailable.notify_all();
         }
         if (cached != mMaterialCache.end())
             return {AzaharTextureResolveState::Ready, cached->second,
@@ -682,11 +857,11 @@ class AzaharTexturePackRuntime::Impl {
         status.PackUsesNewHash = mPack.UseNewHash;
         status.Generation = mGeneration;
         status.IndexedTextures = mIndex.size();
-        status.LoadedTextures = mReplacementCache.size();
+        status.LoadedTextures = mReplacementCache.size() + mUiReplacementCache.size();
         status.DumpedTextures = mDumpedCount;
         status.PendingDumps = mPendingDumps;
         status.PendingLoads = mPendingLoads;
-        status.FailedLoads = mFailedLoadHashes.size();
+        status.FailedLoads = mFailedLoadHashes.size() + mFailedUiLoadHashes.size();
         status.UnsupportedTextureFiles = mUnsupportedFiles;
         status.IndexPending = mRebuildRequested || mBuilding;
         status.IndexedMaterials = mMaterialIndex.size();
@@ -697,9 +872,28 @@ class AzaharTexturePackRuntime::Impl {
         status.LastError = mLastError;
         return status;
     }
+    uint64_t UiRevision() const { return mUiRevision.load(std::memory_order_acquire); }
+    AzaharCapChangeStatus CapChangeStatus() const {
+        std::scoped_lock lock(mMutex);
+        return {mCapOnlyChanges, mCapOnlyRequeued, mCapOnlyKeptImages};
+    }
     uint64_t Generation() const {
         std::scoped_lock lock(mMutex);
         return mGeneration;
+    }
+    bool IndexReady() const {
+        std::scoped_lock lock(mMutex);
+        return mConfigured && mIndexReady;
+    }
+    uint32_t LargestImageScale() const { return mLargestImageScale.load(std::memory_order_relaxed); }
+    uint64_t ImageScaleSerial() const { return mImageScaleSerial.load(std::memory_order_acquire); }
+    AzaharImageScaleStatus ImageScaleStatus() const {
+        std::scoped_lock lock(mMutex);
+        return mImageScaleStatus;
+    }
+    AzaharHudPackStatus HudStatus() const {
+        std::scoped_lock lock(mMutex);
+        return mHud;
     }
     std::vector<AzaharMaterialCatalogEntry> MaterialCatalog() const {
         std::scoped_lock lock(mMutex);
@@ -718,7 +912,7 @@ class AzaharTexturePackRuntime::Impl {
         std::scoped_lock lock(mMutex);
         mLoadJobs.push_back(std::move(job));
         ++mPendingLoads;
-        mWorkAvailable.notify_one();
+        mWorkAvailable.notify_all();
         return result;
     }
     void SetMaterialPreview(std::optional<AzaharMaterialParameterPreview> preview) {
@@ -749,25 +943,508 @@ class AzaharTexturePackRuntime::Impl {
     }
     void WaitForPendingLoads() {
         std::unique_lock lock(mMutex);
-        mIdle.wait(lock, [&] { return !mBuilding && !mRebuildRequested && mPendingLoads == 0U; });
+        mIdle.wait(lock, [&] {
+            return !mBuilding && !mRebuildRequested && mPendingLoads == 0U && mSceneListAppend.empty() &&
+                   !mSceneListWriting;
+        });
+    }
+
+    void NoteScene(int scene) {
+        std::scoped_lock lock(mMutex);
+        if (scene == mSceneId) return;
+        // The visit ends: its images decoded ahead that no draw asked for go,
+        // and so do its world decodes still queued (a draw of the new scene
+        // asks again for what it needs, from the front of the queue).
+        for (const auto& [hash, preload] : mScenePreloaded) {
+            if (preload.Used) continue;
+            ++mScene.PreloadUnused;
+            if (const auto cached = mReplacementCache.find(hash);
+                cached != mReplacementCache.end() && cached->second->Generation == mGeneration)
+                mReplacementCache.erase(cached);
+        }
+        mScenePreloaded.clear();
+        mScenePreloadBytes = 0U;
+        ++mSceneSerial;
+        mScene.Dropped += DropEarlierSceneJobsLocked();
+        mPreviousScene = mScene;
+        mSceneId = scene;
+        mScene = {};
+        mScene.Scene = scene;
+        mScene.Serial = mSceneSerial;
+        mSceneStart = std::chrono::steady_clock::now();
+        mSceneOnSight.clear();
+        mSceneSerialPublished.store(mSceneSerial, std::memory_order_release);
+        QueueScenePreloadLocked();
+        mIdle.notify_all();
+    }
+    uint64_t SceneSerial() const { return mSceneSerialPublished.load(std::memory_order_acquire); }
+    AzaharScenePackStatus SceneStatus() const {
+        std::scoped_lock lock(mMutex);
+        return mScene;
+    }
+    AzaharScenePackStatus PreviousSceneStatus() const {
+        std::scoped_lock lock(mMutex);
+        return mPreviousScene;
+    }
+    size_t PendingLoads() const {
+        std::scoped_lock lock(mMutex);
+        return mPendingLoads;
+    }
+    void NoteSceneImage(uint64_t hash, TextureSize native) {
+        std::scoped_lock lock(mMutex);
+        if (!mConfigured || !mConfiguration.LoadCustomTextures || !mIndexReady || !mIndex.contains(hash)) return;
+        RecordSceneImageLocked(hash, native);
+        const auto preloaded = mScenePreloaded.find(hash);
+        if (preloaded == mScenePreloaded.end() || preloaded->second.Used) return;
+        ++mScene.PreloadResident;
+        if (const auto cached = mReplacementCache.find(hash);
+            cached != mReplacementCache.end() && cached->second->Generation == mGeneration)
+            mReplacementCache.erase(cached);
+        ForgetScenePreloadLocked(hash);
+    }
+    size_t WaitForImages(std::span<const uint64_t> hashes, std::chrono::microseconds timeout) {
+        std::unique_lock lock(mMutex);
+        // On screen now: before every other queued world image.
+        for (const uint64_t hash : hashes) {
+            if (!mPendingLoadGenerations.contains(hash)) continue;
+            const auto queued = std::find_if(mLoadJobs.begin(), mLoadJobs.end(), [&](const LoadJob& job) {
+                return job.Hash == hash && !job.Material && !job.EditorImage;
+            });
+            if (queued != mLoadJobs.end() && queued != mLoadJobs.begin()) {
+                LoadJob job = std::move(*queued);
+                mLoadJobs.erase(queued);
+                mLoadJobs.push_front(std::move(job));
+            }
+        }
+        const auto decoding = [&] {
+            return static_cast<size_t>(std::count_if(hashes.begin(), hashes.end(), [&](uint64_t hash) {
+                return mPendingLoadGenerations.contains(hash);
+            }));
+        };
+        mIdle.wait_for(lock, timeout, [&] { return mStopping || decoding() == 0U; });
+        return decoding();
     }
 
   private:
-    AzaharTextureResolveResult PollLocked(uint64_t hash) const {
+    // An ahead HUD request (index ready): a copy of its encoded base level is
+    // identified on the HUD worker (IdentifyAhead); its image is queued then.
+    AzaharTextureResolveResult QueueAheadLocked(const AzaharTextureRequest& request) {
+        if (!mConfiguration.LoadCustomTextures) return {};
+        if (request.NativeBytes.empty()) return {AzaharTextureResolveState::Failed, 0U, nullptr};
+        LoadJob job;
+        job.Generation = mGeneration;
+        job.Options = DecodeOptions{{request.Width, request.Height}, kUiTextureMaxScale, false};
+        job.UserInterface = true;
+        job.Preload = true;
+        job.AheadNative.assign(request.NativeBytes.begin(), request.NativeBytes.end());
+        job.AheadFormat = request.NativeFormat;
+        job.AheadUsesNewHash = mPack.UseNewHash;
+        mUiLoadJobs.push_back(std::move(job));
+        ++mPendingLoads;
+        mUiWorkAvailable.notify_one();
+        return {AzaharTextureResolveState::Pending, 0U, nullptr, false, mPack.UseNewHash};
+    }
+    // The pack's hash of an ahead HUD request, then its image queued ahead
+    // (if the pack has one) behind the HUD images already queued.
+    void IdentifyAhead(const LoadJob& job) {
+        AzaharTextureRequest request{static_cast<uint16_t>(job.Options.Native.Width),
+                                     static_cast<uint16_t>(job.Options.Native.Height), job.AheadFormat, 0U,
+                                     job.AheadNative, {}};
+        std::vector<uint8_t> rgba8;
+        std::string error;
+        uint64_t hash = 0U;
+        // Azahar's legacy hash of a format without a byte layout of its own
+        // (5 and up) is over the decoded texels.
+        if (job.AheadUsesNewHash || job.AheadFormat < 5U ||
+            DecodePicaTextureRgba8(job.AheadFormat, request.Width, request.Height, job.AheadNative, rgba8, &error)) {
+            request.NativeRgba8 = rgba8;
+            hash = ComputeAzaharTextureHash(request, job.AheadUsesNewHash, &error);
+        }
+        std::scoped_lock lock(mMutex);
+        if (!error.empty()) {
+            mLastError = "HUD texture asked for ahead: " + error;
+        } else if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
+            (void)QueueOrPollLocked(hash, job.Options.Native, true, true);
+        }
+        --mPendingLoads;
+        mIdle.notify_all();
+    }
+    // Queues the decode of an indexed image that is neither cached, failed
+    // nor already queued, then reports its state. HUD images have their own
+    // cache (another size cap and no mips than a world texture of the hash)
+    // and their own queue and worker; a HUD request (not ahead) that finds
+    // its image still decoding is remembered as a first sight drawn late
+    // (`menu`: a PICA menu texture, counted apart). A texture on screen goes
+    // before the HUD images asked for ahead: queued at the front, or moved
+    // there when it was queued ahead and has not started. Likewise a world
+    // texture on screen goes before the scene's images decoded ahead, and is
+    // listed for the scene (RecordSceneImageLocked).
+    AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native, bool userInterface = false,
+                                                 bool preload = false, bool menu = false) {
+        const auto indexed = mIndex.find(hash);
+        if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
+        auto& cache = userInterface ? mUiReplacementCache : mReplacementCache;
+        auto& pending = userInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations;
+        const auto& failed = userInterface ? mFailedUiLoadHashes : mFailedLoadHashes;
+        const auto cached = cache.find(hash);
+        const bool onSight = userInterface && !preload;
+        const bool worldOnSight = !userInterface && !preload;
+        // A HUD image stays valid across a size cap change (Configure).
+        const bool current = cached != cache.end() && (userInterface ? cached->second->Generation >= mUiValidFromGeneration
+                                                                      : cached->second->Generation == mGeneration);
+        if (!current && !failed.contains(hash) &&
+            !pending.contains(hash)) {
+            pending.emplace(hash, mGeneration);
+            LoadJob job;
+            job.Hash = hash;
+            job.Generation = mGeneration;
+            job.Texture = indexed->second;
+            job.Options = userInterface
+                              ? DecodeOptions{native, kUiTextureMaxScale, false}
+                              : DecodeOptions{native, mConfiguration.MaxReplacementScale, mConfiguration.GenerateMipmaps};
+            job.UserInterface = userInterface;
+            job.Preload = preload;
+            job.SceneSerial = mSceneSerial;
+            if (preload) ++mHud.PreloadQueued;
+            if (onSight) {
+                mUiLoadJobs.push_front(std::move(job));
+            } else if (worldOnSight) {
+                const auto ahead = std::find_if(mLoadJobs.begin(), mLoadJobs.end(),
+                                                [](const LoadJob& queued) { return queued.ScenePreload; });
+                mLoadJobs.insert(ahead, std::move(job));
+            } else {
+                (userInterface ? mUiLoadJobs : mLoadJobs).push_back(std::move(job));
+            }
+            ++mPendingLoads;
+            if (userInterface) {
+                mUiWorkAvailable.notify_one();
+            } else {
+                mWorkAvailable.notify_all();
+            }
+        } else if (onSight && pending.contains(hash)) {
+            const auto queued = std::find_if(mUiLoadJobs.begin(), mUiLoadJobs.end(), [&](const LoadJob& job) {
+                return job.Hash == hash && job.AheadNative.empty();
+            });
+            if (queued != mUiLoadJobs.end() && queued != mUiLoadJobs.begin()) {
+                LoadJob job = std::move(*queued);
+                mUiLoadJobs.erase(queued);
+                mUiLoadJobs.push_front(std::move(job));
+            }
+        } else if (worldOnSight && pending.contains(hash)) {
+            const auto queued = std::find_if(mLoadJobs.begin(), mLoadJobs.end(), [&](const LoadJob& job) {
+                return job.Hash == hash && job.ScenePreload;
+            });
+            if (queued != mLoadJobs.end() && queued != mLoadJobs.begin()) {
+                LoadJob job = std::move(*queued);
+                mLoadJobs.erase(queued);
+                mLoadJobs.push_front(std::move(job));
+            }
+        }
+        auto result = PollLocked(hash, userInterface);
+        if (onSight && result.State == AzaharTextureResolveState::Pending)
+            (menu ? mMenuWaiting : mHudWaiting).try_emplace(hash, std::chrono::steady_clock::now());
+        if (worldOnSight) {
+            RecordSceneImageLocked(hash, native);
+            if (result.State == AzaharTextureResolveState::Pending && mSceneOnSight.insert(hash).second)
+                ++mScene.OnSight;
+            if (const auto preloaded = mScenePreloaded.find(hash);
+                result.State == AzaharTextureResolveState::Ready && preloaded != mScenePreloaded.end() &&
+                !preloaded->second.Used) {
+                preloaded->second.Used = true;
+                ++mScene.PreloadUsed;
+            }
+        }
+        return result;
+    }
+    // A world image a draw of the current scene asked for, not in the
+    // scene's list yet: listed (the file is appended by the pack worker),
+    // also for a later visit in this session.
+    void RecordSceneImageLocked(uint64_t hash, TextureSize native) {
+        if (mConfiguration.SceneImageList.empty() || mSceneId < 0 ||
+            static_cast<uint32_t>(mSceneId) > kSceneImageListMaxScene || native.Width == 0U ||
+            native.Height == 0U || native.Width > 1024U || native.Height > 1024U ||
+            mSceneListLines >= kSceneImageListLimit)
+            return;
+        auto& listed = mSceneListed[static_cast<uint16_t>(mSceneId)];
+        if (listed.size() >= kSceneImageListPerScene || !listed.insert(hash).second) return;
+        const HudImageEntry image{hash, static_cast<uint16_t>(native.Width), static_cast<uint16_t>(native.Height)};
+        mSceneLists[static_cast<uint16_t>(mSceneId)].push_back(image);
+        ++mSceneListLines;
+        ++mScene.Added;
+        mSceneListAppend += FormatSceneImageEntry({static_cast<uint16_t>(mSceneId), image});
+        mWorkAvailable.notify_all();
+    }
+    // The current scene's listed images on the world workers, behind any
+    // image already on screen; not those decoded, failed or already queued.
+    // After a change of only the cap (`changedFromCap`): only the images
+    // whose decoded size differs at the new cap (their file's size known
+    // from an earlier decode); the others are decoded when drawn.
+    void QueueScenePreloadLocked(std::optional<uint32_t> changedFromCap = std::nullopt) {
+        if (!mConfigured || !mIndexReady || !mConfiguration.LoadCustomTextures || mSceneId < 0) return;
+        const auto list = mSceneLists.find(static_cast<uint16_t>(mSceneId));
+        if (list == mSceneLists.end()) return;
+        mScene.Listed = list->second.size();
+        for (const auto& entry : list->second) {
+            const auto indexed = mIndex.find(entry.Hash);
+            if (indexed == mIndex.end() || mFailedLoadHashes.contains(entry.Hash) ||
+                mPendingLoadGenerations.contains(entry.Hash))
+                continue;
+            if (const auto cached = mReplacementCache.find(entry.Hash);
+                cached != mReplacementCache.end() && cached->second->Generation == mGeneration)
+                continue;
+            if (changedFromCap) {
+                const auto source = mSourceSizes.find(entry.Hash);
+                const TextureSize native{entry.Width, entry.Height};
+                if (source == mSourceSizes.end() ||
+                    !TexturePackCapChangesImage(native, source->second, *changedFromCap,
+                                                mConfiguration.MaxReplacementScale)) {
+                    ++mCapOnlyKeptImages;
+                    continue;
+                }
+                ++mCapOnlyRequeued;
+            }
+            mPendingLoadGenerations.emplace(entry.Hash, mGeneration);
+            LoadJob job;
+            job.Hash = entry.Hash;
+            job.Generation = mGeneration;
+            job.Texture = indexed->second;
+            job.Options = DecodeOptions{{entry.Width, entry.Height}, mConfiguration.MaxReplacementScale,
+                                        mConfiguration.GenerateMipmaps};
+            job.ScenePreload = true;
+            job.SceneSerial = mSceneSerial;
+            mLoadJobs.push_back(std::move(job));
+            ++mPendingLoads;
+            ++mScene.PreloadQueued;
+        }
+        mWorkAvailable.notify_all();
+    }
+    // World decodes queued in an earlier visit (not started): dropped, and
+    // no longer pending, so a draw that still needs one queues it again.
+    size_t DropEarlierSceneJobsLocked() {
+        size_t dropped = 0U;
+        for (auto job = mLoadJobs.begin(); job != mLoadJobs.end();) {
+            if (job->Material || job->EditorImage || job->SceneSerial == mSceneSerial) {
+                ++job;
+                continue;
+            }
+            if (const auto found = mPendingLoadGenerations.find(job->Hash);
+                found != mPendingLoadGenerations.end() && found->second == job->Generation)
+                mPendingLoadGenerations.erase(found);
+            job = mLoadJobs.erase(job);
+            --mPendingLoads;
+            ++dropped;
+        }
+        return dropped;
+    }
+    // An image decoded ahead that left the cache (uploaded, or replaced).
+    void ForgetScenePreloadLocked(uint64_t hash) {
+        if (const auto preloaded = mScenePreloaded.find(hash); preloaded != mScenePreloaded.end()) {
+            mScenePreloadBytes -= std::min(mScenePreloadBytes, preloaded->second.Bytes);
+            mScenePreloaded.erase(preloaded);
+        }
+    }
+    void ResetScenePreloadLocked() {
+        mScenePreloaded.clear();
+        mScenePreloadBytes = 0U;
+        mSceneOnSight.clear();
+    }
+    AzaharTextureResolveResult PollLocked(uint64_t hash, bool userInterface = false) const {
         if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
-        if (const auto cached = mReplacementCache.find(hash); cached != mReplacementCache.end())
+        const auto& cache = userInterface ? mUiReplacementCache : mReplacementCache;
+        const auto& pending = userInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations;
+        const auto& failed = userInterface ? mFailedUiLoadHashes : mFailedLoadHashes;
+        if (const auto cached = cache.find(hash); cached != cache.end())
             return {AzaharTextureResolveState::Ready, hash, cached->second, true, mPack.UseNewHash};
-        if (mFailedLoadHashes.contains(hash)) return {AzaharTextureResolveState::Failed, hash, nullptr, true, mPack.UseNewHash};
-        if (!mIndexReady || mPendingLoadGenerations.contains(hash)) return {AzaharTextureResolveState::Pending, hash, nullptr, mIndexReady, mPack.UseNewHash};
+        if (failed.contains(hash)) return {AzaharTextureResolveState::Failed, hash, nullptr, true, mPack.UseNewHash};
+        if (!mIndexReady || pending.contains(hash)) return {AzaharTextureResolveState::Pending, hash, nullptr, mIndexReady, mPack.UseNewHash};
         return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
     }
     void RequestRebuildLocked() {
         ++mRebuildSerial;
         mRebuildRequested = true;
-        mWorkAvailable.notify_one();
+        // The new index starts its own measure (StartImageScaleScanLocked).
+        mImageScaleScan.Active = false;
+        mWorkAvailable.notify_all();
     }
+
+    // The pack's largest world/model image scale (azahar_pack_scale.h): from
+    // the new index on, one step at a time on the pack worker, only while
+    // ImageScaleScanRunnableLocked. Steps: plan the files to measure; list
+    // the pack's folders (fingerprint); compare with the result kept for this
+    // folder, then ImageScaleRecord; read the PNG headers; publish and
+    // remember.
+    struct ImageScaleScan {
+        bool Active = false;
+        uint64_t Generation = 0;
+        std::filesystem::path Root, Record;
+        std::vector<std::filesystem::path> Indexed; // the index's files, until planned
+        bool Planned = false;
+        PackScalePlan Plan;
+        std::vector<std::string> Folders; // still to list, below Root ("" = Root)
+        PackFingerprint Fingerprint;
+        bool RecordChecked = false;
+        size_t Next = 0; // Plan.Files measured
+        uint32_t Largest = 0;
+        uint64_t Measured = 0;
+        size_t Unreadable = 0;
+        uint64_t ListMicros = 0, BusyMicros = 0;
+        std::chrono::steady_clock::time_point Start;
+    };
+    void StartImageScaleScanLocked(const AzaharTexturePackConfiguration& configuration,
+                                   const std::filesystem::path& root, std::vector<std::filesystem::path> indexed) {
+        mImageScaleScan = {};
+        mImageScaleScan.Active = true;
+        mImageScaleScan.Generation = mGeneration;
+        mImageScaleScan.Root = root;
+        mImageScaleScan.Record = configuration.ImageScaleRecord;
+        mImageScaleScan.Indexed = std::move(indexed);
+        mImageScaleScan.Folders.emplace_back();
+        mImageScaleScan.Start = std::chrono::steady_clock::now();
+    }
+    void ForgetImageScaleLocked() {
+        mImageScaleKnown.reset();
+        mLargestImageScale.store(0U, std::memory_order_relaxed);
+    }
+    void FinishImageScaleScanLocked(const PackScaleRecord& record, bool remembered) {
+        auto& scan = mImageScaleScan;
+        mImageScaleKnown = record;
+        AzaharImageScaleStatus status;
+        status.Serial = mImageScaleStatus.Serial + 1U;
+        status.Largest = record.Largest;
+        status.Remembered = remembered;
+        status.Measured = record.Measured;
+        status.Hud = scan.Plan.Hud;
+        status.Unnamed = scan.Plan.Unnamed;
+        status.Unreadable = scan.Unreadable;
+        status.Files = scan.Fingerprint.Files;
+        status.ListMicros = scan.ListMicros;
+        status.BusyMicros = scan.BusyMicros;
+        status.Micros = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - scan.Start)
+                .count());
+        mImageScaleStatus = status;
+        mLargestImageScale.store(record.Largest, std::memory_order_relaxed);
+        mImageScaleSerial.store(status.Serial, std::memory_order_release);
+        scan.Active = false;
+    }
+    // Lowest priority: nothing else for any pack worker, decodes running included.
+    bool ImageScaleScanRunnableLocked() const {
+        return mImageScaleScan.Active && mImageScaleScan.Generation == mGeneration && mPendingLoads == 0U &&
+               mLoadJobs.empty() && mUiLoadJobs.empty() && mDumpJobs.empty() && !mRebuildRequested && !mBuilding &&
+               mSceneListAppend.empty() && !mSceneListWriting;
+    }
+    void StepImageScaleScan() {
+        enum class Step : uint8_t { Plan, List, Record, Headers, Finish };
+        Step step = Step::Finish;
+        uint64_t generation = 0;
+        std::filesystem::path root, record;
+        std::vector<std::filesystem::path> indexed;
+        std::string folder;
+        std::vector<PackScaleFile> batch;
+        {
+            std::scoped_lock lock(mMutex);
+            auto& scan = mImageScaleScan;
+            if (!scan.Active || scan.Generation != mGeneration) return;
+            generation = scan.Generation;
+            root = scan.Root;
+            record = scan.Record;
+            if (!scan.Planned) {
+                step = Step::Plan;
+                indexed = std::move(scan.Indexed);
+            } else if (!scan.Folders.empty()) {
+                step = Step::List;
+                folder = std::move(scan.Folders.back());
+                scan.Folders.pop_back();
+            } else if (!scan.RecordChecked) {
+                step = Step::Record;
+            } else if (scan.Next < scan.Plan.Files.size()) {
+                step = Step::Headers;
+                const size_t end = std::min(scan.Plan.Files.size(), scan.Next + kImageScaleHeadersPerStep);
+                batch.assign(scan.Plan.Files.begin() + static_cast<std::ptrdiff_t>(scan.Next),
+                             scan.Plan.Files.begin() + static_cast<std::ptrdiff_t>(end));
+            }
+        }
+        // Off the lock.
+        const auto begin = std::chrono::steady_clock::now();
+        PackScalePlan plan;
+        PackFolderListing listing;
+        std::optional<PackScaleRecord> remembered;
+        uint32_t largest = 0U;
+        uint64_t measured = 0U;
+        size_t unreadable = 0U;
+        switch (step) {
+        case Step::Plan: plan = PlanPackScaleScan(root, std::move(indexed)); break;
+        case Step::List: listing = ListPackFolder(folder.empty() ? root : root / folder); break;
+        case Step::Record:
+            if (std::ifstream file(record, std::ios::binary); !record.empty() && file) {
+                std::string line;
+                std::getline(file, line);
+                remembered = ParsePackScaleRecord(line);
+            }
+            break;
+        case Step::Headers:
+            for (const auto& file : batch) {
+                if (const auto size = ReadPngFileSize(file.Path)) {
+                    largest = std::max(largest, ImageScaleOf(file.Native, *size));
+                    ++measured;
+                } else {
+                    ++unreadable;
+                }
+            }
+            break;
+        case Step::Finish: break;
+        }
+        const auto micros = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
+        std::optional<PackScaleRecord> write;
+        {
+            std::scoped_lock lock(mMutex);
+            auto& scan = mImageScaleScan;
+            if (!scan.Active || scan.Generation != generation) return;
+            scan.BusyMicros += micros;
+            switch (step) {
+            case Step::Plan:
+                scan.Plan = std::move(plan);
+                scan.Planned = true;
+                break;
+            case Step::List:
+                scan.ListMicros += micros;
+                for (auto& name : listing.Folders)
+                    scan.Folders.push_back(folder.empty() ? std::move(name) : folder + "/" + name);
+                for (const auto& [name, size] : listing.Files)
+                    scan.Fingerprint.Add(folder.empty() ? name : folder + "/" + name, size);
+                break;
+            case Step::Record:
+                scan.RecordChecked = true;
+                if (mImageScaleKnown && mImageScaleKnown->Fingerprint == scan.Fingerprint) {
+                    scan.Active = false; // the same pack, indexed again (a size cap change)
+                } else if (remembered && remembered->Fingerprint == scan.Fingerprint) {
+                    FinishImageScaleScanLocked(*remembered, true);
+                } else {
+                    ForgetImageScaleLocked(); // another pack in the folder: not known until measured
+                }
+                break;
+            case Step::Headers:
+                scan.Next += batch.size();
+                scan.Largest = std::max(scan.Largest, largest);
+                scan.Measured += measured;
+                scan.Unreadable += unreadable;
+                break;
+            case Step::Finish:
+                write = PackScaleRecord{scan.Fingerprint, scan.Largest, scan.Measured};
+                FinishImageScaleScanLocked(*write, false);
+                if (record.empty()) write.reset();
+                break;
+            }
+        }
+        // An SD write, off the lock.
+        if (write) std::ofstream(record, std::ios::binary | std::ios::trunc) << FormatPackScaleRecord(*write);
+    }
+
     void Rebuild(const AzaharTexturePackConfiguration& configuration, uint64_t serial,
                  const std::filesystem::path& loadDirectory, const std::filesystem::path& dumpDirectory) {
+        // The paths the new index uses, for the image scale measured after it.
+        std::vector<std::filesystem::path> indexedPaths;
         PackState pack;
         bool dumpModern = true;
         size_t unsupported = 0;
@@ -786,6 +1463,28 @@ class AzaharTexturePackRuntime::Impl {
                 EnsureDumpPack(dumpDirectory, dumpModern);
             }
         } catch (const std::exception& exception) { error = exception.what(); }
+        // The HUD list is read with the index, off the lock.
+        std::vector<HudImageEntry> hudList;
+        if (error.empty() && configuration.LoadCustomTextures && !configuration.HudImageList.empty()) {
+            if (std::ifstream file(configuration.HudImageList, std::ios::binary); file) {
+                const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                hudList = ParseHudImageList(text);
+            }
+        }
+        // So are the scene lists.
+        std::vector<SceneImageEntry> sceneList;
+        if (error.empty() && configuration.LoadCustomTextures && !configuration.SceneImageList.empty()) {
+            if (std::ifstream file(configuration.SceneImageList, std::ios::binary); file) {
+                const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                sceneList = ParseSceneImageList(text);
+            }
+        }
+        if (error.empty() && configuration.LoadCustomTextures) {
+            indexedPaths.reserve(index.size());
+            for (const auto& [hash, texture] : index) indexedPaths.push_back(texture.Path);
+        }
+        std::optional<std::vector<HudImageEntry>> hudListRewrite;
+        std::optional<std::vector<SceneImageEntry>> sceneListRewrite;
         std::scoped_lock lock(mMutex);
         mBuilding = false;
         if (serial == mRebuildSerial) {
@@ -794,6 +1493,7 @@ class AzaharTexturePackRuntime::Impl {
                 if (!error.empty()) { index.clear(); materials.clear(); }
                 if (mIndexReady && pack.UseNewHash != mPack.UseNewHash) {
                     mReplacementCache.clear();
+                    mUiReplacementCache.clear();
                     mMaterialCache.clear();
                 }
                 mPack = std::move(pack);
@@ -803,13 +1503,17 @@ class AzaharTexturePackRuntime::Impl {
                 mUnsupportedFiles = unsupported;
                 mIndexReady = true;
                 ++mGeneration;
+                ++mUiRevision;
                 mPreviewSeamStatus.clear();
                 ++mMaterialRevision;
                 mFailedLoadHashes.clear();
+                mFailedUiLoadHashes.clear();
                 mFailedMaterialHashes.clear();
                 mPendingLoadGenerations.clear();
+                mPendingUiLoadGenerations.clear();
                 mPendingMaterialGenerations.clear();
                 std::erase_if(mReplacementCache, [&](const auto& entry) { return !mIndex.contains(entry.first); });
+                std::erase_if(mUiReplacementCache, [&](const auto& entry) { return !mIndex.contains(entry.first); });
                 std::erase_if(mMaterialCache, [&](const auto& entry) { return !mMaterialIndex.contains(entry.first); });
                 uint64_t firstError = std::numeric_limits<uint64_t>::max();
                 for (const auto& [hash, material] : mMaterialIndex) {
@@ -820,9 +1524,72 @@ class AzaharTexturePackRuntime::Impl {
                         mLastError = "PBR material " + Hex16(hash) + ": " + material.Error;
                     }
                 }
+                if (error.empty()) hudListRewrite = PreloadHudImagesLocked(configuration, hudList);
+                if (error.empty()) sceneListRewrite = LoadSceneListsLocked(configuration, sceneList);
+                if (error.empty() && configuration.LoadCustomTextures) {
+                    StartImageScaleScanLocked(configuration, loadDirectory, std::move(indexedPaths));
+                } else {
+                    ForgetImageScaleLocked();
+                }
             }
         }
+        // Lines of a pack no longer installed are dropped from the list, under
+        // the lock so that no HUD worker append lands in between (rare: once
+        // after the pack changed).
+        if (hudListRewrite) {
+            std::string text;
+            for (const auto& entry : *hudListRewrite) text += FormatHudImageEntry(entry);
+            std::ofstream(configuration.HudImageList, std::ios::binary | std::ios::trunc) << text;
+        }
+        if (sceneListRewrite) {
+            std::string text;
+            for (const auto& entry : *sceneListRewrite) text += FormatSceneImageEntry(entry);
+            std::ofstream(configuration.SceneImageList, std::ios::binary | std::ios::trunc) << text;
+        }
         mIdle.notify_all();
+    }
+
+    // Queues the listed HUD images the new index has on the HUD worker
+    // (state under mMutex) and starts the HUD statistics of this index.
+    // Returns the list to write back when some lines were dropped.
+    std::optional<std::vector<HudImageEntry>> PreloadHudImagesLocked(const AzaharTexturePackConfiguration& configuration,
+                                                                    const std::vector<HudImageEntry>& listed) {
+        mHud = {};
+        mHudListed.clear();
+        mHudWaiting.clear();
+        mMenuWaiting.clear();
+        mHudPreloadStart = std::chrono::steady_clock::now();
+        if (configuration.HudImageList.empty()) return std::nullopt;
+        auto kept = PruneHudImageList(listed, [&](uint64_t hash) { return mIndex.contains(hash); });
+        for (const auto& entry : kept) {
+            mHudListed.insert(entry.Hash);
+            (void)QueueOrPollLocked(entry.Hash, {entry.Width, entry.Height}, true, true);
+        }
+        mHud.Listed = kept.size();
+        if (kept.size() == listed.size()) return std::nullopt;
+        return kept;
+    }
+
+    // The scene lists of the new index (lines of images the pack no longer
+    // has dropped), then the current scene's images queued. Returns the list
+    // to write back when some lines were dropped.
+    std::optional<std::vector<SceneImageEntry>> LoadSceneListsLocked(const AzaharTexturePackConfiguration& configuration,
+                                                                     const std::vector<SceneImageEntry>& listed) {
+        mSceneLists.clear();
+        mSceneListed.clear();
+        mSceneListLines = 0U;
+        mSceneListAppend.clear();
+        ResetScenePreloadLocked();
+        if (configuration.SceneImageList.empty()) return std::nullopt;
+        auto kept = PruneSceneImageList(listed, [&](uint64_t hash) { return mIndex.contains(hash); });
+        for (const auto& entry : kept) {
+            mSceneLists[entry.Scene].push_back(entry.Image);
+            mSceneListed[entry.Scene].insert(entry.Image.Hash);
+        }
+        mSceneListLines = kept.size();
+        QueueScenePreloadLocked();
+        if (kept.size() == listed.size()) return std::nullopt;
+        return kept;
     }
 
     void QueueDump(const AzaharTextureRequest& request, uint64_t hash, uint64_t generation,
@@ -842,7 +1609,7 @@ class AzaharTexturePackRuntime::Impl {
         job.Rgba8.assign(request.NativeRgba8.begin(), request.NativeRgba8.end());
         mDumpJobs.push_back(std::move(job));
         ++mPendingDumps;
-        mWorkAvailable.notify_one();
+        mWorkAvailable.notify_all();
     }
     void SetError(std::string error) {
         std::scoped_lock lock(mMutex);
@@ -886,28 +1653,174 @@ class AzaharTexturePackRuntime::Impl {
                 }
                 material = std::move(decoded);
             } else {
-                replacement = DecodeReplacement(job.Texture, job.Hash, job.Generation);
+                replacement = DecodeReplacement(job.Texture, job.Hash, job.Generation, job.Options);
             }
         } catch (const std::exception& exception) { failure = exception.what(); }
-        std::scoped_lock lock(mMutex);
-        auto& pending = job.Material ? mPendingMaterialGenerations : mPendingLoadGenerations;
-        auto& failed = job.Material ? mFailedMaterialHashes : mFailedLoadHashes;
-        const auto found = pending.find(job.Hash);
-        if (found != pending.end() && found->second == job.Generation) {
-            if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
-                if (material && material->ColorReplacement && job.Material->BaseColorTexture.empty())
-                    mReplacementCache.insert_or_assign(job.Hash, material->ColorReplacement);
-                if (material) mMaterialCache.insert_or_assign(job.Hash, std::move(material));
-                if (replacement) mReplacementCache.insert_or_assign(job.Hash, std::move(replacement));
-                if (!failure.empty()) {
-                    failed.insert(job.Hash);
-                    mLastError = std::move(failure);
+        std::filesystem::path hudList;
+        HudImageEntry hudEntry;
+        {
+            std::scoped_lock lock(mMutex);
+            auto& pending = job.Material ? mPendingMaterialGenerations
+                                         : (job.UserInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations);
+            auto& failed = job.Material ? mFailedMaterialHashes
+                                        : (job.UserInterface ? mFailedUiLoadHashes : mFailedLoadHashes);
+            const auto found = pending.find(job.Hash);
+            // An image decoded ahead for the visit now running counts; one of
+            // an earlier visit (the scene changed while it decoded) is dropped.
+            const bool currentPreload = job.ScenePreload && job.SceneSerial == mSceneSerial &&
+                                        job.Generation == mGeneration;
+            if (found != pending.end() && found->second == job.Generation) {
+                if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
+                    if (material && material->ColorReplacement && job.Material->BaseColorTexture.empty())
+                        mReplacementCache.insert_or_assign(job.Hash, material->ColorReplacement);
+                    if (material) mMaterialCache.insert_or_assign(job.Hash, std::move(material));
+                    // A world image's file size: whether a later cap changes it.
+                    if (replacement && !job.UserInterface)
+                        mSourceSizes.insert_or_assign(job.Hash,
+                                                      TextureSize{replacement->SourceWidth, replacement->SourceHeight});
+                    if (replacement && job.UserInterface &&
+                        RecordHudImageLocked(job, *replacement, hudEntry))
+                        hudList = mConfiguration.HudImageList;
+                    // A preload of an earlier visit that the new scene lists
+                    // too (still decoding when it was queued again) counts
+                    // for the new one.
+                    const bool listedNow =
+                        job.ScenePreload && mSceneId >= 0 &&
+                        mSceneListed.contains(static_cast<uint16_t>(mSceneId)) &&
+                        mSceneListed.at(static_cast<uint16_t>(mSceneId)).contains(job.Hash);
+                    if (replacement && job.ScenePreload && !currentPreload && !listedNow) replacement.reset();
+                    if (replacement && job.ScenePreload) RecordScenePreloadLocked(job.Hash, *replacement);
+                    if (replacement)
+                        (job.UserInterface ? mUiReplacementCache : mReplacementCache)
+                            .insert_or_assign(job.Hash, std::move(replacement));
+                    if (!failure.empty()) {
+                        failed.insert(job.Hash);
+                        mLastError = std::move(failure);
+                        if (job.UserInterface) {
+                            mHudWaiting.erase(job.Hash);
+                            mMenuWaiting.erase(job.Hash);
+                        }
+                    }
                 }
+                pending.erase(found);
             }
-            pending.erase(found);
+            if (hudList.empty()) {
+                --mPendingLoads;
+                mIdle.notify_all();
+                return;
+            }
         }
+        // A HUD image not listed yet: the next start decodes it as soon as the
+        // index is ready, before the UI has the game's texture to ask for.
+        // Off the lock (an SD write), before the load counts as done.
+        std::ofstream(hudList, std::ios::binary | std::ios::app) << FormatHudImageEntry(hudEntry);
+        std::scoped_lock lock(mMutex);
         --mPendingLoads;
         mIdle.notify_all();
+    }
+    // HUD statistics of a decoded HUD image (decoded ahead, and/or asked for
+    // by the HUD before it was ready); true (with its list line in `entry`)
+    // when the HUD list does not have it yet.
+    bool RecordHudImageLocked(const LoadJob& job, const AzaharTextureReplacement& replacement, HudImageEntry& entry) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto micros = [](auto duration) {
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
+        };
+        if (job.Preload) {
+            ++mHud.PreloadDecoded;
+            mHud.PreloadBytes += replacement.Rgba8 ? replacement.Rgba8->size() : 0U;
+            mHud.PreloadMicros = micros(now - mHudPreloadStart);
+        }
+        if (const auto waiting = mHudWaiting.find(job.Hash); waiting != mHudWaiting.end()) {
+            ++mHud.OnSightDecodes;
+            mHud.OnSightWaitMaxMicros = std::max(mHud.OnSightWaitMaxMicros, micros(now - waiting->second));
+            mHudWaiting.erase(waiting);
+        }
+        if (const auto waiting = mMenuWaiting.find(job.Hash); waiting != mMenuWaiting.end()) {
+            ++mHud.MenuOnSightDecodes;
+            mHud.MenuOnSightWaitMaxMicros = std::max(mHud.MenuOnSightWaitMaxMicros, micros(now - waiting->second));
+            mMenuWaiting.erase(waiting);
+        }
+        const auto width = job.Options.Native.Width, height = job.Options.Native.Height;
+        if (mConfiguration.HudImageList.empty() || mHudListed.size() >= kHudImageListLimit || width == 0U ||
+            height == 0U || width > 1024U || height > 1024U || !mHudListed.insert(job.Hash).second)
+            return false;
+        entry = {job.Hash, static_cast<uint16_t>(width), static_cast<uint16_t>(height)};
+        ++mHud.Listed;
+        return true;
+    }
+    // A world image decoded ahead for the current scene: held for its first
+    // draw (until ReleaseDecoded, NoteSceneImage or the next change).
+    void RecordScenePreloadLocked(uint64_t hash, const AzaharTextureReplacement& replacement) {
+        uint64_t bytes = replacement.Rgba8 ? replacement.Rgba8->size() : 0U;
+        for (const auto& mip : replacement.Mips) bytes += mip.size();
+        ForgetScenePreloadLocked(hash);
+        mScenePreloaded.emplace(hash, ScenePreload{bytes, false});
+        mScenePreloadBytes += bytes;
+        ++mScene.PreloadDecoded;
+        mScene.PreloadBytes += bytes;
+        mScene.PreloadMicros = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - mSceneStart)
+                .count());
+    }
+    // The next world job (under mMutex): false for a job not to run, a stale
+    // one or an image decoded ahead while the scene's unused images are over
+    // the RAM budget (left to its first draw).
+    bool TakeLoadJobLocked(LoadJob& load) {
+        load = std::move(mLoadJobs.front());
+        mLoadJobs.pop_front();
+        if (!load.EditorImage && load.Generation != mGeneration) {
+            --mPendingLoads;
+            mIdle.notify_all();
+            return false;
+        }
+        if (load.ScenePreload && mScenePreloadBytes >= kScenePreloadBudgetBytes) {
+            if (const auto found = mPendingLoadGenerations.find(load.Hash);
+                found != mPendingLoadGenerations.end() && found->second == load.Generation)
+                mPendingLoadGenerations.erase(found);
+            if (load.SceneSerial == mSceneSerial) ++mScene.PreloadOverBudget;
+            --mPendingLoads;
+            mIdle.notify_all();
+            return false;
+        }
+        return true;
+    }
+    // World images only (kWorldDecodeWorkers - 1 of these): the pack worker
+    // also indexes, dumps and writes the scene lists.
+    void WorldWorkerMain() {
+        for (;;) {
+            LoadJob load;
+            {
+                std::unique_lock lock(mMutex);
+                mWorkAvailable.wait(lock, [&] { return mStopping || !mLoadJobs.empty(); });
+                if (mLoadJobs.empty()) return; // stopping
+                if (!TakeLoadJobLocked(load)) continue;
+            }
+            Load(load);
+        }
+    }
+    // HUD images only: a HUD texture never waits for a world image.
+    void UiWorkerMain() {
+        for (;;) {
+            LoadJob load;
+            {
+                std::unique_lock lock(mMutex);
+                mUiWorkAvailable.wait(lock, [&] { return mStopping || !mUiLoadJobs.empty(); });
+                if (mUiLoadJobs.empty()) return; // stopping
+                load = std::move(mUiLoadJobs.front());
+                mUiLoadJobs.pop_front();
+                if (load.Generation != mGeneration) {
+                    --mPendingLoads;
+                    mIdle.notify_all();
+                    continue;
+                }
+            }
+            if (!load.AheadNative.empty()) {
+                IdentifyAhead(load);
+            } else {
+                Load(load);
+            }
+        }
     }
     void WorkerMain() {
         for (;;) {
@@ -916,12 +1829,22 @@ class AzaharTexturePackRuntime::Impl {
             AzaharTexturePackConfiguration configuration;
             std::filesystem::path loadDirectory, dumpDirectory;
             uint64_t rebuild = 0;
-            bool loading = false;
+            bool loading = false, measuring = false;
+            std::string sceneLines;
+            std::filesystem::path sceneList;
             {
                 std::unique_lock lock(mMutex);
-                mWorkAvailable.wait(lock, [&] {
-                    return mStopping || mRebuildRequested || !mLoadJobs.empty() || !mDumpJobs.empty();
-                });
+                const auto ready = [&] {
+                    return mStopping || mRebuildRequested || !mLoadJobs.empty() || !mDumpJobs.empty() ||
+                           !mSceneListAppend.empty() || ImageScaleScanRunnableLocked();
+                };
+                // A measure waiting for the other workers' decodes looks again
+                // now and then (they do not wake this worker).
+                if (mImageScaleScan.Active) {
+                    mWorkAvailable.wait_for(lock, kImageScaleRecheck, ready);
+                } else {
+                    mWorkAvailable.wait(lock, ready);
+                }
                 if (mRebuildRequested) {
                     rebuild = mRebuildSerial;
                     configuration = mConfiguration;
@@ -929,21 +1852,35 @@ class AzaharTexturePackRuntime::Impl {
                     dumpDirectory = mDumpDirectory;
                     mRebuildRequested = false;
                     mBuilding = true;
+                } else if (!mSceneListAppend.empty()) {
+                    sceneLines = std::move(mSceneListAppend);
+                    mSceneListAppend.clear();
+                    sceneList = mConfiguration.SceneImageList;
+                    mSceneListWriting = true;
                 } else if (!mLoadJobs.empty()) {
-                    load = std::move(mLoadJobs.front());
-                    mLoadJobs.pop_front();
-                    if (!load.EditorImage && load.Generation != mGeneration) {
-                        --mPendingLoads;
-                        mIdle.notify_all();
-                        continue;
-                    }
+                    if (!TakeLoadJobLocked(load)) continue;
                     loading = true;
                 } else if (!mDumpJobs.empty()) {
                     dump = std::move(mDumpJobs.front());
                     mDumpJobs.pop_front();
-                } else if (mStopping) return;
+                } else if (mStopping) {
+                    return;
+                } else if (ImageScaleScanRunnableLocked()) {
+                    measuring = true;
+                } else {
+                    continue;
+                }
             }
             if (rebuild != 0) { Rebuild(configuration, rebuild, loadDirectory, dumpDirectory); continue; }
+            if (measuring) { StepImageScaleScan(); continue; }
+            // New scene list lines: an SD append, off the lock.
+            if (!sceneLines.empty()) {
+                if (!sceneList.empty()) std::ofstream(sceneList, std::ios::binary | std::ios::app) << sceneLines;
+                std::scoped_lock lock(mMutex);
+                mSceneListWriting = false;
+                mIdle.notify_all();
+                continue;
+            }
             if (loading) { Load(load); continue; }
             bool written = false;
             std::string failure;
@@ -965,11 +1902,22 @@ class AzaharTexturePackRuntime::Impl {
     }
 
     mutable std::mutex mMutex;
-    std::condition_variable mWorkAvailable, mIdle;
-    std::thread mWorker;
+    std::condition_variable mWorkAvailable, mUiWorkAvailable, mIdle;
+    std::thread mWorker, mUiWorker;
+    std::vector<std::thread> mWorldWorkers;
     bool mStopping = false, mConfigured = false, mIndexReady = false;
     bool mRebuildRequested = false, mBuilding = false;
     uint64_t mGeneration = 1U, mRebuildSerial = 0U;
+    // HUD images decoded at this generation or later are current (kept
+    // through a size cap change; Configure).
+    uint64_t mUiValidFromGeneration = 0U;
+    // The HUD's revision (UiRevision): not bumped by a change of only the
+    // cap. Lock-free: the UI provider asks every frame.
+    std::atomic<uint64_t> mUiRevision{1U};
+    // World images' file sizes (TexturePackCapChangesImage), by hash; and
+    // changes of only the cap with the scene images they queued again or not.
+    std::unordered_map<uint64_t, TextureSize> mSourceSizes;
+    uint64_t mCapOnlyChanges = 0U, mCapOnlyRequeued = 0U, mCapOnlyKeptImages = 0U;
     uint64_t mMaterialRevision = 1U;
     std::optional<AzaharMaterialParameterPreview> mPreview;
     std::string mPreviewSeamStatus;
@@ -980,13 +1928,53 @@ class AzaharTexturePackRuntime::Impl {
     std::unordered_map<uint64_t, IndexedTexture> mIndex;
     std::unordered_map<uint64_t, IndexedAzaharPbrMaterial> mMaterialIndex;
     std::unordered_map<uint64_t, std::shared_ptr<const AzaharTextureReplacement>> mReplacementCache;
+    // HUD images (AzaharTextureRequest::UserInterface), apart from world ones.
+    std::unordered_map<uint64_t, std::shared_ptr<const AzaharTextureReplacement>> mUiReplacementCache;
     std::unordered_map<uint64_t, std::shared_ptr<const AzaharPbrMaterial>> mMaterialCache;
-    std::unordered_map<uint64_t, uint64_t> mPendingLoadGenerations, mPendingMaterialGenerations;
-    std::unordered_set<uint64_t> mFailedLoadHashes, mFailedMaterialHashes, mDumpedHashes;
-    std::deque<LoadJob> mLoadJobs;
+    std::unordered_map<uint64_t, uint64_t> mPendingLoadGenerations, mPendingUiLoadGenerations,
+        mPendingMaterialGenerations;
+    std::unordered_set<uint64_t> mFailedLoadHashes, mFailedUiLoadHashes, mFailedMaterialHashes, mDumpedHashes;
+    std::deque<LoadJob> mLoadJobs, mUiLoadJobs;
+    // HUD statistics since the index was built, the HUD list's hashes, when
+    // the index was ready (the start of the ahead decodes), and the HUD images
+    // asked for by the HUD while still decoding, with the first such request.
+    AzaharHudPackStatus mHud;
+    std::unordered_set<uint64_t> mHudListed;
+    std::chrono::steady_clock::time_point mHudPreloadStart;
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> mHudWaiting, mMenuWaiting;
     std::deque<DumpJob> mDumpJobs;
     size_t mPendingLoads = 0U, mPendingDumps = 0U, mDumpedCount = 0U, mUnsupportedFiles = 0U;
     std::string mLastError;
+    // Scenes (NoteScene): the current one (-1 outside gameplay) and its visit
+    // (serial, start, statistics; the visit before kept for the log), the
+    // scene lists (in order, and as sets), lines not yet written, and the
+    // world images decoded ahead for this visit (bytes, and whether a draw
+    // asked for each), with the jobs still to finish.
+    struct ScenePreload {
+        uint64_t Bytes = 0;
+        bool Used = false;
+    };
+    int mSceneId = -1;
+    uint64_t mSceneSerial = 0U;
+    std::atomic<uint64_t> mSceneSerialPublished{0U};
+    std::chrono::steady_clock::time_point mSceneStart;
+    AzaharScenePackStatus mScene, mPreviousScene;
+    std::unordered_map<uint16_t, std::vector<HudImageEntry>> mSceneLists;
+    std::unordered_map<uint16_t, std::unordered_set<uint64_t>> mSceneListed;
+    size_t mSceneListLines = 0U;
+    std::string mSceneListAppend;
+    bool mSceneListWriting = false;
+    std::unordered_map<uint64_t, ScenePreload> mScenePreloaded;
+    std::unordered_set<uint64_t> mSceneOnSight;
+    uint64_t mScenePreloadBytes = 0U;
+    // The pack's image scale: the measure running, the last result for this
+    // folder (kept through a size cap change), its details and the published
+    // values (0 = not known).
+    ImageScaleScan mImageScaleScan;
+    std::optional<PackScaleRecord> mImageScaleKnown;
+    AzaharImageScaleStatus mImageScaleStatus;
+    std::atomic<uint32_t> mLargestImageScale{0U};
+    std::atomic<uint64_t> mImageScaleSerial{0U};
 };
 
 AzaharTexturePackRuntime::AzaharTexturePackRuntime() : mImpl(std::make_unique<Impl>()) {
@@ -1024,6 +2012,16 @@ AzaharTexturePackRuntime::PollQueued(
     return mImpl->PollQueued(nativeHash);
 }
 
+AzaharTextureResolveResult AzaharTexturePackRuntime::PollOrQueue(uint64_t nativeHash, uint16_t nativeWidth,
+                                                                  uint16_t nativeHeight, bool userInterface,
+                                                                  bool menu) {
+    return mImpl->PollOrQueue(nativeHash, {nativeWidth, nativeHeight}, userInterface, menu);
+}
+
+void AzaharTexturePackRuntime::ReleaseDecoded(uint64_t nativeHash, uint64_t generation) {
+    mImpl->ReleaseDecoded(nativeHash, generation);
+}
+
 AzaharMaterialResolveResult AzaharTexturePackRuntime::ResolveMaterialOrQueue(
     uint64_t nativeHash, uint64_t expectedGeneration) {
     return mImpl->ResolveMaterialOrQueue(nativeHash, expectedGeneration);
@@ -1038,8 +2036,65 @@ AzaharTexturePackStatus AzaharTexturePackRuntime::Snapshot() const {
     return mImpl->Snapshot();
 }
 
+uint64_t AzaharTexturePackRuntime::UiRevision() const {
+    return mImpl->UiRevision();
+}
+
+AzaharCapChangeStatus AzaharTexturePackRuntime::CapChangeStatus() const {
+    return mImpl->CapChangeStatus();
+}
+
 uint64_t AzaharTexturePackRuntime::Generation() const {
     return mImpl->Generation();
+}
+
+bool AzaharTexturePackRuntime::IndexReady() const {
+    return mImpl->IndexReady();
+}
+
+uint32_t AzaharTexturePackRuntime::LargestImageScale() const {
+    return mImpl->LargestImageScale();
+}
+
+uint64_t AzaharTexturePackRuntime::ImageScaleSerial() const {
+    return mImpl->ImageScaleSerial();
+}
+
+AzaharImageScaleStatus AzaharTexturePackRuntime::ImageScaleStatus() const {
+    return mImpl->ImageScaleStatus();
+}
+
+AzaharHudPackStatus AzaharTexturePackRuntime::HudStatus() const {
+    return mImpl->HudStatus();
+}
+
+void AzaharTexturePackRuntime::NoteScene(int scene) {
+    mImpl->NoteScene(scene);
+}
+
+uint64_t AzaharTexturePackRuntime::SceneSerial() const {
+    return mImpl->SceneSerial();
+}
+
+AzaharScenePackStatus AzaharTexturePackRuntime::SceneStatus() const {
+    return mImpl->SceneStatus();
+}
+
+AzaharScenePackStatus AzaharTexturePackRuntime::PreviousSceneStatus() const {
+    return mImpl->PreviousSceneStatus();
+}
+
+size_t AzaharTexturePackRuntime::PendingLoads() const {
+    return mImpl->PendingLoads();
+}
+
+void AzaharTexturePackRuntime::NoteSceneImage(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight) {
+    mImpl->NoteSceneImage(nativeHash, {nativeWidth, nativeHeight});
+}
+
+size_t AzaharTexturePackRuntime::WaitForImages(std::span<const uint64_t> nativeHashes,
+                                               std::chrono::microseconds timeout) {
+    return mImpl->WaitForImages(nativeHashes, timeout);
 }
 
 void AzaharTexturePackRuntime::WaitForPendingDumps() {

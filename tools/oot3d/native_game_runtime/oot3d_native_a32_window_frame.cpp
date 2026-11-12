@@ -4,6 +4,7 @@
 #include "oot3d_native_display_transfer_selection.h"
 #include "oot3d_native_a32_window_session.h"
 #include "ctr_dsp_audio_frames.h"
+#include "oot3d_native_capture_clock.h"
 #include "oot3d_whole_aot_gcov.h"
 #include <fstream>
 #include <sstream>
@@ -17,12 +18,17 @@
 #include "oot3d_fps_counter.h"
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
+#include "oot3d/renderer/azahar_texture_pack.h"
 #endif
 #include "fast/oot3d/pica_texture_predecode.h"
+#include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
 #include "fast/backends/gfx_deko3d.h"
+#include "ship/resource/File.h"
+#include "ship/resource/ResourceManager.h"
+#include "ship/resource/archive/ArchiveManager.h"
 #if defined(__SWITCH__)
 namespace Fast {
 // gfx_opengl.h (its GL headers stay out).
@@ -51,6 +57,12 @@ extern size_t __malloc_max_sbrked_mem __attribute__((weak));
 namespace Oot3dA32Window {
 
 namespace {
+
+// The performance overlay (L3+R3 > Video, config/fps_counter); game thread only.
+Oot3dNativeGame::PerfOverlay &PerfOverlayState() {
+  static Oot3dNativeGame::PerfOverlay overlay;
+  return overlay;
+}
 
 uint64_t HashDiagnosticBytes(std::span<const uint8_t> bytes) noexcept {
   uint64_t hash = 14695981039346656037ULL;
@@ -94,7 +106,8 @@ Oot3dNativeGame::NativeGuestClockDeadlineResolution AdvanceGuestClockTo(
     Oot3dNativeGame::NativeA32Process &process,
     Oot3dNativeGame::NativeA32CtrHostServices &hostServices,
     Oot3dNativeGame::NativeA32ProcessRunResult &processResult,
-    uint64_t deadline, uint32_t wholeAotBlockBudget) {
+    uint64_t deadline, uint32_t wholeAotBlockBudget,
+    const std::function<void()> *betweenRuns) {
   auto resolution = Oot3dNativeGame::ResolveNativeGuestClockDeadline(
       hostServices.SystemTicks(), deadline);
   if (resolution.OvershootTicks != 0U) {
@@ -109,7 +122,7 @@ Oot3dNativeGame::NativeGuestClockDeadlineResolution AdvanceGuestClockTo(
     const uint64_t currentTick = hostServices.SystemTicks();
     hostServices.AdvanceSystemTicks(
         *wakeTick > currentTick ? *wakeTick - currentTick : 0U);
-    processResult = RunUntilGuestWait(process, wholeAotBlockBudget);
+    processResult = RunUntilGuestWait(process, wholeAotBlockBudget, betweenRuns);
     RequireRunnableGuest(processResult);
     resolution = Oot3dNativeGame::ResolveNativeGuestClockDeadline(
         hostServices.SystemTicks(), deadline);
@@ -181,9 +194,20 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   const uint32_t rateHz = realtimePacer.TargetRateHz() != 0U
                               ? realtimePacer.TargetRateHz()
                               : 60U;
-  if (interpolationPacingConfigured && rateHz == interpolationPacingRateHz) {
+  // L3+R3 > Video > Resolution at 60 FPS, published by the menu: a new
+  // choice reconfigures the pacing as a rate change does.
+  {
+    const auto &liveSixty = Oot3dNativeGame::LiveDynamicResolutionSixty();
+    const uint64_t revision = liveSixty.Revision.load(std::memory_order_acquire);
+    if (revision != liveDynamicResolutionSixtyRevision) {
+      liveDynamicResolutionSixtyRevision = revision;
+      interpolationPacingOptions.DynamicResolutionSixty = liveSixty.Load();
+    }
+  }
+  if (interpolationPacingConfigured && rateHz == interpolationPacingRateHz &&
+      interpolationPacingOptions.DynamicResolutionSixty == dynamicResolutionSixtyMode) {
     // A backend reset (InitNativePica) forgets the namespace scale.
-    if (interpolationPacing.ReducedAvailable() &&
+    if (interpolationPacing.ReducedAvailable() && !reducedViaDynamicScale &&
         api.PicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace) !=
             interpolationPacing.Config().ReducedScale) {
       (void)api.SetPicaNamespaceResolutionScale(
@@ -192,67 +216,117 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
     }
     return;
   }
+  // First call, or a new rate (L3+R3 > Video > FPS applied at a frame
+  // boundary, or the PC's F1 menu): every governor starts over as at a start
+  // at this rate (oot3d_native_rate_pacing.h).
   const bool firstConfiguration = !interpolationPacingConfigured;
+  // The scale 60 FPS last ran at (a switch back to 60 begins there).
+  if (!firstConfiguration && dynamicResolutionActive)
+    dynamicResolutionMemory.Leave(interpolationPacingRateHz, dynamicResolution);
   interpolationPacingConfigured = true;
   interpolationPacingRateHz = rateHz;
   const auto &options = interpolationPacingOptions;
-  const float baseScale =
+  Oot3dNativeGame::RatePacingConfig pacing;
+  pacing.BaseScale =
       api.PicaNamespaceResolutionScale(kVisualInterpolationRenderTargetNamespace);
-  Oot3dNativeGame::InterpolationPacingConfig config;
+  auto &config = pacing.Interpolation;
   config.KeepGameSpeed = options.KeepGameSpeed;
   config.ReducedScale = Oot3dNativeGame::ParseInterpolationReducedScale(
-      options.ReducedScaleText, baseScale);
+      options.ReducedScaleText, pacing.BaseScale);
   if (const auto margin =
           Oot3dNativeGame::ParseInterpolationMarginMs(options.MarginText))
     config.MarginMs = *margin;
   config.ReducedMode = options.ReducedAlways
                            ? Oot3dNativeGame::InterpolationReducedScaleMode::Always
                            : Oot3dNativeGame::InterpolationReducedScaleMode::Auto;
-  const bool reducedAvailable =
+  config.EntryRecover = options.PacerEntryRecover;
+  pacing.ReducedAvailable =
       config.ReducedScale > 0.0F &&
       api.SetPicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace,
                                           config.ReducedScale);
-  // Two presentation periods: one step frame and one in-between frame.
-  interpolationPacing.Configure(config, 2000.0 / static_cast<double>(rateHz),
-                                baseScale, reducedAvailable);
   // Dynamic resolution (config/dynamic_resolution, off by default): between
   // the backend's scale and the configured lowest one, on the same pair
-  // budget (oot3d_native_dynamic_resolution.h).
+  // budget (oot3d_native_dynamic_resolution.h). Back at the top scale.
+  auto &backendScale = Fast::PicaGlDynamicScale::gState;
+  pacing.Resolution.MaxScale = backendScale.MaxScale;
+  pacing.Resolution.MinScale = Oot3dNativeGame::ParseDynamicResolutionMinScale(
+      options.DynamicResolutionText, pacing.Resolution.MaxScale);
+  dynamicResolutionActive = options.DynamicResolution &&
+                            backendScale.Supported &&
+                            pacing.Resolution.MinScale < pacing.Resolution.MaxScale;
+  // deko3d times its frames itself, nothing hidden: its own thresholds
+  // (log16: the GL calibration kept every 60 FPS area at the floor).
+  bool drsDeko3dTiming = false;
+#if defined(__SWITCH__)
+  drsDeko3dTiming = Fast::Deko3dRendererSelected();
+#endif
+  if (drsDeko3dTiming)
+    Oot3dNativeGame::UseDeko3dDynamicResolutionTiming(pacing.Resolution);
+  // deko3d has no namespace scales: a reduced in-between frame is one
+  // dynamic-resolution step for that frame alone (DynamicStepReducedScale),
+  // by default where the scene is held at the full scale at 60 FPS.
+  reducedViaDynamicScale = false;
+  reducedStepScale.reset();
+  if (drsDeko3dTiming && backendScale.Supported) {
+    const bool heldAtFullScale =
+        !dynamicResolutionActive ||
+        options.DynamicResolutionSixty == Oot3dNativeGame::DynamicResolutionSixtyMode::Full;
+    pacing.BaseScale = backendScale.MaxScale;
+    config.ReducedScale = Oot3dNativeGame::DynamicStepReducedScale(
+        options.ReducedScaleText, backendScale.MaxScale, heldAtFullScale);
+    pacing.ReducedAvailable = config.ReducedScale > 0.0F;
+    reducedViaDynamicScale = pacing.ReducedAvailable;
+  }
+  const bool reducedAvailable = pacing.ReducedAvailable;
+  const float baseScale = pacing.BaseScale;
+  pacing.ResolutionSixty = options.DynamicResolutionSixty;
+  dynamicResolutionSixtyMode = options.DynamicResolutionSixty;
+  pacing.ResolutionStartScale = dynamicResolutionMemory.StartScale(
+      rateHz, !firstConfiguration, pacing.Resolution);
+  backendScale.Requested = 0.0F;
+  drsRenderBusyAverageMs = 0.0;
+  // Presentation cadence (config/fps60_mode): legacy at any rate but 60.
+  pacing.Cadence = options.Fps60Mode;
+  Oot3dNativeGame::ConfigureRatePacing(rateHz, pacing, interpolationPacing,
+                                       dynamicResolution, cadenceGovernor);
+  cadenceGovernorConfigured = true;
+  cadenceLockedThirty.store(false, std::memory_order_relaxed);
+  if (options.DynamicResolution)
+    std::fprintf(stderr,
+                 "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
+                 "max=%.2f min=%.2f budget_ms=%.1f timing=%s down=%.2f "
+                 "up=%.2f hidden_ms=%.1f drs_60=%s held_full=%d\n",
+                 dynamicResolutionActive ? 1 : 0,
+                 backendScale.Supported ? 1 : 0, pacing.Resolution.MaxScale,
+                 dynamicResolution.Config().MinScale,
+                 dynamicResolution.BudgetMs(),
+                 drsDeko3dTiming ? "deko3d" : "gl",
+                 dynamicResolution.Config().DownFraction,
+                 dynamicResolution.Config().UpFraction,
+                 dynamicResolution.Config().HiddenGpuMs,
+                 Oot3dNativeGame::DynamicResolutionSixtyModeName(
+                     dynamicResolutionSixtyMode).data(),
+                 dynamicResolution.LowestLevel() == 0U ? 1 : 0);
   {
-    auto &backendScale = Fast::PicaGlDynamicScale::gState;
-    Oot3dNativeGame::DynamicResolutionConfig drsConfig;
-    drsConfig.MaxScale = backendScale.MaxScale;
-    drsConfig.MinScale = Oot3dNativeGame::ParseDynamicResolutionMinScale(
-        options.DynamicResolutionText, drsConfig.MaxScale);
-    dynamicResolutionActive = options.DynamicResolution &&
-                              backendScale.Supported &&
-                              drsConfig.MinScale < drsConfig.MaxScale;
-    dynamicResolution.Configure(drsConfig,
-                                2000.0 / static_cast<double>(rateHz));
-    backendScale.Requested = 0.0F;
-    if (options.DynamicResolution)
-      std::fprintf(stderr,
-                   "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
-                   "max=%.2f min=%.2f\n",
-                   dynamicResolutionActive ? 1 : 0,
-                   backendScale.Supported ? 1 : 0, drsConfig.MaxScale,
-                   dynamicResolution.Config().MinScale);
     std::lock_guard lock(interpolationPerfMutex);
     interpolationPerf.DrsActive = dynamicResolutionActive;
     interpolationPerf.DrsMinScale = dynamicResolution.Config().MinScale;
+    interpolationPerf.DrsMode = dynamicResolutionSixtyMode;
+    interpolationPerf.RateHz = rateHz;
+    interpolationPerf.CadenceMode = cadenceGovernor.Config().Mode;
   }
-  // Presentation cadence (config/fps60_mode): its lock only means something
-  // at 60 (at 30 every picture holds two refreshes by design).
-  auto cadenceConfig = options.Fps60Mode;
-  if (rateHz != 60U)
-    cadenceConfig.Mode = Oot3dNativeGame::Fps60Mode::Legacy;
-  cadenceGovernor.Configure(cadenceConfig,
-                            1000.0 / static_cast<double>(rateHz));
-  cadenceGovernorConfigured = true;
-  cadenceLockedThirty.store(false, std::memory_order_relaxed);
-  // Single in-between frames are dropped only in legacy; adaptive drops
-  // them as a whole (the locked 30) and strict60 never.
-  interpolationPacing.SetDropAllowed(cadenceGovernor.PerFrameDropAllowed());
+  if (!firstConfiguration)
+    std::fprintf(stderr,
+                 "TRIAEVUM_FRAME_RATE rate_hz=%u pair_budget_ms=%.1f "
+                 "decision_budget_ms=%.1f fps60_mode=%s interpolation=%d "
+                 "drs_60=%s\n",
+                 rateHz, interpolationPacing.PairBudgetMs(),
+                 interpolationPacing.DecisionBudgetMs(),
+                 Oot3dNativeGame::Fps60ModeName(cadenceGovernor.Config().Mode)
+                     .data(),
+                 visualInterpolationEnabled ? 1 : 0,
+                 Oot3dNativeGame::DynamicResolutionSixtyModeName(
+                     dynamicResolutionSixtyMode).data());
   if (firstConfiguration) {
 #if defined(__SWITCH__)
     // The window acquire's idle gap is not GPU work (gpu_frame_timer.h);
@@ -273,16 +347,23 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
         !options.ForceNativeReplay && !api.PicaNativeNamespaceObservable();
     std::fprintf(stderr,
                  "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
-                 "reduced_available=%d mode=%s base_scale=%.2f "
+                 "reduced_available=%d reduced_route=%s mode=%s base_scale=%.2f "
                  "native_replay=%d fps60_mode=%s cpu_count_wait=%d "
-                 "flush_before_pacing=%d margin_ms=%.2f\n",
+                 "flush_before_pacing=%d margin_ms=%.2f entry_recover=%d "
+                 "entry_probe_interval=%u entry_decisions=%u "
+                 "max_probe_interval=%u\n",
                  config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
                  reducedAvailable ? 1 : 0,
+                 reducedViaDynamicScale ? "dynamic_step"
+                 : reducedAvailable     ? "namespace"
+                                        : "none",
                  options.ReducedAlways ? "always" : "auto", baseScale,
                  skipNativeReplay ? 0 : 1,
                  Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data(),
                  gCountRenderWait ? 1 : 0, gFlushBeforePacing ? 1 : 0,
-                 config.MarginMs);
+                 config.MarginMs, config.EntryRecover ? 1 : 0,
+                 config.EntryProbeInterval, config.EntryDecisions,
+                 config.MaxProbeInterval);
   }
   std::lock_guard lock(interpolationPerfMutex);
   interpolationPerf.ReducedScale = reducedAvailable ? config.ReducedScale : 0.0F;
@@ -303,9 +384,30 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   (void)waitTicks;
   const double waitMs = 0.0;
 #endif
+  // config/pacer_entry_recover: the render thread's holds at a scene's start
+  // (config/texture_pack_hold, config/grass_hold) waited for the scene's
+  // entry work; the frame did no work then, and a held frame must not count
+  // towards a drop nor inflate the in-between ratio the recovery rests on.
+  double holdMs = 0.0;
+  bool entryWork = false;
+#if defined(__SWITCH__)
+  holdMs = static_cast<double>(Fast::Deko3dTakeRenderHoldMicros()) / 1000.0;
+  // And the entry work still running (HD pack decodes, grass placements):
+  // the governor probes 60 again soon after it ends. Asked only in an
+  // entry window (one pack mutex a frame there).
+  if (interpolationPacing.Config().EntryRecover && interpolationPacing.InEntry() &&
+      Fast::Deko3dRendererSelected()) {
+    entryWork = Fast::Deko3dEntryWorkPending();
+    interpolationPacing.SetEntryWork(entryWork);
+  }
+#endif
+  const double workCpuMs = interpolationPacing.Config().EntryRecover
+                               ? std::max(0.0, cpuMs - holdMs)
+                               : cpuMs;
   const double costCpuMs =
-      gCountRenderWait ? cpuMs
-                       : Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
+      gCountRenderWait
+          ? workCpuMs
+          : Oot3dNativeGame::NativeRenderThreadBusyMs(workCpuMs, waitMs);
   // logs/spikes.txt: this frame's render-thread work and acquire wait.
   spikeRenderBusyMs = Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
   spikeRenderWaitMs = waitMs;
@@ -403,6 +505,12 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     // in the first seconds and dropped in-between frames that fit.
     observe(kind, costCpuMs);
   }
+  {
+    using Kind = Oot3dNativeGame::RenderFrameKind;
+    const auto frameKind = static_cast<Kind>(kind);
+    if (frameKind == Kind::Step || frameKind == Kind::Full || frameKind == Kind::Reduced)
+      newImagesPresented.fetch_add(1U, std::memory_order_relaxed);
+  }
   std::lock_guard lock(interpolationPerfMutex);
   auto &perf = interpolationPerf;
   if (kind < perf.Frames.size()) {
@@ -414,8 +522,20 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     perf.GpuMs[index] += gpuMs[index];
     perf.GpuFrames[index] += gpuFrames[index];
   }
+  if (holdMs > 0.0) {
+    ++perf.HoldFrames;
+    perf.HoldMs += holdMs;
+  }
+  if (entryWork)
+    ++perf.EntryWorkFrames;
   const auto &stats = interpolationPacing.Stats();
   perf.Probes = stats.Probes;
+  perf.FailedProbes = stats.FailedProbes;
+  perf.EntryProbes = stats.EntryProbes;
+  perf.StaleProbes = stats.StaleProbes;
+  perf.Entries = stats.Entries;
+  perf.EntryBelowDecisions = stats.EntryBelowDecisions;
+  perf.ProbeInterval = interpolationPacing.ProbeIntervalNow(false);
   perf.LevelChanges = stats.LevelChanges;
   perf.Level = static_cast<uint8_t>(interpolationPacing.Level());
   perf.GpuTimer = gpuAvailable;
@@ -455,7 +575,7 @@ void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
   if (hitchWriter.has_value()) {
     const auto gpu = apiPointer->GetNativePicaBackendStats();
     const Oot3dNativeGame::HitchSample sample{hitchGuestMs, hitchGameBusyMs,
-                                              gpu.TexturesCreated, gpu.ProgramsLive};
+                                              gpu.TexturesCreated, gpu.ProgramsLive, hitchArea};
     const uint32_t rateHz = cadenceGovernor.DropsInBetween()
                                 ? 30U
                                 : std::max<uint32_t>(interpolationPacingRateHz, 1U);
@@ -658,6 +778,7 @@ bool NativeA32WindowSession::RunFrame() {
   // Hang watchdog: one host frame of progress, then the stage markers below.
   Oot3dNativeGame::HangWatch::Advance();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameBegin);
+  const auto frameHeadStart = std::chrono::steady_clock::now();
   const auto phaseBeforeFrame = phaseTiming.Values();
   const double nestedGuestBeforeFrame = phaseTiming.GuestInsidePicaSubmitSeconds;
   const double guestClockBeforeFrame = phaseTiming.GuestClockSeconds;
@@ -671,6 +792,18 @@ bool NativeA32WindowSession::RunFrame() {
   WindowDemoFrameTiming frameTiming;
   if (!PrepareNextWindowDemoFrame(hostArgs, window, timing, frameTiming)) {
     return true;
+  }
+  // L3+R3 > Video > FPS (LiveFrameRate): a new choice replaces the launch's
+  // FrameRate mode here, at the frame boundary, before the policy below is
+  // resolved; the change then goes through the same path as the PC's F1
+  // menu (pacer, composition, interpolation history) and the render thread
+  // reconfigures its governors for the new rate (EnsureInterpolationPacing).
+  if (launchFrameRateMode.has_value()) {
+    if (const auto live = Oot3dNativeGame::TakeLiveFrameRateMode(
+            Oot3dNativeGame::LiveFrameRate(), liveFrameRateRevision,
+            frameRateContract.Mode)) {
+      launchFrameRateMode = *live;
+    }
   }
   const auto requestedPresentationPolicy =
       Fast::Oot3d::ResolvePresentationPacingPolicy(EffectiveFrameRateMode());
@@ -691,6 +824,10 @@ bool NativeA32WindowSession::RunFrame() {
     presentationPacingPolicy = requestedPresentationPolicy;
     guestCompositionPolicy = requestedCompositionPolicy;
     guestInterpolationEnabled = requestedInterpolationEnabled;
+#if defined(__SWITCH__)
+    gSwitchPresentationRateHz = requestedPresentationPolicy.TargetRateHz;
+    gSwitchVisualInterpolation = requestedInterpolationEnabled;
+#endif
     renderStream.Submit([&, requestedPresentationPolicy,
                          requestedCompositionPolicy,
                          requestedInterpolationEnabled,
@@ -716,9 +853,15 @@ bool NativeA32WindowSession::RunFrame() {
       latestVisualTransitionContinuous = false;
       visualSampleCadence.Reset();
     }
+#if defined(__SWITCH__)
+    // Grass budgets of the new rate (as a start at it would choose them).
+    if (Fast::Deko3dRendererSelected())
+      Fast::Deko3dSetGrassFrameRate(visualInterpolationEnabled);
+#endif
     });
   }
   const auto presentationTime = std::chrono::steady_clock::now();
+  untimed.HeadPolicy += std::chrono::duration<double>(presentationTime - frameHeadStart).count();
   renderStream.Submit([&, presentationTime] {
     realtimePacer.ObservePresentation(presentationTime);
   });
@@ -742,6 +885,37 @@ bool NativeA32WindowSession::RunFrame() {
                                                         lastPresentationTime)
                               .count());
   lastPresentationTime = std::max(lastPresentationTime, refreshClock);
+#if defined(__SWITCH__)
+  // Where the game is after the previous host frame (scene, room): for the
+  // hitch of that frame and the perf.txt window (both Switch logs).
+  if (processStorage) frameArea = Oot3dNativeGame::ReadNativeArea(processStorage->Memory());
+  // deko3d grass (config/grass = draw): a culled selection belongs to the
+  // area it was made in; a scene or room change drops it (one store).
+  if (Fast::Deko3dGrassWantsColliders()) Fast::Deko3dSetGrassArea(frameArea.Scene, frameArea.Room);
+  perfAreaWindow.Observe(frameArea);
+  // HD texture pack (deko3d): a scene change reaches the pack runtime on the
+  // render thread, after the previous frame's draws and before the new
+  // scene's first: its listed world images start decoding, and the renderer's
+  // hold counts its first frames (SWITCH_PORT.md "File select, world textures
+  // and grass without pop-in").
+  if (Fast::Deko3dRendererSelected() && frameArea.Scene != texturePackScene) {
+    texturePackScene = frameArea.Scene;
+    renderStream.Submit([scene = texturePackScene] {
+      ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().NoteScene(scene);
+    });
+  }
+  // Paced interpolation: a new scene (the load's -1 in between counts as a
+  // change, so a reload of the same scene is an entry too) opens the
+  // governor's entry window on the render thread, before the scene's first
+  // frame (config/pacer_entry_recover; entries are counted either way).
+  if (frameArea.Scene != pacerEntryScene) {
+    pacerEntryScene = frameArea.Scene;
+    if (frameArea.Scene >= 0)
+      renderStream.Submit([this] { interpolationPacing.NoteEntry(); });
+  }
+#endif
+  const auto headAreaEnd = std::chrono::steady_clock::now();
+  untimed.HeadArea += std::chrono::duration<double>(headAreaEnd - presentationTime).count();
   // Presentation cadence (config/fps60_mode): the previous host frame's
   // game-thread cost (its duration minus the waits for the renderer) goes
   // to the render thread's governor.
@@ -760,12 +934,13 @@ bool NativeA32WindowSession::RunFrame() {
       const double busyMs = std::max(0.0, frameMs - waitMs);
       const double guestMs =
           (phaseTiming.GuestSeconds - previous.GuestSeconds) * 1000.0;
-      renderStream.Submit([&, busyMs, guestMs,
+      renderStream.Submit([&, busyMs, guestMs, area = frameArea,
                            refreshes = previous.Refreshes,
                            step = hostFrameCompletedStep] {
         cadenceGovernor.ObserveGameFrame(busyMs, guestMs, refreshes, step);
         hitchGameBusyMs = busyMs;
         hitchGuestMs = guestMs;
+        hitchArea = area;
       });
     }
     previous.Valid = true;
@@ -803,7 +978,21 @@ bool NativeA32WindowSession::RunFrame() {
   const bool cadenceThirtyPair = false;
   const float visualInterpolationAlpha = static_cast<float>(
       std::clamp(presentationStep.InterpolationAlpha, 0.0, 1.0));
+  const auto headCadenceEnd = std::chrono::steady_clock::now();
+  untimed.HeadCadence += std::chrono::duration<double>(headCadenceEnd - headAreaEnd).count();
   ApplyTopScreenConfigSnapshot();
+  UpdateRollDash();
+  {
+    const auto controls = controlConfigRuntime->Snapshot();
+    const auto gamepad = [&](Oot3dNativeGame::NativeControlAction action) {
+      return controls.Config.Bindings[static_cast<std::size_t>(action)].Gamepad;
+    };
+    uiLifecycleBridge.SetTopScreenSwappedItemLabels(
+        gamepad(Oot3dNativeGame::NativeControlAction::Zr) ==
+            Oot3dNativeGame::NativeGamepadButton::RightShoulder,
+        gamepad(Oot3dNativeGame::NativeControlAction::Zl) ==
+            Oot3dNativeGame::NativeGamepadButton::LeftShoulder);
+  }
   uiLifecycleBridge.BeginHostFrame(
       static_cast<uint32_t>(presentationFrameCount));
   if (topScreenTextureOverrideRuntime.has_value()) {
@@ -815,28 +1004,67 @@ bool NativeA32WindowSession::RunFrame() {
   hdFonts.SetOutputHeight(height);
   UpdateScenePresentation();
   phaseStart = std::chrono::steady_clock::now();
+  untimed.HeadUi += std::chrono::duration<double>(phaseStart - headCadenceEnd).count();
+  untimed.FrameHead += std::chrono::duration<double>(phaseStart - frameHeadStart).count();
   Fast::Renderer3ds::SlowStepTrace hostStartSteps("host_frame_start");
   window.GetMouseStateManager()->StartFrame();
   hostStartSteps.Mark("mouse");
   gui->StartDraw();
   hostStartSteps.Mark("gui_start_draw");
-  // config/fps_counter: FPS dos quadros apresentados (com os interpolados do
-  // fps60) e o pior intervalo da última meia janela, no canto da tela.
-  static const bool fpsCounterEnabled =
-      std::ifstream("sdmc:/switch/oot3dre/config/fps_counter").good();
-  if (fpsCounterEnabled) {
-    static Oot3dNativeGame::FpsCounter fpsCounter;
-    fpsCounter.Observe(std::chrono::duration<double>(
-                           std::chrono::steady_clock::now().time_since_epoch())
-                           .count());
-    const float fontSize = std::max(16.0F, static_cast<float>(height) / 24.0F);
+  // config/second_core: the host frame start below (overlay, input polling,
+  // savestate requests, settings schedule, renderer frame begin) touches no
+  // kernel, thread or host-service state, and its guest memory reads take
+  // the kernel lock themselves: the second core keeps its SVCs meanwhile
+  // (HostWaitRelease; nothing with the second core off). The menus drawn
+  // by StartDraw above stay under the lock.
+  std::optional<Oot3dNativeGame::SecondCore::HostWaitRelease> hostWorkRelease;
+  hostWorkRelease.emplace();
+  const auto startLockBefore = Oot3dNativeGame::SecondCore::SampleCore0Lock();
+  // Performance overlay (L3+R3 > Video, config/fps_counter): new images
+  // per second (steps and fps60 in-betweens, each once however many
+  // refreshes it stays; a dropped in-between is not one), the longest time
+  // one image stayed, the game speed of the last half second, and the clocks,
+  // in the top-left corner. The flag is read every frame (the menu was drawn
+  // just above, so a toggle shows in this frame); the text only changes when
+  // a window closes, and the clocks come from the reader thread's cache.
+  static bool perfOverlayShown = false;
+  const bool perfOverlayEnabled =
+      Oot3dNativeGame::PerfOverlayEnabled().load(std::memory_order_relaxed);
+  if (!perfOverlayEnabled) {
+    if (perfOverlayShown) {
+      // Off: the next start measures from scratch (no interval spanning the
+      // time it was hidden).
+      PerfOverlayState() = Oot3dNativeGame::PerfOverlay{};
+      perfOverlayShown = false;
+    }
+  } else {
+    perfOverlayShown = true;
+    auto &overlay = PerfOverlayState();
+    // Images the render thread presented since the last host frame.
+    static uint64_t overlayImagesSeen = 0U;
+    const uint64_t imagesPresented = newImagesPresented.load(std::memory_order_relaxed);
+    const auto newImages = static_cast<uint32_t>(imagesPresented - overlayImagesSeen);
+    overlayImagesSeen = imagesPresented;
+    if (overlay.ObserveFrame(std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count(),
+                             newImages)) {
+      overlay.SetClocks(Oot3dNativeGame::SwitchClockLatest());
+    }
+    // ProggyClean (13 px) scaled to a 32nd of the height: 22.5 px at 720p,
+    // 34 px at 1080p; the longest line is about a third of the width.
+    const float fontSize = std::max(16.0F, static_cast<float>(height) / 32.0F);
     const ImVec2 position(fontSize * 0.5F, fontSize * 0.4F);
+    const float lineStep = fontSize * 1.1F;
     auto *drawList = ImGui::GetForegroundDrawList();
-    drawList->AddText(ImGui::GetFont(), fontSize,
-                      ImVec2(position.x + 2.0F, position.y + 2.0F),
-                      IM_COL32(0, 0, 0, 200), fpsCounter.Text());
-    drawList->AddText(ImGui::GetFont(), fontSize, position,
-                      IM_COL32(255, 255, 80, 255), fpsCounter.Text());
+    const char *const lines[] = {overlay.FrameLine(), overlay.ClockLine()};
+    for (size_t line = 0; line < 2U; ++line) {
+      const ImVec2 at(position.x, position.y + lineStep * static_cast<float>(line));
+      drawList->AddText(ImGui::GetFont(), fontSize, ImVec2(at.x + 2.0F, at.y + 2.0F),
+                        IM_COL32(0, 0, 0, 200), lines[line]);
+      drawList->AddText(ImGui::GetFont(), fontSize, at, IM_COL32(255, 255, 80, 255),
+                        lines[line]);
+    }
   }
   renderStream.Submit([&] {
     window.StartFrame();
@@ -881,6 +1109,7 @@ bool NativeA32WindowSession::RunFrame() {
       topScreenGameplayInputMode
           ? Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene
           : Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
+  picaRefreshCompositionDomain = picaCompositionDomain;
   bool topScreenStartRoutingEligible =
       uiLifecycleBridge.NativeGameplayPresentationActive() &&
       topScreenGameplayInputMode &&
@@ -903,9 +1132,15 @@ bool NativeA32WindowSession::RunFrame() {
   const bool lowerScreenPictureInPicture =
       titleProfile.BottomScreenPictureInPicture &&
       bottomScreenPictureInPictureVisible;
+  const auto inputPollStart = std::chrono::steady_clock::now();
   auto physicalInputFrame =
       PollNativeA32Input(window,
                          nativeFrontendTouchEnabled || lowerScreenPictureInPicture,
+                         lowerScreenPictureInPicture
+                             ? Oot3dNativeGame::NativeA32TouchPresentation::LowerScreenPictureInPicture
+                             : ResolveNativeA32TouchPresentation(
+                                   process.Memory(),
+                                   nativeCandidateDispatch.TopScreenUiProfile),
                          hostGuiVisible,
                          nativeCandidateDispatch.TopScreenUiProfile,
                          activeTopScreenConfig.FreeCameraEnabled,
@@ -914,9 +1149,14 @@ bool NativeA32WindowSession::RunFrame() {
                          guestRefreshesDue != 0U,
                          nativeControlPollingState,
                          titleProfile.SwitchConsoleMotion,
-                         WidescreenMenuCornersActive(),
-                         lowerScreenPictureInPicture);
-  if (physicalInputFrame.Exit || devLabQuit) {
+                         lastTopScreenPrimitivesBySubsystem[static_cast<
+                             std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
+                         WidescreenMenuCornersActive());
+  untimed.InputPoll += SecondsSince(inputPollStart);
+  // Exit game / Close game in the L3+R3 menu leave like an exit input: the
+  // window closes and Finish discards the frames still queued, as for HOME >
+  // Close (main then ends the application).
+  if (physicalInputFrame.Exit || devLabQuit || Fast::Oot3d::ExitGameRequested()) {
     if (devLabQuit) scriptedExit = true;
     window.Close();
     return false;
@@ -1052,14 +1292,26 @@ bool NativeA32WindowSession::RunFrame() {
   phaseTiming.RendererFrameStartSeconds += SecondsSince(rendererFrameStart);
   cpuRendererStart.Stop();
   phaseTiming.FrameStartSeconds += SecondsSince(phaseStart);
+  {
+    const auto startLockAfter = Oot3dNativeGame::SecondCore::SampleCore0Lock();
+    untimed.StartLockTakes += startLockAfter.Takes - startLockBefore.Takes;
+    untimed.StartLockWaits += startLockAfter.Waits - startLockBefore.Waits;
+    untimed.StartLockWait +=
+        static_cast<double>(startLockAfter.WaitNanoseconds - startLockBefore.WaitNanoseconds) / 1.0e9;
+    const auto reacquireStart = std::chrono::steady_clock::now();
+    hostWorkRelease.reset();
+    untimed.KernelReacquire += SecondsSince(reacquireStart);
+  }
   const uint32_t guestRefreshIterations =
       std::max<uint32_t>(1U, guestRefreshesDue);
+  uint32_t guestRefreshesRun = 0U;
   for (uint32_t guestRefreshIndex = 0;
        guestRefreshIndex < guestRefreshIterations; ++guestRefreshIndex) {
     const bool advanceGuest = guestRefreshIndex < guestRefreshesDue;
     const bool presentHostFrame =
         guestRefreshIndex + 1U == guestRefreshIterations;
     if (advanceGuest) {
+      const auto refreshPrepStart = std::chrono::steady_clock::now();
       if (!SampleGuestRefreshInput(
               guestRefreshIndex,
               nativeFrontendTouchEnabled,
@@ -1072,12 +1324,14 @@ bool NativeA32WindowSession::RunFrame() {
       if (!UpdateGuestServicesForRefresh(topScreenStartRoutingEligible, inputFrame)) {
         break;
       }
+      untimed.RefreshPrep += SecondsSince(refreshPrepStart);
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
       RunGuestRefresh();
     }
     // Deferred DSP frames go into the renderer wait when there is one
     // (tour24: after the presentation they delayed the next host frame).
-    if (deferredDspAudioFrames != 0U && renderStream.FrameSlotsFull()) {
+    if (deferredDspAudioFrames != 0U && !dspOnSecondCore &&
+        renderStream.FrameSlotsFull()) {
       ++dspAudioInRenderWait;
       DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
     }
@@ -1085,18 +1339,58 @@ bool NativeA32WindowSession::RunFrame() {
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentVisual);
       PresentVisualFrame(presentationElapsedSeconds, visualInterpolationAlpha);
     }
+    guestRefreshesRun += advanceGuest ? 1U : 0U;
     frameCount += advanceGuest ? 1U : 0U;
   }
-  if (deferredDspAudioFrames != 0U) {
+  if (deferredDspAudioFrames != 0U && !dspOnSecondCore) {
     Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
     DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
+  }
+  if (perfOverlayEnabled) {
+    // Game speed: refreshes run out of those owed this frame (the planned
+    // ones plus the ones the scheduler dropped because the game fell behind).
+    PerfOverlayState().ObserveRefreshes(guestRefreshesRun, guestRefreshesDue,
+                                        presentationStep.DroppedGuestRefreshes);
   }
 
   if (launch.ExtendedDiagnostics) {
     inputConsumerDiagnostics.Observe(process.Memory(), frameCount);
   }
 
+  // config/second_core: the UI submission and the presentation hand-off
+  // read guest memory only (through paths that take the kernel lock) and
+  // talk to the render thread: released as the frame start. With
+  // config/kernel_ui_lock (absent = on) the UI submission keeps the lock
+  // and the release starts at the presentation hand-off: one acquisition
+  // instead of one per guest memory read, each of which Horizon may hand to
+  // a waiting second core (oot3d_native_kernel_options.h).
+  if (!uiSubmitHoldsKernel) hostWorkRelease.emplace();
+  const auto uiSubmitStart = std::chrono::steady_clock::now();
+  const double uiPrepareBefore = untimed.UiPrepare + untimed.UiAhead;
+  const auto uiProviderBefore = nativeUiTextureProviderStorage->Stats();
+  const auto uiLockBefore = Oot3dNativeGame::SecondCore::SampleCore0Lock();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
+  // The HUD's texture pack images decode before its first frame: its
+  // textures are asked for ahead, one per frame, as soon as the game has
+  // loaded them (title screen), and again at each new UI texture revision
+  // (the pack's index ready, HD textures turned on or off).
+  if (const auto revision = nativeUiTextureProviderStorage->Revision();
+      hudTexturesAheadRevision != revision) {
+    bool complete = false;
+    const auto ahead = uiLifecycleBridge.HudTexturesAhead(
+        launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen,
+        &complete);
+    if (n64UiRenderer.RequestAhead(ahead) && complete) {
+      hudTexturesAheadRevision = revision;
+    }
+  }
+  auto uiMark = std::chrono::steady_clock::now();
+  untimed.UiAhead += std::chrono::duration<double>(uiMark - uiSubmitStart).count();
+  const auto uiSplit = [&uiMark](double &total) {
+    const auto now = std::chrono::steady_clock::now();
+    total += std::chrono::duration<double>(now - uiMark).count();
+    uiMark = now;
+  };
   for (std::size_t subsystemIndex = 0;
        subsystemIndex < oot3d::ui::kUiSubsystemCount; ++subsystemIndex) {
     const auto subsystem =
@@ -1129,6 +1423,7 @@ bool NativeA32WindowSession::RunFrame() {
     if (topScreenPresentation) {
       lastTopScreenPrimitivesBySubsystem[subsystemIndex] = primitives;
     }
+    uiSplit(untimed.UiBuild);
     const auto canvasMode =
         topScreenPresentation
             ? oot3d::ui::N64UiCanvasMode::NativeTopScreen400x240
@@ -1136,6 +1431,7 @@ bool NativeA32WindowSession::RunFrame() {
     // Texture payloads are read from guest memory here; the renderer
     // only uploads them.
     auto preparedTextures = n64UiRenderer.PrepareTextures(primitives);
+    uiSplit(untimed.UiPrepare);
     renderStream.Submit([&, primitives = std::move(primitives), width,
                          height, canvasMode,
                          prepared = std::move(preparedTextures)]() mutable {
@@ -1155,8 +1451,44 @@ bool NativeA32WindowSession::RunFrame() {
                                  renderError);
       }
     });
+    uiSplit(untimed.UiQueue);
   }
 
+  {
+    const auto uiLockAfter = Oot3dNativeGame::SecondCore::SampleCore0Lock();
+    untimed.UiLockTakes += uiLockAfter.Takes - uiLockBefore.Takes;
+    untimed.UiLockWaits += uiLockAfter.Waits - uiLockBefore.Waits;
+    untimed.UiLockWait +=
+        static_cast<double>(uiLockAfter.WaitNanoseconds - uiLockBefore.WaitNanoseconds) / 1.0e9;
+  }
+  untimed.UiSubmit += SecondsSince(uiSubmitStart);
+  {
+    // A texture pack change in progress (deko3d.txt `texture pack change ...
+    // game thread: ... frames, longest frame, longest HUD texture
+    // preparation, over budget, HUD resolves, decoded`): this frame from the
+    // last one's UI submission (waits for the render thread included), its
+    // HUD texture preparation (asked ahead included) and the HUD textures it
+    // resolved and decoded. Game thread only.
+    static std::chrono::steady_clock::time_point previousUiSubmit;
+    const auto micros = [](double seconds) { return static_cast<uint64_t>(seconds * 1.0e6); };
+    const uint64_t frameMicros =
+        previousUiSubmit.time_since_epoch().count() == 0
+            ? 0U
+            : static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        uiSubmitStart - previousUiSubmit)
+                                        .count());
+    previousUiSubmit = uiSubmitStart;
+    const auto &uiProvider = nativeUiTextureProviderStorage->Stats();
+    auto &packChangeWatch = Oot3d::Renderer::LiveTexturePackChangeGameWatch();
+    // The audio stream's stats take its lock: read only while a change runs.
+    const uint64_t concealEvents = packChangeWatch.Active() && hostAudioStream != nullptr
+                                       ? hostAudioStream->GetStats().ConcealEvents
+                                       : ~0ULL;
+    packChangeWatch.Observe(frameMicros, micros(untimed.UiPrepare + untimed.UiAhead - uiPrepareBefore),
+                            uiProvider.resolve_calls - uiProviderBefore.resolve_calls,
+                            uiProvider.identity_decodes - uiProviderBefore.identity_decodes, concealEvents);
+  }
+  if (uiSubmitHoldsKernel) hostWorkRelease.emplace();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);
   phaseStart = std::chrono::steady_clock::now();
   CpuProbe::Scope cpuPresent(CpuProbe::Phase::Present);
@@ -1236,13 +1568,18 @@ bool NativeA32WindowSession::RunFrame() {
       presentationFrameCount, frameCount, guestRefreshesDue != 0U);
   phaseTiming.PresentSeconds += SecondsSince(phaseStart);
   cpuPresent.Stop();
+  {
+    const auto reacquireStart = std::chrono::steady_clock::now();
+    hostWorkRelease.reset();
+    untimed.KernelReacquire += SecondsSince(reacquireStart);
+  }
   ++presentationFrameCount;
   ++runFrameCount;
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
   if (guestProfiler.Active()) {
-    // Perfil guest por amostragem de quadros: nos quadros medidos o perfil
-    // recebe todos os blocos; nos outros volta o callback original com o
-    // filtro de ganchos, e o jogo roda na velocidade normal.
+    // Guest profile by frame sampling: on measured frames the profile
+    // receives every block; on the others the original callback returns with the
+    // hook filter, and the game runs at normal speed.
     const bool sample = guestProfiler.OnHostFrame(runFrameCount);
     if (sample != guestProfilerInstalled && processStorage) {
       guestProfilerInstalled = sample;
@@ -1275,7 +1612,6 @@ bool NativeA32WindowSession::RunFrame() {
 #if defined(__SWITCH__)
   gSwitchRuntimeHostFrames = runFrameCount;
   gSwitchRuntimeGuestFrames = frameCount;
-  Oot3dNativeGame::Oot3dWholeAotGcovFrame(runFrameCount);
   // Physical-console profile: every 150 host frames, append the rate and the
   // per-frame milliseconds of each phase over that window to logs/perf.txt.
   {
@@ -1283,6 +1619,7 @@ bool NativeA32WindowSession::RunFrame() {
     static std::array<double, 15> windowValues{};
     static uint64_t windowHostFrames = 0U;
     static uint64_t windowGuestFrames = 0U;
+    static double windowGuestInPica = 0.0;
     if (runFrameCount - windowHostFrames >= 150U) {
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PerfWindow);
       const auto now = std::chrono::steady_clock::now();
@@ -1303,8 +1640,15 @@ bool NativeA32WindowSession::RunFrame() {
         perf << ' ' << kNames[index] << '='
              << ((values[index] - windowValues[index]) * 1000.0 / hostFrames);
       }
-      perf << " guest_in_pica=" << phaseTiming.GuestInsidePicaSubmitSeconds
+      // The guest resumed inside the PICA submissions (part of `guest`).
+      perf << " guest_in_pica="
+           << ((phaseTiming.GuestInsidePicaSubmitSeconds - windowGuestInPica) * 1000.0 / hostFrames)
            << " total_ms=" << (seconds * 1000.0 / hostFrames);
+      // Where the game spent most of the window (oot3d_native_area.h).
+      const auto area = perfAreaWindow.Dominant();
+      const std::string areaText = Oot3dNativeGame::FormatNativeArea(area.Area);
+      perf << ' ' << areaText << " scene_changes=" << area.SceneChanges;
+      perfAreaWindow.Reset();
       // Clocks of this window (sys-clk IPC, read only; -1 when unknown): one
       // IPC per window, after `now`, so it is not billed to this window.
       {
@@ -1357,6 +1701,39 @@ bool NativeA32WindowSession::RunFrame() {
              << " plan_worker_idle_ms="
              << perFrameMs(planStats.WorkerIdleNanoseconds,
                            windowPlanStats.WorkerIdleNanoseconds);
+        // Plan build cost per draw (config/plan_full_identity,
+        // config/plan_copy_build, config/plan_one_lock): the options in use,
+        // the worker's builds per host frame, the mean build time per draw
+        // (worker and late builds) and, with parallel builds, how often and
+        // how long (ms per host frame) a resolve waited for a slot the
+        // worker was still building.
+        {
+          const auto options = picaPlanBuilder.Options();
+          const uint64_t builds =
+              (planStats.WorkerBuilds - windowPlanStats.WorkerBuilds) +
+              (planStats.ConsumerBuilds - windowPlanStats.ConsumerBuilds);
+          const uint64_t buildNanoseconds =
+              (planStats.WorkerBuildNanoseconds -
+               windowPlanStats.WorkerBuildNanoseconds) +
+              (planStats.ConsumerBuildNanoseconds -
+               windowPlanStats.ConsumerBuildNanoseconds);
+          perf << " plan_identity=" << (options.CanonicalIdentity ? 1 : 0)
+               << " plan_in_place=" << (options.InPlace ? 1 : 0)
+               << " plan_parallel=" << (picaPlanBuilder.Parallel() ? 1 : 0)
+               << " plan_worker_draws="
+               << static_cast<double>(planStats.WorkerBuilds -
+                                      windowPlanStats.WorkerBuilds) /
+                      hostFrames
+               << " plan_us_draw="
+               << (builds != 0U ? static_cast<double>(buildNanoseconds) /
+                                      1.0e3 / static_cast<double>(builds)
+                                : 0.0)
+               << " plan_slot_waits="
+               << (planStats.ConsumerSlotWaits - windowPlanStats.ConsumerSlotWaits)
+               << " plan_slot_wait_ms="
+               << perFrameMs(planStats.ConsumerSlotWaitNanoseconds,
+                             windowPlanStats.ConsumerSlotWaitNanoseconds);
+        }
         windowPlanStats = planStats;
       }
       // Waits between threads, ms per host frame: the guest blocked by the
@@ -1380,6 +1757,9 @@ bool NativeA32WindowSession::RunFrame() {
              << " render_idle_ms="
              << perFrameMs(waits.WorkerIdleNanoseconds, previousWaits.WorkerIdleNanoseconds)
              << " signals_skipped=" << (waits.SkippedNotifies - previousWaits.SkippedNotifies)
+             // Submissions that woke the idle render thread, per host frame.
+             << " render_wakes="
+             << static_cast<double>(waits.WorkerWakes - previousWaits.WorkerWakes) / hostFrames
              << " pacer_spin_ms="
              << perFrameMs(tail.SpinNanoseconds, previousTail.SpinNanoseconds)
              << " pacer_oversleep_ms="
@@ -1432,11 +1812,38 @@ bool NativeA32WindowSession::RunFrame() {
              << " interp_frames=" << frames(2)
              << " interp_reduced=" << frames(3)
              << " interp_dropped=" << frames(4)
+             // New images per second (steps and in-betweens; fps counts
+             // refreshes, so a held image counts there twice).
+             << " new_fps=" << ((frames(1) + frames(2) + frames(3)) / seconds)
              << " other_frames=" << frames(0)
+             // Of other_frames: in-between frames of the TopScreen pause
+             // menu that showed the step image (oot3d_top_screen_menu_cadence.h).
+             << " menu_held=" << (current.MenuHeld - previous.MenuHeld)
              << " reduced_refused=" << (current.ReducedRefused - previous.ReducedRefused)
              << " repeat_fallbacks=" << (current.RepeatFallbacks - previous.RepeatFallbacks)
              << " native_replay_skipped=" << (current.NativeReplaysSkipped - previous.NativeReplaysSkipped)
              << " probes=" << (current.Probes - previous.Probes)
+             // config/pacer_entry_recover: probes whose pair did not fit,
+             // probes of an entry's shorter interval, scene entries, the
+             // time below full in the entry windows (s: in-between
+             // decisions x the pair) and the probe interval now (60 doubled
+             // per failed probe in a row); render-thread holds left out of
+             // the frame cost (frames, ms) and the frames whose entry work
+             // (pack decodes, grass placements) was still running;
+             // stale_probes: probes made at once for a stale full-frame
+             // ratio (InterpolationPacingGovernor::StaleRatio).
+             << " entry_recover=" << (interpolationPacingOptions.PacerEntryRecover ? 1 : 0)
+             << " failed_probes=" << (current.FailedProbes - previous.FailedProbes)
+             << " entry_probes=" << (current.EntryProbes - previous.EntryProbes)
+             << " stale_probes=" << (current.StaleProbes - previous.StaleProbes)
+             << " entries=" << (current.Entries - previous.Entries)
+             << " entry_30_s="
+             << static_cast<double>(current.EntryBelowDecisions - previous.EntryBelowDecisions) *
+                    current.BudgetMs / 1000.0
+             << " probe_interval=" << current.ProbeInterval
+             << " held_frames=" << (current.HoldFrames - previous.HoldFrames)
+             << " held_ms=" << (current.HoldMs - previous.HoldMs)
+             << " entry_work_frames=" << (current.EntryWorkFrames - previous.EntryWorkFrames)
              << " level_changes=" << (current.LevelChanges - previous.LevelChanges)
              << " gpu_timer=" << (current.GpuTimer ? 1 : 0)
              << " gpu_ns_per_tick=" << current.GpuFactor;
@@ -1518,7 +1925,9 @@ bool NativeA32WindowSession::RunFrame() {
           const uint64_t presentedWindow = presented - previousPresented;
           perf << " drs=" << (current.DrsActive ? 1 : 0)
                << " drs_scale=" << current.DrsScale
-               << " drs_min=" << current.DrsMinScale << " drs_scale_avg="
+               << " drs_min=" << current.DrsMinScale << " drs_mode="
+               << Oot3dNativeGame::DynamicResolutionSixtyModeName(current.DrsMode)
+               << " drs_scale_avg="
                << (presentedWindow != 0U
                        ? static_cast<double>(milli - previousMilli) /
                              1000.0 / static_cast<double>(presentedWindow)
@@ -1554,6 +1963,8 @@ bool NativeA32WindowSession::RunFrame() {
         double holdSeconds = 0.0;
         double gameP90 = 0.0;
         uint64_t superseded = 0U;
+        uint32_t cadenceRateHz = 0U;
+        auto cadenceMode = Oot3dNativeGame::Fps60Mode::Legacy;
         {
           std::lock_guard lock(interpolationPerfMutex);
           cadence = interpolationPerf.Cadence;
@@ -1561,16 +1972,18 @@ bool NativeA32WindowSession::RunFrame() {
           holdSeconds = interpolationPerf.CadenceHoldSeconds;
           gameP90 = interpolationPerf.GamePairP90Ms;
           superseded = interpolationPerf.SupersededFrames;
+          cadenceRateHz = interpolationPerf.RateHz;
+          cadenceMode = interpolationPerf.CadenceMode;
         }
         const auto delta = [](uint64_t now, uint64_t before) {
           return now - before;
         };
         static constexpr std::array<const char *, 4> kBuckets{"1", "2", "3",
                                                               "4p"};
-        perf << " cadence: fps60_mode="
-             << Oot3dNativeGame::Fps60ModeName(
-                    interpolationPacingOptions.Fps60Mode.Mode)
-             << " lock=" << (thirty ? 30 : 60);
+        // fps60_mode: the mode in effect (legacy at 30); rate_hz: the
+        // presentation rate at the end of the window (L3+R3 > Video > FPS).
+        perf << " cadence: fps60_mode=" << Oot3dNativeGame::Fps60ModeName(cadenceMode)
+             << " rate_hz=" << cadenceRateHz << " lock=" << (thirty ? 30 : 60);
         for (size_t bucket = 0U; bucket < kBuckets.size(); ++bucket)
           perf << " present_" << kBuckets[bucket] << '='
                << delta(cadence.Intervals[bucket],
@@ -1633,25 +2046,8 @@ bool NativeA32WindowSession::RunFrame() {
           previousHolds = holds;
           DrainFrameSpikes();
         }
-        // Guest time per guest thread in this window: thr_<entry>_us and
-        // thr_<entry>_n (dispatches).
         perf << " audio_deferred=" << (deferDspAudio ? 1 : 0)
              << " audio_in_render_wait=" << dspAudioInRenderWait;
-        if (process.ThreadTimingEnabled()) {
-          static std::array<Oot3dNativeGame::NativeA32ThreadTime,
-                            Oot3dNativeGame::kNativeA32ThreadTimeSlots>
-              previousThreads{};
-          const auto& threads = process.ThreadTimes();
-          for (size_t i = 0U; i < threads.size(); ++i) {
-            if (threads[i].Dispatches == 0U) break;
-            perf << " thr_" << std::hex << threads[i].EntryAddress << std::dec
-                 << "_us="
-                 << (threads[i].Nanoseconds - previousThreads[i].Nanoseconds) / 1000U
-                 << " thr_" << std::hex << threads[i].EntryAddress << std::dec
-                 << "_n=" << (threads[i].Dispatches - previousThreads[i].Dispatches);
-          }
-          previousThreads = threads;
-        }
         // Textures the plan worker decoded ahead (hit) or the render thread
         // still decoded itself (miss), since the start.
         {
@@ -1755,7 +2151,7 @@ bool NativeA32WindowSession::RunFrame() {
                 .Str(" steps=").Dec(heap.Steps).Str(" host_frames=").Dec(runFrameCount);
             perf << ' ' << text.Data();
             Oot3dNativeGame::HangWatch::ReportEvent(
-                "HEAP CORROMPIDO (varredura dos bins do malloc)", text.Data());
+                "HEAP CORRUPTED (malloc bin walk)", text.Data());
           }
         }
         uint64_t usedMemory = 0U;
@@ -1850,6 +2246,13 @@ bool NativeA32WindowSession::RunFrame() {
              << static_cast<double>(capture.IndexRangeReuses -
                                     previousCapture.IndexRangeReuses) /
                     hostFrames
+             << " geometry_misses="
+             << static_cast<double>(capture.GeometryMisses - previousCapture.GeometryMisses) /
+                    hostFrames
+             << " geometry_evictions="
+             << static_cast<double>(capture.GeometryEvictions -
+                                    previousCapture.GeometryEvictions) /
+                    hostFrames
              << " pica_submit_host_ms="
              << ((picaSubmitSeconds - previousPicaSubmit) -
                  (phaseTiming.GuestInsidePicaSubmitSeconds - previousGuestInPica)) *
@@ -1862,10 +2265,10 @@ bool NativeA32WindowSession::RunFrame() {
                << " perf_dropped=" << perfWriter->Dropped();
           previousWriterNanoseconds = writer;
         }
-        // Heartbeat do boot-status.txt (config/async_status_writes): ms que
-        // esta thread gastou nele na janela (formatar + postar, ou a troca
-        // inteira no SD com a chave em 0), ms de escrita da thread de serviço
-        // e do escritor do hitches.txt (a thread de render só enfileira).
+        // boot-status.txt heartbeat (config/async_status_writes): ms this
+        // thread spent on it in the window (format + post, or the whole SD
+        // replace with the switch at 0), the service thread's write ms, and
+        // the hitches.txt writer's (the render thread only queues its lines).
         {
           static uint64_t previousStatusGame = 0U, previousStatusWriter = 0U,
                           previousHitchWriter = 0U;
@@ -1886,9 +2289,271 @@ bool NativeA32WindowSession::RunFrame() {
             previousHitchWriter = hitch;
           }
         }
+        // Capture sub-stages (SWITCH_PORT.md "Capture delta"): µs per draw
+        // of the queue's part of pica_capture_ms (register file, uniforms and
+        // default attributes, the rest of the packet, decode, index/vertex
+        // and texture snapshots, hashing inside them, enqueue), the bytes of
+        // state written on this thread, the frontend's list walk and lighting
+        // LUT work (ms per host frame), the replay of capture-delta logs off
+        // this thread and the placeholder plan per draw (pica_plan).
+        {
+          static Oot3dNativeGame::Oot3dPicaFrontendCaptureStats previousFrontend{};
+          static Oot3dNativeGame::Oot3dPicaCaptureDeltaLog::Totals previousMaterialize{};
+          static double previousPlanSeconds = 0.0;
+          const auto& frontend = picaFrontend.CaptureStats();
+          const auto materialize =
+              Oot3dNativeGame::Oot3dPicaCaptureDeltaLog::MaterializeTotals();
+          const uint64_t draws = capture.Draws - previousCapture.Draws;
+          const auto usPerDraw = [draws](uint64_t now, uint64_t before) {
+            return draws != 0U
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(now - before) /
+                             1.0e3 / static_cast<double>(draws)
+                       : 0.0;
+          };
+          const auto msPerFrame = [hostFrames](uint64_t now, uint64_t before) {
+            return Oot3dNativeGame::CaptureTicksToNanoseconds(now - before) / 1.0e6 /
+                   hostFrames;
+          };
+          const auto perFrame = [hostFrames](uint64_t now, uint64_t before) {
+            return static_cast<double>(now - before) / hostFrames;
+          };
+          const uint64_t materialized = materialize.Draws - previousMaterialize.Draws;
+          perf << " capture: capture_delta=" << (submissionQueueStorage->CaptureDelta() ? 1 : 0)
+               << " cap_regs_us=" << usPerDraw(capture.RegisterTicks, previousCapture.RegisterTicks)
+               << " cap_uniforms_us=" << usPerDraw(capture.UniformTicks, previousCapture.UniformTicks)
+               << " cap_packet_us=" << usPerDraw(capture.PacketTicks, previousCapture.PacketTicks)
+               << " cap_decode_us=" << usPerDraw(capture.DecodeTicks, previousCapture.DecodeTicks)
+               << " cap_vertex_us=" << usPerDraw(capture.VertexTicks, previousCapture.VertexTicks)
+               << " cap_texture_us=" << usPerDraw(capture.TextureTicks, previousCapture.TextureTicks)
+               << " cap_hash_us=" << usPerDraw(capture.HashTicks, previousCapture.HashTicks)
+               << " cap_enqueue_us=" << usPerDraw(capture.EnqueueTicks, previousCapture.EnqueueTicks)
+               << " cap_state_kb="
+               << static_cast<double>(capture.StateBytes - previousCapture.StateBytes) / 1024.0 /
+                      hostFrames
+               << " cap_delta_draws=" << perFrame(capture.DeltaDraws, previousCapture.DeltaDraws)
+               << " cap_keyframes=" << perFrame(capture.Keyframes, previousCapture.Keyframes)
+               << " cap_materialize_us="
+               << (materialized != 0U
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(materialize.Ticks -
+                                                                    previousMaterialize.Ticks) /
+                             1.0e3 / static_cast<double>(materialized)
+                       : 0.0)
+               << " cap_materialized=" << perFrame(materialize.Draws, previousMaterialize.Draws)
+               << " cap_plan_us="
+               << (draws != 0U ? (phaseTiming.PicaPlanSeconds - previousPlanSeconds) * 1.0e6 /
+                                     static_cast<double>(draws)
+                               : 0.0)
+               << " list_ms=" << msPerFrame(frontend.ListTicks, previousFrontend.ListTicks)
+               << " lists=" << perFrame(frontend.Lists, previousFrontend.Lists)
+               << " list_kwords="
+               << perFrame(frontend.ListWords, previousFrontend.ListWords) / 1024.0
+               << " list_walk_fast=" << (picaFrontend.ListWalkFast() ? 1 : 0)
+               << " list_walk_ms="
+               << msPerFrame(frontend.ListTicks - frontend.SinkTicks,
+                             previousFrontend.ListTicks - previousFrontend.SinkTicks)
+               << " list_walk_ns_word="
+               << (frontend.ListWords != previousFrontend.ListWords
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(
+                             (frontend.ListTicks - frontend.SinkTicks) -
+                             (previousFrontend.ListTicks - previousFrontend.SinkTicks)) /
+                             static_cast<double>(frontend.ListWords - previousFrontend.ListWords)
+                       : 0.0)
+               << " list_batched_kwords="
+               << perFrame(frontend.BatchedWords, previousFrontend.BatchedWords) / 1024.0
+               << " lut_ms=" << msPerFrame(frontend.LutTicks, previousFrontend.LutTicks)
+               << " lut_hashes=" << perFrame(frontend.LutHashes, previousFrontend.LutHashes)
+               << " lut_reuses=" << perFrame(frontend.LutReuses, previousFrontend.LutReuses)
+               << " lut_copies=" << perFrame(frontend.LutCopies, previousFrontend.LutCopies)
+               << " table_copies=" << perFrame(frontend.TableCopies, previousFrontend.TableCopies)
+               << " same_value_writes="
+               << perFrame(frontend.SameValueWrites, previousFrontend.SameValueWrites);
+          previousFrontend = frontend;
+          previousMaterialize = materialize;
+          previousPlanSeconds = phaseTiming.PicaPlanSeconds;
+        }
+        // Index/vertex snapshot steps (SWITCH_PORT.md "Vertex snapshot hit
+        // path", config/vertex_snapshot_fast): per host frame, the resources
+        // looked up, proven unchanged by their certificate or not, without
+        // a certificate, KiB of the unproven resources and KiB actually
+        // compared, certified and changed pages, resources left to the
+        // previous path; µs per draw of cap_vertex_us spent viewing and
+        // certifying, comparing, copying, and the rest (lookup, LRU, index
+        // range, the snapshot list).
+        {
+          const uint64_t draws = capture.Draws - previousCapture.Draws;
+          const auto usPerDraw = [draws](uint64_t now, uint64_t before) {
+            return draws != 0U
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(now - before) /
+                             1.0e3 / static_cast<double>(draws)
+                       : 0.0;
+          };
+          const auto perFrame = [hostFrames](uint64_t now, uint64_t before) {
+            return static_cast<double>(now - before) / hostFrames;
+          };
+          const uint64_t steps = (capture.GeometryViewTicks - previousCapture.GeometryViewTicks) +
+                                 (capture.GeometryCompareTicks - previousCapture.GeometryCompareTicks) +
+                                 (capture.GeometryCopyTicks - previousCapture.GeometryCopyTicks);
+          const uint64_t vertex = capture.VertexTicks - previousCapture.VertexTicks;
+          perf << " vsnap: vertex_snapshot_fast=" << (submissionQueueStorage->VertexSnapshotFast() ? 1 : 0)
+               << " vs_resources=" << perFrame(capture.GeometryResources, previousCapture.GeometryResources)
+               << " vs_version_hits="
+               << perFrame(capture.GeometryVersionHits, previousCapture.GeometryVersionHits)
+               << " vs_version_misses="
+               << perFrame(capture.GeometryVersionMisses, previousCapture.GeometryVersionMisses)
+               << " vs_uncertified="
+               << perFrame(capture.GeometryUncertified, previousCapture.GeometryUncertified)
+               << " vs_unproven_kb="
+               << perFrame(capture.GeometryUnprovenBytes, previousCapture.GeometryUnprovenBytes) / 1024.0
+               << " vs_compared_kb="
+               << perFrame(capture.GeometryComparedBytes, previousCapture.GeometryComparedBytes) / 1024.0
+               << " vs_pages=" << perFrame(capture.GeometryPages, previousCapture.GeometryPages)
+               << " vs_dirty_pages="
+               << perFrame(capture.GeometryDirtyPages, previousCapture.GeometryDirtyPages)
+               << " vs_fallbacks=" << perFrame(capture.GeometryFallbacks, previousCapture.GeometryFallbacks)
+               << " vs_view_us=" << usPerDraw(capture.GeometryViewTicks, previousCapture.GeometryViewTicks)
+               << " vs_compare_us="
+               << usPerDraw(capture.GeometryCompareTicks, previousCapture.GeometryCompareTicks)
+               << " vs_copy_us=" << usPerDraw(capture.GeometryCopyTicks, previousCapture.GeometryCopyTicks)
+               << " vs_rest_us=" << usPerDraw(vertex >= steps ? vertex - steps : 0U, 0U);
+          // Texture snapshot steps (SWITCH_PORT.md "Texture snapshot and
+          // packet stages", config/texture_snapshot_fast), the same fields
+          // for textures: per host frame, textures looked up (with GPU copy
+          // references: tx_copy_referenced), proven unchanged or not, without
+          // a certificate, KiB unproven and compared, certified and changed
+          // pages, left to the previous path, made anew; µs per draw of
+          // cap_texture_us viewing (with the lookup), comparing, making new
+          // snapshots, and the rest.
+          const uint64_t textureSteps =
+              (capture.TextureViewTicks - previousCapture.TextureViewTicks) +
+              (capture.TextureCompareTicks - previousCapture.TextureCompareTicks) +
+              (capture.TextureCopyTicks - previousCapture.TextureCopyTicks);
+          const uint64_t texture = capture.TextureTicks - previousCapture.TextureTicks;
+          perf << " tsnap: texture_snapshot_fast=" << (submissionQueueStorage->TextureSnapshotFast() ? 1 : 0)
+               << " tx_resources=" << perFrame(capture.TextureResources, previousCapture.TextureResources)
+               << " tx_copy_referenced="
+               << perFrame(capture.TextureCopyReferenced, previousCapture.TextureCopyReferenced)
+               << " tx_version_hits="
+               << perFrame(capture.TextureVersionHits, previousCapture.TextureVersionHits)
+               << " tx_version_misses="
+               << perFrame(capture.TextureVersionMisses, previousCapture.TextureVersionMisses)
+               << " tx_uncertified="
+               << perFrame(capture.TextureUncertified, previousCapture.TextureUncertified)
+               << " tx_unproven_kb="
+               << perFrame(capture.TextureUnprovenBytes, previousCapture.TextureUnprovenBytes) / 1024.0
+               << " tx_compared_kb="
+               << perFrame(capture.TextureComparedBytes, previousCapture.TextureComparedBytes) / 1024.0
+               << " tx_pages=" << perFrame(capture.TexturePages, previousCapture.TexturePages)
+               << " tx_dirty_pages="
+               << perFrame(capture.TextureDirtyPages, previousCapture.TextureDirtyPages)
+               << " tx_fallbacks=" << perFrame(capture.TextureFallbacks, previousCapture.TextureFallbacks)
+               << " tx_misses=" << perFrame(capture.TextureMisses, previousCapture.TextureMisses)
+               << " tx_view_us=" << usPerDraw(capture.TextureViewTicks, previousCapture.TextureViewTicks)
+               << " tx_compare_us="
+               << usPerDraw(capture.TextureCompareTicks, previousCapture.TextureCompareTicks)
+               << " tx_copy_us=" << usPerDraw(capture.TextureCopyTicks, previousCapture.TextureCopyTicks)
+               << " tx_rest_us=" << usPerDraw(texture >= textureSteps ? texture - textureSteps : 0U, 0U);
+        }
         previousCapture = capture;
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
         previousPicaSubmit = picaSubmitSeconds;
+      }
+      // Composition spans lost per window (deko3d "lighting transient" lines
+      // name the draws that lost them): spans crossing a submission,
+      // rejected over an older pending span, mesh packets outside any owner,
+      // evicted pending spans, CMB passes not recognised. Reset() (state
+      // loads) restarts the counters.
+      {
+        static Oot3dNativeGame::Oot3dNativePicaCompositionStats previousComposition{};
+        const auto& composition = picaCompositionTracker.Stats();
+        const auto delta = [](uint64_t now, uint64_t before) { return now >= before ? now - before : now; };
+        perf << " composition: spans_consumed="
+             << delta(composition.ConsumedPacketSpans, previousComposition.ConsumedPacketSpans)
+             << " spans_partial="
+             << delta(composition.PartiallyOverlappingSubmissions,
+                      previousComposition.PartiallyOverlappingSubmissions)
+             << " spans_overlapping="
+             << delta(composition.OverlappingPacketSpans, previousComposition.OverlappingPacketSpans)
+             << " spans_unattributed="
+             << delta(composition.UnattributedPacketSpans, previousComposition.UnattributedPacketSpans)
+             << " spans_evicted=" << delta(composition.EvictedPacketSpans, previousComposition.EvictedPacketSpans)
+             << " cmb_invalid="
+             << delta(composition.InvalidCmbPassEntries + composition.InvalidCmbReturnAddresses,
+                      previousComposition.InvalidCmbPassEntries + previousComposition.InvalidCmbReturnAddresses);
+        // Mesh/primitive packets whose range could not be recorded (no span
+        // for their draws, and no other counter says so).
+        const auto invalid = [](const Oot3dNativeGame::Oot3dNativePicaCompositionStats& stats) {
+          return stats.InvalidPacketSpans + stats.ReadFailures + stats.InvalidPrimitivePacketRanges +
+                 stats.NestedPrimitivePacketEntries + stats.InvalidPrimitivePacketReturnAddresses +
+                 stats.UnmatchedPrimitivePacketExits + stats.InvalidAtmosphereCommandRanges;
+        };
+        perf << " spans_invalid=" << delta(invalid(composition), invalid(previousComposition));
+        // Whole CMB passes recorded, handed to the frontend, and lost
+        // (crossing a submission or another pass, or evicted).
+        perf << " passes=" << delta(composition.RecordedPassSpans, previousComposition.RecordedPassSpans)
+             << " passes_consumed=" << delta(composition.ConsumedPassSpans, previousComposition.ConsumedPassSpans)
+             << " passes_lost="
+             << delta(composition.PartialPassSpans + composition.EvictedPassSpans,
+                      previousComposition.PartialPassSpans + previousComposition.EvictedPassSpans);
+        previousComposition = composition;
+        // How the frontend attributed draws without a plain span hit
+        // (Oot3dPicaCompositionResolveStats): late lists (kicked after the
+        // next frame's HUD phase began) and their draws, draws left UI inside
+        // a world span, scene draws in no span (of them inside one CMB
+        // owner), scene draws of lists without spans.
+        static Oot3dNativeGame::Oot3dPicaCompositionResolveStats previousResolve{};
+        const auto& resolve = picaFrontend.CompositionResolveStats();
+        perf << " late_lists=" << delta(resolve.LateLists, previousResolve.LateLists)
+             << " late_draws=" << delta(resolve.LateListDraws, previousResolve.LateListDraws)
+             << " ui_world_draws=" << delta(resolve.UiListWorldSpanDraws, previousResolve.UiListWorldSpanDraws)
+             << " no_span_draws=" << delta(resolve.NoSpanDraws, previousResolve.NoSpanDraws)
+             << " owner_holes=" << delta(resolve.SameOwnerHoleDraws, previousResolve.SameOwnerHoleDraws)
+             << " pass_draws=" << delta(resolve.PassSpanDraws, previousResolve.PassSpanDraws)
+             << " bare_list_draws=" << delta(resolve.BareListDraws, previousResolve.BareListDraws);
+        previousResolve = resolve;
+      }
+      // Game-thread work outside the phases above, ms per host frame.
+      {
+        static UntimedSeconds previousUntimed{};
+        const auto perFrame = [&](double now, double before) {
+          return (now - before) * 1000.0 / hostFrames;
+        };
+        const auto perFrameCount = [&](uint64_t now, uint64_t before) {
+          return static_cast<double>(now - before) / hostFrames;
+        };
+        perf << " untimed: frame_head=" << perFrame(untimed.FrameHead, previousUntimed.FrameHead)
+             << " refresh_prep=" << perFrame(untimed.RefreshPrep, previousUntimed.RefreshPrep)
+             << " ui_submit=" << perFrame(untimed.UiSubmit, previousUntimed.UiSubmit)
+             << " kernel_reacquire="
+             << perFrame(untimed.KernelReacquire, previousUntimed.KernelReacquire)
+             // Part of `input`: PollNativeA32Input alone (SDL pad, bindings).
+             << " input_poll=" << perFrame(untimed.InputPoll, previousUntimed.InputPoll)
+             // frame_head split: frame-rate policy, area + pack scene note
+             // (with the pacer's presentation submit), cadence report +
+             // refresh plan, UI/config head.
+             << " head_policy=" << perFrame(untimed.HeadPolicy, previousUntimed.HeadPolicy)
+             << " head_area=" << perFrame(untimed.HeadArea, previousUntimed.HeadArea)
+             << " head_cadence=" << perFrame(untimed.HeadCadence, previousUntimed.HeadCadence)
+             << " head_ui=" << perFrame(untimed.HeadUi, previousUntimed.HeadUi)
+             // ui_submit split: textures ahead, HUD build, PrepareTextures,
+             // render-stream submit; then its kernel-lock acquisitions (per
+             // host frame), those that waited and their ms
+             // (config/kernel_ui_lock: 0 takes when on).
+             << " ui_ahead=" << perFrame(untimed.UiAhead, previousUntimed.UiAhead)
+             << " ui_build=" << perFrame(untimed.UiBuild, previousUntimed.UiBuild)
+             << " ui_prepare=" << perFrame(untimed.UiPrepare, previousUntimed.UiPrepare)
+             << " ui_queue=" << perFrame(untimed.UiQueue, previousUntimed.UiQueue)
+             << " ui_lock=" << (uiSubmitHoldsKernel ? 1 : 0)
+             << " ui_lock_takes=" << perFrameCount(untimed.UiLockTakes, previousUntimed.UiLockTakes)
+             << " ui_lock_waits=" << perFrameCount(untimed.UiLockWaits, previousUntimed.UiLockWaits)
+             << " ui_lock_wait=" << perFrame(untimed.UiLockWait, previousUntimed.UiLockWait)
+             // The same for the frame start's released region (host frame
+             // start, input, savestate requests).
+             << " start_lock_takes="
+             << perFrameCount(untimed.StartLockTakes, previousUntimed.StartLockTakes)
+             << " start_lock_waits="
+             << perFrameCount(untimed.StartLockWaits, previousUntimed.StartLockWaits)
+             << " start_lock_wait=" << perFrame(untimed.StartLockWait, previousUntimed.StartLockWait);
+        previousUntimed = untimed;
       }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).
@@ -1913,15 +2578,73 @@ bool NativeA32WindowSession::RunFrame() {
         }
       }
       perf << '\n';
+      // Host ms per host frame each guest thread held the game thread
+      // (dispatch + its SVCs' host services) and thread switches per frame
+      // (its own line; NativeA32GuestThreadProfile), then the same time split
+      // into guest code, SVCs, kernel-lock retakes and scheduling, with the
+      // game thread's costliest SVCs (guest_kernel:).
+      {
+        static Oot3dNativeGame::NativeA32GuestThreadProfile previousThreads{};
+        perf << Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
+                    process, previousThreads, runFrameCount, hostFrames)
+             << '\n'
+             << Oot3dNativeGame::FormatNativeA32GuestKernelLine(process, previousThreads,
+                                                                hostFrames)
+             << '\n';
+        previousThreads = process.GuestThreadProfile();
+      }
+      // Mirror guest replacements: executions/declines per window (its own line).
+      perf << Oot3dNativeGame::FormatOot3dGuestOverridesPerfLine();
+      // config/second_core: how the DSP frames went out, the second core's
+      // lock waits and preemption, and how long the game thread waited for
+      // it, per host frame (its own line).
+      if (process.SecondCoreEnabled()) {
+        const auto now = process.GuestThreadProfile();
+        perf << Oot3dNativeGame::FormatNativeA32SecondCoreLine(
+                    now, secondCoreProfileWindowStart,
+                    {secondCoreDsp.Pumped - secondCoreDspWindowStart.Pumped,
+                     secondCoreDsp.Flushed - secondCoreDspWindowStart.Flushed,
+                     secondCoreDsp.Late - secondCoreDspWindowStart.Late,
+                     secondCoreDsp.WaitSeconds - secondCoreDspWindowStart.WaitSeconds},
+                    hostFrames)
+             << '\n';
+        secondCoreDspWindowStart = secondCoreDsp;
+        secondCoreProfileWindowStart = now;
+      }
+      // config/actor_profile: actor costs over the same window (its own line).
+      if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
+      // Draw distance: extended and denied draws over the same window.
+      perf << Oot3dNativeGame::TakeNativeActorVisibilityPerfLine(widescreenProjection.ActorVisibility);
+      // Roll dash (config/roll_dash): its hooks over the same window (empty when off).
+      if (rollDashStorage.has_value()) perf << rollDashStorage->TakePerfLine();
+      // config/indirect_profile: hottest indirect call pairs (its own line).
+      if (indirectProfile.has_value()) perf << indirectProfile->Profile().TakeLine();
       // config/gpu_timing: GPU/CPU per render-thread stage and GL call
       // counts over the same window (empty when off).
       if (Fast::GlPerf::Enabled()) {
         perf << Fast::GlPerf::TakeReport(runFrameCount) << '\n';
       }
       // deko3d: GPU time per frame over the same window (empty with GL).
-      if (const std::string dkperf = Fast::Deko3dPerfReport(runFrameCount); !dkperf.empty()) {
+      const std::string dkperf = Fast::Deko3dPerfReport(runFrameCount);
+      if (!dkperf.empty()) {
         perf << dkperf << '\n';
       }
+      // Late lists, HUD-phase lists with world spans and holes inside one
+      // CMB owner since the last window (at most 64 in all; the per-pixel
+      // blink, SWITCH_PORT.md).
+      for (const auto& note : picaFrontend.TakeCompositionNotes()) {
+        perf << "composition note: window_end=" << runFrameCount << ' '
+             << Oot3dNativeGame::FormatOot3dPicaCompositionNote(note) << '\n';
+      }
+      // The last windows are repeated in a guest fault report
+      // (oot3d_native_guest_fault_report.h): guest = kNames[0], present = [13].
+      Oot3dNativeGame::GuestFaultPerf().Record(Oot3dNativeGame::GuestFaultPerfWindow{
+          runFrameCount, hostFrames / seconds,
+          (values[0] - windowValues[0]) * 1000.0 / hostFrames,
+          (values[13] - windowValues[13]) * 1000.0 / hostFrames,
+          seconds * 1000.0 / hostFrames,
+          Oot3dNativeGame::PerfLineValue(dkperf, "busy_ms"),
+          Oot3dNativeGame::PerfLineValue(dkperf, "fence_cpu_ms")});
       if (perfWriter.has_value()) {
         (void)perfWriter->Push(std::move(perf).str());
       } else {
@@ -1935,6 +2658,7 @@ bool NativeA32WindowSession::RunFrame() {
       windowValues = values;
       windowHostFrames = runFrameCount;
       windowGuestFrames = frameCount;
+      windowGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
     }
   }
@@ -1961,9 +2685,9 @@ bool NativeA32WindowSession::RunFrame() {
         gSwitchPicaGeometryRegistryEntries != 0U;
     // Also every 600 host frames: without the geometry cache (deko3d) the
     // file stayed at host_frames=1/guest_frames=1, which read as a stalled
-    // guest (24/10, p5 on the console). config/async_status_writes: a troca
-    // do arquivo no SD (30-80 ms aqui, todo present 600k-3 no hitches.txt)
-    // roda numa thread de serviço; esta thread só formata o texto.
+    // guest (24/10, p5 on the console). config/async_status_writes: the SD
+    // replace (30-80 ms here, every present 600k-3 in hitches.txt since
+    // test.11) runs on a service thread; this thread only formats the text.
     if (runFrameCount == 1U || gSwitchPicaGeometryCacheObserved ||
         runFrameCount % 600U == 0U) {
       const auto statusStart = std::chrono::steady_clock::now();
@@ -2097,6 +2821,7 @@ bool NativeA32WindowSession::SampleGuestRefreshInput(
         refreshedTopScreenGameplayInputMode
             ? Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene
             : Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
+    picaRefreshCompositionDomain = picaCompositionDomain;
   }
   // Re-arm after any state restore: RestoreState replaces the memory
   // image, and the watch is diagnostic state that must not disappear with
@@ -2156,6 +2881,8 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         return Oot3dNativeGame::NativeA32HidButtonMask(value);
       };
   Oot3dNativeGame::TopScreenDpadActionState topScreenDpadActions;
+  std::array<bool, Oot3dNativeGame::kTopScreenDpadDirectionCount>
+      topScreenDpadItemHeld{};
   Oot3dNativeGame::TopScreenOcarinaState ocarinaOwner;
   const bool ocarinaOwnsDpad = nativeCandidateDispatch.TopScreenUiProfile &&
       Oot3dNativeGame::ReadTopScreenOcarinaState(process.Memory(), &ocarinaOwner) &&
@@ -2186,6 +2913,8 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     }
     topScreenDpadActions = Oot3dNativeGame::ResolveTopScreenDpadActions(
         activeTopScreenConfig, dpadPhysical);
+    topScreenDpadItemHeld = Oot3dNativeGame::ResolveTopScreenDpadItemLanes(
+        activeTopScreenConfig, dpadPhysical).Held;
   }
   const bool zrHeld = ThreeDsRecomp::Input::IsButtonHeld(
       inputFrame, ThreeDsRecomp::Input::Button::Zr);
@@ -2211,22 +2940,14 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   sampledTopScreenInput.DpadUpHeld =
       (inputFrame.Hid.Buttons & topScreenButton(
           Oot3dNativeGame::NativeA32HidButton::DpadUp)) != 0U;
+  sampledTopScreenInput.DpadItemHeld = topScreenDpadItemHeld;
   if (ocarinaOwnsDpad) {
     inputFrame.Hid.Buttons &= ~(topScreenButton(Oot3dNativeGame::NativeA32HidButton::DpadLeft) |
                                (ocarinaOwner.Page == 12 ? topScreenButton(
                                    Oot3dNativeGame::NativeA32HidButton::DpadUp) : 0U) |
                                topScreenButton(Oot3dNativeGame::NativeA32HidButton::DpadRight));
   }
-  sampledTopScreenInput.XHeld =
-      (topScreenButtons &
-       topScreenButton(Oot3dNativeGame::NativeA32HidButton::X)) != 0U;
-  sampledTopScreenInput.YHeld =
-      (topScreenButtons &
-       topScreenButton(Oot3dNativeGame::NativeA32HidButton::Y)) != 0U;
   sampledTopScreenInput.GameplayDpadActionsOwned = true;
-  sampledTopScreenInput.RestorationLayout =
-      activeTopScreenConfig.HudLayout ==
-      Oot3dNativeGame::TopScreenHudLayout::Restoration;
   nativeCandidateDispatch.TopScreenInputClock.ObserveGuest(sampledTopScreenInput);
   if (nativeCandidateDispatch.TopScreenUiProfile &&
       activeTopScreenConfig.FreeCameraEnabled &&
@@ -2278,6 +2999,36 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
       if (selectPressed && Oot3dNativeGame::TopScreenItemDescriptionOwnsSelect(description)) {
         selectPressed = false;
         inputFrame.Hid.Buttons &= ~button(Oot3dNativeGame::NativeA32HidButton::Select);
+      }
+    }
+    // SingleScreen 3.0, Items page: A over an item a D-pad direction can
+    // hold is the picker's, not the game's; while it is held the D-pad gives
+    // the item to a direction (oot3d_top_screen_dpad_items.h).
+    const auto aMask = button(Oot3dNativeGame::NativeA32HidButton::A);
+    if (Oot3dNativeGame::TopScreenDpadItemPickerState picker;
+        (buttons & aMask) != 0U && topScreenConfigRuntime != nullptr &&
+        Oot3dNativeGame::ReadTopScreenDpadItemPickerState(process.Memory(), &picker)) {
+      const auto slot = Oot3dNativeGame::ResolveTopScreenDpadItemPickerSlot(picker);
+      if (slot != Oot3dNativeGame::kTopScreenDpadItemSlotNone) {
+        constexpr std::array<Oot3dNativeGame::NativeA32HidButton, 4> kPickerDirections{
+            Oot3dNativeGame::NativeA32HidButton::DpadUp,
+            Oot3dNativeGame::NativeA32HidButton::DpadDown,
+            Oot3dNativeGame::NativeA32HidButton::DpadLeft,
+            Oot3dNativeGame::NativeA32HidButton::DpadRight};
+        inputFrame.Hid.Buttons &= ~aMask;
+        for (std::size_t direction = 0U; direction < kPickerDirections.size(); ++direction) {
+          const auto mask = button(kPickerDirections[direction]);
+          inputFrame.Hid.Buttons &= ~mask;
+          if ((pressed & mask) == 0U) continue;
+          auto config = topScreenConfigRuntime->Snapshot().Config;
+          Oot3dNativeGame::AssignTopScreenDpadItem(config, picker.Age != 0U, direction, slot);
+          std::string pickerError;
+          if (!topScreenConfigRuntime->Apply(config, &pickerError))
+            topScreenConfigRuntime->Preview(config);
+          if (!Oot3dNativeGame::PlayTopScreenUiSound(process, 0x01000498U,
+                                                     kTopScreenDirectCallReturn, &pickerError))
+            throw std::runtime_error("TopScreen D-pad picker sound failed: " + pickerError);
+        }
       }
     }
     if (topScreenDpadActions.WasPressed(
@@ -2347,8 +3098,16 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         throw std::runtime_error("TopScreen ocarina guide sound failed: " + gameplayActionError);
       }
     }
+    // Boomerang and Slingshot are D-pad item buttons now
+    // (TopScreenDpadItemSlots), not 2.1.1's direct item on button I.
+    auto consumedDpadActions = topScreenDpadActions;
+    for (const auto action : {Oot3dNativeGame::TopScreenDpadAction::Boomerang,
+                              Oot3dNativeGame::TopScreenDpadAction::Slingshot}) {
+      consumedDpadActions.Pressed[static_cast<std::size_t>(action)] = false;
+      consumedDpadActions.Held[static_cast<std::size_t>(action)] = false;
+    }
     if (!Oot3dNativeGame::ConsumeTopScreenGameplayActions(
-            process, topScreenDpadActions,
+            process, consumedDpadActions,
             nativeCandidateDispatch.TopScreenInput.ZrPressed ||
                 nativeCandidateDispatch.TopScreenInput.ZlPressed,
             kTopScreenDirectCallReturn,
@@ -2362,6 +3121,10 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     nativeCandidateDispatch.PreviousTopScreenButtons = buttons;
     nativeCandidateDispatch.TopScreenItems.DirectItemId =
         nativeCandidateDispatch.TopScreenGameplayActionRuntime.DirectItem.ActiveItemId;
+    nativeCandidateDispatch.TopScreenItems.ChildDpadItemSlots =
+        Oot3dNativeGame::TopScreenDpadItemSlots(activeTopScreenConfig, true);
+    nativeCandidateDispatch.TopScreenItems.AdultDpadItemSlots =
+        Oot3dNativeGame::TopScreenDpadItemSlots(activeTopScreenConfig, false);
     nativeCandidateDispatch.PauseTransaction->AgeUndelivered();
     Oot3dNativeGame::TopScreenPauseDrawInputs pauseInputs;
     if (!Oot3dNativeGame::ReadTopScreenPauseDrawInputs(process.Memory(),
@@ -2456,7 +3219,7 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   const auto clockStart = std::chrono::steady_clock::now();
   const auto clockResolution = AdvanceGuestClockTo(
       process, hostServices, processResult, nextVblankTick,
-      launch.WholeAotBlockBudget);
+      launch.WholeAotBlockBudget, SecondCorePump());
   const double clockSeconds = SecondsSince(clockStart);
   phaseTiming.GuestClockSeconds += clockSeconds;
   phaseTiming.GuestSeconds += clockSeconds;
@@ -2478,7 +3241,7 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
           Oot3dNativeGame::NativeA32ProcessRunKind::Terminated) {
     phaseStart = std::chrono::steady_clock::now();
     processResult =
-        RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+        RunUntilGuestWait(process, launch.WholeAotBlockBudget, SecondCorePump());
     phaseTiming.GuestSeconds += SecondsSince(phaseStart);
     RequireRunnableGuest(processResult);
   }
@@ -2487,10 +3250,18 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   // config/audio_deferred: the DSP frames of this refresh (HLE mix and the
   // guest sound thread they wake) run after the host frame is presented,
   // off the path to the render thread's handoff (DeliverDspAudioFrames).
-  if (deferDspAudio)
+  // With the second core on they are always deferred: the second core
+  // delivers them itself as soon as its threads are parked
+  // (DeliverDspAudioFrameOnSecondCore; the game thread never waits for it),
+  // or, without the host audio stream, its pump during the guest runs
+  // (PumpDspAudioFrame) and the deferred points.
+  if (deferDspAudio || SecondCorePump() != nullptr || dspOnSecondCore) {
     deferredDspAudioFrames += dspAudioFrames;
-  else
+    if (dspOnSecondCore && dspAudioFrames != 0U)
+      Oot3dNativeGame::SecondCore::NotifyKernel();
+  } else {
     DeliverDspAudioFrames(dspAudioFrames);
+  }
   if (!hostServices.SignalVBlank(process.Memory())) {
     throw std::runtime_error(
         "native VBlank could not enter the GSP relay queue");
@@ -2515,10 +3286,14 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
 
 // One DSP audio frame at a time: HLE mix, then the DSP interrupt and the
 // guest threads it wakes (the sound thread), then the host audio output.
-void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
+// runGuest = false: the caller is the second core's pump, between two Run()
+// calls of a guest run that goes on.
+void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames,
+                                                   bool runGuest) {
   auto &hostServices = *hostServicesStorage;
   auto &process = *processStorage;
   auto &dspHle = *dspHleStorage;
+  const bool secondCore = process.SecondCoreEnabled();
   // Storage kept across refreshes (no allocation per refresh); the samples
   // are the same.
   std::vector<int16_t> &audioSamples = refreshAudioSamples;
@@ -2527,6 +3302,18 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
   Oot3dNativeGame::DeliverPendingDspAudioFrames(
       hostServices, dspAudioFrames,
       [&]() {
+        if (secondCore && runGuest) {
+          // The sound thread finishes the previous frame first (the guest's
+          // interrupt protocol, as the real DSP's period leaves it), and stays
+          // parked in its wait while the mix below updates the shared regions
+          // in place. Bounded: a sound thread that never waits again cannot
+          // stall the game thread (the frame then goes out as the DSP would).
+          constexpr auto kSecondCoreDspWait = std::chrono::milliseconds(50);
+          const auto waitStart = std::chrono::steady_clock::now();
+          ++secondCoreDsp.Flushed;
+          if (!process.WaitSecondCoreIdle(kSecondCoreDspWait)) ++secondCoreDsp.Late;
+          secondCoreDsp.WaitSeconds += SecondsSince(waitStart);
+        }
         const size_t frameSampleOffset = audioSamples.size();
         const auto dspMixStart = std::chrono::steady_clock::now();
         CpuProbe::Scope cpuDsp(CpuProbe::Phase::Dsp);
@@ -2542,6 +3329,7 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
         dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
       },
       [&]() {
+        if (!runGuest) return true;
         phaseStart = std::chrono::steady_clock::now();
         processResult =
             RunUntilGuestWait(process, launch.WholeAotBlockBudget);
@@ -2549,21 +3337,7 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
         RequireRunnableGuest(processResult);
         return true;
       });
-  for (const int16_t sample : audioSamples) {
-    const int32_t magnitude = std::abs(static_cast<int32_t>(sample));
-    dspStats.PeakMagnitude = std::max(dspStats.PeakMagnitude, magnitude);
-    dspStats.NonzeroSamples += sample != 0 ? 1U : 0U;
-    const uint16_t bits = static_cast<uint16_t>(sample);
-    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits);
-    dspStats.PcmFnv1a64 *= 1099511628211ULL;
-    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits >> 8U);
-    dspStats.PcmFnv1a64 *= 1099511628211ULL;
-  }
-  dspStats.SamplesMixed += audioSamples.size() / 2U;
-  if (!launch.AudioPcmDumpPath.empty()) {
-    pcmDumpSamples.insert(pcmDumpSamples.end(), audioSamples.begin(),
-                          audioSamples.end());
-  }
+  AccountDspSamples(audioSamples);
   if (hostAudioStream != nullptr && !audioSamples.empty()) {
     // Stretch, resampling and the device queue run on the audio worker.
     const auto audioOutputStart = std::chrono::steady_clock::now();
@@ -2606,6 +3380,104 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
   }
 }
 
+void NativeA32WindowSession::AccountDspSamples(
+    const std::vector<int16_t> &samples) {
+  for (const int16_t sample : samples) {
+    const int32_t magnitude = std::abs(static_cast<int32_t>(sample));
+    dspStats.PeakMagnitude = std::max(dspStats.PeakMagnitude, magnitude);
+    dspStats.NonzeroSamples += sample != 0 ? 1U : 0U;
+    const uint16_t bits = static_cast<uint16_t>(sample);
+    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits);
+    dspStats.PcmFnv1a64 *= 1099511628211ULL;
+    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits >> 8U);
+    dspStats.PcmFnv1a64 *= 1099511628211ULL;
+  }
+  dspStats.SamplesMixed += samples.size() / 2U;
+  if (!launch.AudioPcmDumpPath.empty()) {
+    pcmDumpSamples.insert(pcmDumpSamples.end(), samples.begin(), samples.end());
+  }
+}
+
+// config/second_core with the host audio stream: one deferred DSP frame, as
+// the second core's idle work (NativeA32Process::RunSecondCore), on its host
+// thread. It runs only while every second-core thread (the sound thread) is
+// parked in its wait and no thread above the main thread's priority is ready
+// on the game thread, so the in-place mix never meets the sound thread's
+// writes and each frame's interrupt is consumed before the next one. The
+// session state below is the game thread's under the kernel lock. A mix
+// failure becomes the game thread's next Run() fault.
+// - config/kernel_retake 0: the kernel lock stays held for the whole frame
+//   (mix, interrupt, statistics, host audio submit). The game thread's next
+//   guest exit then waits for the rest of it (test.11: thread 0's retakes,
+//   guest_kernel: lock=, ran at ~72 % of dsp_core1_ms, 0.5-1.4 ms per host
+//   frame, while threads 4 and 7, which no frame overlaps, waited ~0.01 ms).
+// - On: under the lock the frame is claimed, its shared regions resolved
+//   (BeginFrame: the only failure, before anything the guest can see) and its
+//   interrupt signaled first; the mix and the submit then run with the lock
+//   released, unless the interrupt readied a game-thread thread or one waits
+//   on it (RunSecondCoreIdleWorkAfterEffect keeps it then; dsp_held_woken,
+//   dsp_held_waiter). Nothing could tell the interrupt's place in the held
+//   frame (no kernel operation ran between the mix and it), and the thread it
+//   wakes runs on this host thread, after the mix. The game's interrupt event
+//   is sticky (svcCreateEvent reset type 1 at 0x002FA2C4): it stays signaled
+//   until the sound thread clears it, after the mix, so a game-thread wait
+//   listing it starts only once the mix is over (core0_svc_gated); the game
+//   thread's other SVCs during the mix see the kernel as after the whole
+//   frame, and its guest code overlapped the mix before as well. The mix's
+//   memory paths (sample reads) take the lock themselves; the regions are
+//   accounted (EndFrame) and the statistics updated under it.
+void NativeA32WindowSession::DeliverDspAudioFrameOnSecondCore() {
+  auto &hostServices = *hostServicesStorage;
+  auto &process = *processStorage;
+  auto &dspHle = *dspHleStorage;
+  --deferredDspAudioFrames;
+  std::vector<int16_t> &samples = secondCoreDspSamples;
+  samples.clear();
+  std::string mixError;
+  if (!dspMixReleasesKernel) {
+    if (!dspHle.ProcessFrame(process.Memory(), samples, &mixError)) {
+      throw std::runtime_error("native DSP HLE mix failed: " + mixError);
+    }
+    pcmContinuityDiagnostics.ObserveFrame(dspStats.FramesMixed,
+                                          std::span<const int16_t>(samples));
+    ++dspStats.FramesMixed;
+    dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
+    // As the game thread's batch: with the DSP stopped the rest is dropped.
+    if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
+    AccountDspSamples(samples);
+    if (!samples.empty()) hostAudioStream->Submit(samples);
+    return;
+  }
+  const Oot3dNativeGame::NativeDspMemoryAccess memory =
+      dspHle.MemoryAccess(process.Memory());
+  Oot3dNativeGame::NativeA32DspFrame frame;
+  if (!dspHle.BeginFrame(memory, frame, &mixError)) {
+    throw std::runtime_error("native DSP HLE mix failed: " + mixError);
+  }
+  const uint64_t core0Wakes = process.Core0ThreadWakes();
+  // As the game thread's batch: with the DSP stopped the rest is dropped.
+  if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
+  const Oot3dNativeGame::NativeA32SvcFilter waitsOnInterrupt =
+      [&](uint32_t immediate, const oot3d::recomp::a32::GuestState &state) {
+        return hostServices.SvcWaitsOnDspAudioInterrupt(immediate, state,
+                                                        process.Memory());
+      };
+  process.RunSecondCoreIdleWorkAfterEffect(
+      core0Wakes, hostServices.DspAudioInterruptHasCore0Waiter(), waitsOnInterrupt,
+      [&] {
+        dspHle.MixFrame(memory, frame, samples);
+        if (!samples.empty()) hostAudioStream->Submit(samples);
+      });
+  if (!dspHle.EndFrame(memory, frame, &mixError)) {
+    throw std::runtime_error("native DSP HLE mix failed: " + mixError);
+  }
+  pcmContinuityDiagnostics.ObserveFrame(dspStats.FramesMixed,
+                                        std::span<const int16_t>(samples));
+  ++dspStats.FramesMixed;
+  dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
+  AccountDspSamples(samples);
+}
+
 // Runs the guest until it waits and drains the PICA work it submitted during the refresh.
 void NativeA32WindowSession::RunGuestRefresh() {
   auto &hostServices = *hostServicesStorage;
@@ -2619,7 +3491,7 @@ void NativeA32WindowSession::RunGuestRefresh() {
   (void)FlushNativeDependencies();
   phaseStart = std::chrono::steady_clock::now();
   processResult =
-      RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+      RunUntilGuestWait(process, launch.WholeAotBlockBudget, SecondCorePump());
   phaseTiming.GuestSeconds += SecondsSince(phaseStart);
   RequireRunnableGuest(processResult);
 
@@ -2630,7 +3502,11 @@ void NativeA32WindowSession::RunGuestRefresh() {
   bool refreshHadNativeDraws = false;
   while (drainPassesThisRefresh < kMaximumPicaDrainPassesPerRefresh) {
     PublishNativeSceneView();
-    submissionQueue.TakePendingDraws(drainedDraws);
+    // config/capture_delta: the log of the draws' register files, uniforms
+    // and default attributes comes along unreplayed (below: to the plan
+    // builder, or replayed here for the serial build).
+    std::shared_ptr<Oot3dNativeGame::Oot3dPicaCaptureDeltaLog> drainedDelta;
+    submissionQueue.TakePendingDraws(drainedDraws, drainedDelta);
     auto &draws = drainedDraws;
     auto completions = submissionQueue.TakePendingCompletions();
     auto displayTransfers = submissionQueue.TakePendingDisplayTransfers();
@@ -2836,7 +3712,9 @@ void NativeA32WindowSession::RunGuestRefresh() {
       // Swaps vectors with a recycled batch: `draws` comes back empty with
       // capacity for the submission queue to fill next; nothing is copied
       // or allocated per pass.
-      deferredPlans = picaPlanBuilder.BeginBatch(draws);
+      deferredPlans = picaPlanBuilder.BeginBatch(draws, std::move(drainedDelta));
+    } else if (drainedDelta != nullptr) {
+      drainedDelta->MaterializeAll(draws);
     }
     auto &drawList =
         deferredPlans != nullptr ? deferredPlans->Submissions : draws;
@@ -3145,7 +4023,7 @@ void NativeA32WindowSession::RunGuestRefresh() {
     }
     phaseStart = std::chrono::steady_clock::now();
     processResult =
-        RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+        RunUntilGuestWait(process, launch.WholeAotBlockBudget, SecondCorePump());
     const double resumedGuestSeconds = SecondsSince(phaseStart);
     phaseTiming.GuestSeconds += resumedGuestSeconds;
     phaseTiming.GuestInsidePicaSubmitSeconds += resumedGuestSeconds;
@@ -3227,6 +4105,15 @@ void NativeA32WindowSession::PresentVisualFrame(
             supersededFrames;
         std::vector<Fast::Oot3d::GrassInteractor> frameActors;
         bool suppressTopScreenBackdrop = false;
+        // The TopScreen pause menu at its own cadence: with a page up, this
+        // host frame's in-between frame shows the step image again
+        // (oot3d_top_screen_menu_cadence.h).
+        const bool topScreenMenuHold = Oot3dNativeGame::ResolveTopScreenMenuHold(
+            process.Memory(),
+            {.TopScreenProfile =
+                 launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen,
+             .Interpolation = guestInterpolationEnabled,
+             .MenuInterpolation = interpolationPacingOptions.MenuInterpolation});
         if (topSelection.CompletionId !=
             lastSelectedTopTransferCompletionId) {
           lastSelectedTopTransferCompletionId =
@@ -3271,6 +4158,12 @@ void NativeA32WindowSession::PresentVisualFrame(
                   process.Memory(),
                   sceneViewProbe.Stats().LastPlayStateAddress,
                   finished->Sequence);
+            } else if (Fast::Deko3dGrassWantsColliders()) {
+              // deko3d grass (config/grass = draw): Link and Epona only.
+              frameActors = Oot3dNativeGame::CollectNativeGrassColliders(
+                  process.Memory(),
+                  sceneViewProbe.Stats().LastPlayStateAddress,
+                  finished->Sequence);
             }
             ++visualStats.SnapshotCount;
             suppressTopScreenBackdrop = relocatedFrontend;
@@ -3281,7 +4174,7 @@ void NativeA32WindowSession::PresentVisualFrame(
           }
         }
         renderStream.Submit([&, topSelection, completedFrame, supersededFrames,
-                             frameActors, suppressTopScreenBackdrop,
+                             frameActors, suppressTopScreenBackdrop, topScreenMenuHold,
                              presentationElapsedSeconds,
                              visualInterpolationAlpha, frameCount = frameCount,
                              guestReferences =
@@ -3317,6 +4210,7 @@ void NativeA32WindowSession::PresentVisualFrame(
         uint64_t nativeReplaysSkippedThisFrame = 0U;
         uint64_t reducedRefusedThisFrame = 0U;
         uint64_t repeatFallbacksThisFrame = 0U;
+        uint64_t menuHeldThisFrame = 0U;
         bool presentedVisualSample = false;
         bool selectedNewVisualFrame = false;
         {
@@ -3358,6 +4252,8 @@ void NativeA32WindowSession::PresentVisualFrame(
                 currentVisualFrame(std::move(*completedFrame));
             Fast::Oot3d::GrassInteractionBridge::Instance().PublishFrame(
                 currentVisualFrame->Sequence, frameActors);
+            Fast::Oot3d::PlayerShadowBridge::Instance().PublishFrame(
+                currentVisualFrame->Sequence, simpleShadow.TakeFrame());
             selectedNewVisualFrame = true;
             renderFrameKind =
                 static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step);
@@ -3369,6 +4265,7 @@ void NativeA32WindowSession::PresentVisualFrame(
             // tour19: the scale applies at this frame's colour clear or, if
             // none comes, at its first draw into the target.
             ++Fast::PicaGlDynamicScale::gState.FrameSerial;
+            reducedStepScale.reset();
             auto &sample = visualFrameSampleScratch;
             // Keep the canonical target complete independently of the
             // delayed visual target. Raw-copy prefixes have already
@@ -3617,11 +4514,16 @@ void NativeA32WindowSession::PresentVisualFrame(
           // dropped (the step image again) when the pair would not fit.
           // config/fps60_mode: at the locked 30 every in-between frame is
           // dropped (the step image again); otherwise the per-frame
-          // governor (which drops single frames only in legacy).
+          // governor (which drops single frames only in legacy). With a
+          // TopScreen pause page up, the step image again without asking
+          // the governor: the menu at its own cadence
+          // (oot3d_top_screen_menu_cadence.h).
+          const auto inBetweenSource = Oot3dNativeGame::ResolveInBetweenSource(
+              cadenceGovernor.DropsInBetween(), topScreenMenuHold);
           auto level =
-              cadenceGovernor.DropsInBetween()
-                  ? Oot3dNativeGame::InterpolatedSampleLevel::Dropped
-                  : interpolationPacing.Decide();
+              inBetweenSource == Oot3dNativeGame::InBetweenSource::Governor
+                  ? interpolationPacing.Decide()
+                  : Oot3dNativeGame::InterpolatedSampleLevel::Dropped;
           if (level == Oot3dNativeGame::InterpolatedSampleLevel::Dropped) {
             if (lastPresentedVisual.has_value() &&
                 picaPresentationScheduler.HasSnapshot(
@@ -3637,7 +4539,11 @@ void NativeA32WindowSession::PresentVisualFrame(
               }
               rendererTiming->VisualReplaySeconds += SecondsSince(started);
               renderFrameKind = static_cast<uint8_t>(
-                  Oot3dNativeGame::RenderFrameKind::Dropped);
+                  Oot3dNativeGame::StepImageFrameKind(inBetweenSource));
+              menuHeldThisFrame +=
+                  inBetweenSource == Oot3dNativeGame::InBetweenSource::MenuStepImage
+                      ? 1U
+                      : 0U;
               presentedVisualSample = true;
             } else {
               level = Oot3dNativeGame::InterpolatedSampleLevel::Full;
@@ -3649,13 +4555,32 @@ void NativeA32WindowSession::PresentVisualFrame(
                   sample, &visualInterpolationTiming)) {
             uint64_t sampleNamespace = kVisualInterpolationRenderTargetNamespace;
             if (level == Oot3dNativeGame::InterpolatedSampleLevel::Reduced) {
-              if (Oot3dNativeGame::SampleSuitsReducedReplay(
-                      sample, reducedReplayScratch)) {
+              if (reducedViaDynamicScale) {
+                // deko3d: one dynamic-resolution step for this frame alone;
+                // the top-screen target moves to it at the frame's first
+                // draw and back with the next step frame (or a full
+                // in-between frame before it).
+                auto &backendScale = Fast::PicaGlDynamicScale::gState;
+                if (!reducedStepScale) reducedStepScale = backendScale.Requested;
+                const float stepScale =
+                    *reducedStepScale > 0.0F ? *reducedStepScale : backendScale.MaxScale;
+                backendScale.Requested =
+                    std::min(interpolationPacing.Config().ReducedScale, stepScale);
+                ++backendScale.FrameSerial;
+              } else if (Oot3dNativeGame::SampleSuitsReducedReplay(
+                             sample, reducedReplayScratch)) {
                 sampleNamespace = kReducedVisualRenderTargetNamespace;
               } else {
                 level = Oot3dNativeGame::InterpolatedSampleLevel::Full;
                 ++reducedRefusedThisFrame;
               }
+            } else if (reducedStepScale) {
+              // A full in-between frame after a reduced one, no step frame
+              // between them: the step frame's scale again.
+              auto &backendScale = Fast::PicaGlDynamicScale::gState;
+              backendScale.Requested = *reducedStepScale;
+              ++backendScale.FrameSerial;
+              reducedStepScale.reset();
             }
             const auto temporalSample =
                 Fast::Oot3d::BuildNativeFrameTemporalSample(
@@ -3720,12 +4645,13 @@ void NativeA32WindowSession::PresentVisualFrame(
             supersededFrames != nullptr ? supersededFrames->size() : 0U;
         if (nativeReplaysSkippedThisFrame != 0U ||
             reducedRefusedThisFrame != 0U || repeatFallbacksThisFrame != 0U ||
-            supersededThisFrame != 0U) {
+            menuHeldThisFrame != 0U || supersededThisFrame != 0U) {
           std::lock_guard lock(interpolationPerfMutex);
           interpolationPerf.SupersededFrames += supersededThisFrame;
           interpolationPerf.NativeReplaysSkipped += nativeReplaysSkippedThisFrame;
           interpolationPerf.ReducedRefused += reducedRefusedThisFrame;
           interpolationPerf.RepeatFallbacks += repeatFallbacksThisFrame;
+          interpolationPerf.MenuHeld += menuHeldThisFrame;
         }
         {
           std::lock_guard lock(interpolationPerfMutex);
@@ -4238,6 +5164,34 @@ void NativeA32WindowSession::UpdateDevFreeCamera(Oot3dNativeGame::NativeA32Input
 }
 #endif
 
+namespace {
+// deko3d config/lighting perpixel reads the scene's environment profile; the
+// release defaults are in resources.o2r (environments/, staged by
+// scripts/switch/stage-product.sh), not in a folder on the card. Installed
+// only while the Modern model is on; render stream only.
+std::optional<std::string> ReadArchivedEnvironmentDefault(const std::string &fileName) {
+  auto *context = Ship::Context::GetRawInstance();
+  auto resources = context != nullptr ? context->GetResourceManager() : nullptr;
+  auto archives = resources != nullptr ? resources->GetArchiveManager() : nullptr;
+  const std::string path = "environments/" + fileName;
+  // HasFile first: LoadFile(path) adds an index entry on a miss.
+  if (archives == nullptr || !archives->HasFile(path)) return std::nullopt;
+  const auto file = archives->LoadFile(path);
+  if (file == nullptr || file->Buffer == nullptr || file->BufferOffset > file->Buffer->size()) return std::nullopt;
+  return std::string(file->Buffer->begin() + static_cast<std::ptrdiff_t>(file->BufferOffset), file->Buffer->end());
+}
+
+void ApplyLightingEnvironmentDefaults(Oot3dNativeGame::SceneEnvironmentRuntime &environment, bool modernModel) {
+  static bool installed = false;
+  // Only the deko3d renderer's defaults live in the archive.
+  const bool perPixel = modernModel && Fast::Deko3dRendererSelected();
+  if (perPixel == installed) return;
+  installed = perPixel;
+  environment.SetDefaultsReader(perPixel ? ReadArchivedEnvironmentDefault
+                                         : Oot3dNativeGame::SceneEnvironmentRuntime::DefaultsReader{});
+}
+} // namespace
+
 void NativeA32WindowSession::PublishNativeSceneView() {
   auto &process = *processStorage;
   // Guest memory is read here; the scene environment, the duplicate check
@@ -4288,6 +5242,8 @@ void NativeA32WindowSession::PublishNativeSceneView() {
       environmentTime.value_or(Oot3dNativeGame::SceneEnvironmentTime{}), player);
   sceneEnvironment->PollProfileFiles();
   const auto shadowSettings = Fast::Oot3d::GraphicsSettingsRuntime::Instance().SnapshotForRendering();
+  ApplyLightingEnvironmentDefaults(*sceneEnvironment,
+                                   Fast::Oot3d::UsesFullSceneLighting(shadowSettings.Value.Effects.SurfaceLighting));
   picaCompositionTracker.SetRoomShadowShellsEnabled(
       shadowSettings.Environment.CasterFaces == Fast::Renderer3ds::ShadowCasterFaces::InteriorShells &&
       shadowSettings.Value.Effects.DirectionalShadows.Mode == Fast::Oot3d::DirectionalShadowMode::VirtualShadowMaps);
@@ -4323,10 +5279,10 @@ void NativeA32WindowSession::PublishNativeSceneView() {
 // Guest memory and guest interrupts belong to the guest. The renderer
 // reaches them only from a command the guest waits for (inline or Run);
 // anything else would race the running guest, so it fails instead.
-void NativeA32WindowSession::RequireStoppedGuest() {
+void NativeA32WindowSession::RequireStoppedGuest(const char *access) {
   if (renderStream.InCommand() && !renderStream.InSynchronousCommand()) {
     throw std::runtime_error(
-        "renderer reached guest state while the guest was running");
+        std::string("renderer reached guest state while the guest was running (") + access + ")");
   }
 }
 
@@ -4423,7 +5379,10 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   // Only displayed samples advance the grass colliders: the authoritative
   // replay of a new frame is not shown, and taking it as the previous position
   // gave the next displayed sample a backward sweep.
-  if (present) Fast::Oot3d::GrassInteractionBridge::Instance().SelectSample(temporalSample);
+  if (present) {
+    Fast::Oot3d::GrassInteractionBridge::Instance().SelectSample(temporalSample);
+    Fast::Oot3d::PlayerShadowBridge::Instance().SelectSample(temporalSample);
+  }
   PinGpuCopyResources(sample);
   // config/gpu_timing: step/interp frame and canonical (hidden) draws.
   // A new guest frame is every kind but the repeated (in-between) sample:

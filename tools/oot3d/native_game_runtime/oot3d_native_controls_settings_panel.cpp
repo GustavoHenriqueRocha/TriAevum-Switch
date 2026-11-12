@@ -1,6 +1,8 @@
 #include "oot3d_key_hint.h"
+#include "oot3d_free_camera_smoothing_config.h"
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_top_screen_control_widgets.h"
+#include "fast/oot3d/config_writer.h"
 
 #include <imgui.h>
 
@@ -198,7 +200,14 @@ class NativeControlsSettingsPanel final
   NativeControlsSettingsPanel(
       std::shared_ptr<NativeControlConfigRuntime> controls,
       std::shared_ptr<TopScreenUiConfigRuntime> topScreen)
-      : mControls(std::move(controls)), mTopScreen(std::move(topScreen)) {}
+      : mControls(std::move(controls)), mTopScreen(std::move(topScreen)) {
+    if (mTopScreen && !mTopScreen->Path().empty()) {
+      mConfigDirectory = mTopScreen->Path().parent_path();
+      mFreeCameraSmoothing = ReadFreeCameraSmoothing(mConfigDirectory);
+      LiveFreeCameraSmoothing().store(mFreeCameraSmoothing,
+                                      std::memory_order_relaxed);
+    }
+  }
 
   [[nodiscard]] const char* Label() const noexcept override {
     return "Controls";
@@ -610,6 +619,17 @@ class NativeControlsSettingsPanel final
           &mControlDraft.ControllerAccelerometerSensitivity,
           0.1F, 4.0F, "%.2fx");
     }
+#if defined(__SWITCH__)
+    // Console build: a finger that lands outside the HUD controls in
+    // gameplay aims (Automatic, Mouse, Right stick and Digital look sources).
+    changed |= ImGui::Checkbox("Touchscreen drag aim",
+                               &mControlDraft.TouchAimEnabled);
+    if (mControlDraft.TouchAimEnabled) {
+      changed |= ControlWidgets::SliderFloat(
+          "Touch aim sensitivity", &mControlDraft.TouchAimDegreesPerPixel,
+          0.02F, 1.0F, "%.2f deg/px", ImGuiSliderFlags_Logarithmic);
+    }
+#endif
     changed |= ImGui::Checkbox(
         "Invert native aim X", &mControlDraft.NativeAimInvertX);
     changed |= ImGui::Checkbox(
@@ -625,6 +645,7 @@ class NativeControlsSettingsPanel final
       return;
     }
     DrawTopScreenCameraBehavior(mTopDraft);
+    DrawFreeCameraSmoothing();
     const bool enabled = mTopDraft.FreeCameraEnabled;
     bool controlChanged =
         EnumCombo("Free-camera source",
@@ -644,6 +665,28 @@ class NativeControlsSettingsPanel final
     if (!enabled) {
       ImGui::TextDisabled("Free camera disabled");
     }
+  }
+
+  // Applied and saved at once, outside Save/Revert: it has its own file
+  // (oot3d_free_camera_smoothing_config.h).
+  void DrawFreeCameraSmoothing() {
+    constexpr const char* labels[]{"On (default)", "Off"};
+    int choice = mFreeCameraSmoothing ? 0 : 1;
+    if (ControlWidgets::Combo("Smoothing##freecam", &choice, labels, 2)) {
+      mFreeCameraSmoothing = choice == 0;
+      LiveFreeCameraSmoothing().store(mFreeCameraSmoothing,
+                                      std::memory_order_relaxed);
+      if (!mConfigDirectory.empty()) {
+        Fast::Oot3d::SettingsConfigWriter().Submit(
+            kFreeCameraSmoothingConfigName,
+            [config = mConfigDirectory, smoothing = mFreeCameraSmoothing] {
+              return SaveFreeCameraSmoothing(config, smoothing);
+            });
+      }
+    }
+    if (Fast::Oot3d::SettingsConfigWriter().Failed(kFreeCameraSmoothingConfigName))
+      ImGui::TextWrapped("Could not write config/%s.", kFreeCameraSmoothingConfigName);
+    ImGui::TextDisabled("Off: the camera stops as soon as you let go of the stick. Applies at once.");
   }
 
   void DrawCalibration() {
@@ -755,6 +798,8 @@ class NativeControlsSettingsPanel final
 
   std::shared_ptr<NativeControlConfigRuntime> mControls;
   std::shared_ptr<TopScreenUiConfigRuntime> mTopScreen;
+  std::filesystem::path mConfigDirectory;
+  bool mFreeCameraSmoothing = true;
   NativeControlConfig mControlDraft;
   TopScreenUiConfig mTopDraft;
   NativeControlConfig mSavedControls;

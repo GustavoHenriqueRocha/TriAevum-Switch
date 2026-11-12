@@ -1,6 +1,7 @@
 #include "oot3d_native_compiled_functions.h"
 
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 #include "recomp/a32_vfp_scalar.h"
 #include "oot3d_native_whole_aot_runtime.h"
 #include "oot3d_native_mtx3x4_kernel.h"
@@ -24,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -54,8 +56,10 @@ constexpr std::array kCompiledFunctionEntryPoints{
     kAudioEffectProcessFourChannelDelay,
     kAudioEffectProcessStereoReverb,
 };
-Oot3dCompiledFunctionStats gStats;
-Oot3dWholeAotStats gWholeAotStats;
+// Per host thread: the second core's guest code (oot3d_native_a32_second_core.h)
+// counts into its own; the game thread's are the ones reported.
+thread_local Oot3dCompiledFunctionStats gStats;
+thread_local Oot3dWholeAotStats gWholeAotStats;
 constexpr uint32_t kProfileCodeBegin = 0x00100000U;
 constexpr uint32_t kProfileCodeEnd = 0x00500000U;
 constexpr size_t kProfileCodeSlots =
@@ -66,15 +70,17 @@ struct ExternalTargetCounts {
     uint32_t TimingSamples = 0;
     uint64_t TimingSampleNanoseconds = 0;
 };
+// --profile-a32-runtime only, and only the game thread records.
 std::vector<ExternalTargetCounts> gExternalTargetCounts;
-uint64_t gExternalTimingCounter = 0;
+thread_local uint64_t gExternalTimingCounter = 0;
 constexpr uint64_t kExternalTimingSampleMask = 63U;
 
 void RecordWholeAotExternalTarget(uint32_t entry,
                                   bool manualCompiled,
                                   uint64_t sampledNanoseconds) noexcept {
     if (gExternalTargetCounts.empty() || entry < kProfileCodeBegin ||
-        entry >= kProfileCodeEnd || (entry & 3U) != 0U) {
+        entry >= kProfileCodeEnd || (entry & 3U) != 0U ||
+        SecondCore::Processor() != 0U) {
         return;
     }
     auto& target =
@@ -552,10 +558,10 @@ bool ExecuteMtx3x4Multiply(
     }
 
     uint32_t exceptionFlags = 0U;
-    // Mtx3x4MultiplyFast: exato (valor e flags) contra o software, para todo
-    // FPSCR sem armadilhas (o caminho em double anterior errava IXC quando a
-    // soma em double não era exata, e UFC/sinal num produto que estoura para
-    // baixo até zero). Os outros modos continuam no software.
+    // Mtx3x4MultiplyFast: exact (value and flags) against the software, for every
+    // FPSCR without traps (the previous double path got IXC wrong when the
+    // double sum was not exact, and UFC/sign on a product that underflows
+    // to zero). The other modes stay in software.
     if ((state.fpscr & kFpscrExceptionEnableMask) == 0U) {
         Mtx3x4MultiplyFast(left.data(), right.data(), state.fpscr, output.data(),
                            exceptionFlags);
@@ -1017,6 +1023,9 @@ Oot3dWholeAotFlow ContinueWholeAotExternalCallInGuest(
 struct Oot3dBlockEntrySelection final {
     std::span<const uint32_t> Entries;
     const Oot3dAotBlockEntryFilter* Filter = nullptr;
+    // Empty when the linked code's gates (Oot3dWholeAotHookGates) cover the
+    // list; a callback must not run otherwise (ExecuteOot3dCompiledFunction).
+    const std::string* GateError = nullptr;
 };
 
 // Sorted, unique block entries and their filter, cached per caller list.
@@ -1027,6 +1036,7 @@ Oot3dBlockEntrySelection SelectBlockEntries(
         size_t EntryCount = 0U;
         std::vector<uint32_t> Merged;
         Oot3dAotBlockEntryFilter Filter;
+        std::string GateError;
         bool Initialized = false;
     };
     thread_local Cache cache;
@@ -1047,10 +1057,15 @@ Oot3dBlockEntrySelection SelectBlockEntries(
         for (const uint32_t pc : cache.Merged) {
             cache.Filter.Insert(pc);
         }
+        // Checked once per list: sparse code (--sparse-block-entries) has no
+        // gate elsewhere, so a hook outside its list would silently never run.
+        cache.GateError = Oot3dWholeAotHookGatesError(
+            Oot3dLinkedWholeAotHookGates(), cache.Merged);
     }
     return {
         cache.Merged,
         cache.Merged.empty() ? nullptr : &cache.Filter,
+        &cache.GateError,
     };
 }
 
@@ -1080,20 +1095,65 @@ void RegisterOot3dGuestOverrideProfileHook(
 std::string DescribeOot3dGuestOverrides() {
 #if defined(OOT3D_GUEST_OVERRIDES)
     std::string text = Oot3dGuestOverridesEnabled()
-        ? "# substituicoes nativas: ligadas\n"
-        : "# substituicoes nativas: desligadas (config/guest_overrides_off)\n";
+        ? "# native overrides: on\n"
+        : "# native overrides: off (config/guest_overrides_off)\n";
     const auto* table = Oot3dGuestOverrideTable();
     for (size_t i = 0; i < Oot3dGuestOverrideCount(); ++i) {
         char line[160];
         std::snprintf(line, sizeof(line),
-                      "0x%08X nativa=%" PRIu64 " recusou=%" PRIu64 " %s\n",
+                      "0x%08X native=%" PRIu64 " declined=%" PRIu64 " %s\n",
                       table[i].Entry, table[i].Calls, table[i].Declined,
                       table[i].Name);
         text += line;
     }
     return text;
 #else
-    return "# substituicoes nativas: nao compiladas neste build\n";
+    return "# native overrides: not compiled in this build\n";
+#endif
+}
+
+size_t DisableOot3dGuestOverridesFromList(std::string_view list) {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    return DisableOot3dGuestOverrides(list);
+#else
+    static_cast<void>(list);
+    return 0U;
+#endif
+}
+
+std::string FormatOot3dGuestOverridesPerfLine() {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    // Counters at the previous line (game thread only, like the perf line).
+    static std::vector<std::pair<uint64_t, uint64_t>> previous;
+    const auto* table = Oot3dGuestOverrideTable();
+    const size_t count = Oot3dGuestOverrideCount();
+    previous.resize(count);
+    uint64_t calls = 0U, declined = 0U;
+    size_t disabled = 0U;
+    std::string entries;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& info = table[i];
+        if (!info.Mirror) continue;
+        const uint64_t c = info.Calls - previous[i].first;
+        const uint64_t d = info.Declined - previous[i].second;
+        previous[i] = {info.Calls, info.Declined};
+        calls += c;
+        declined += d;
+        disabled += info.Disabled ? 1U : 0U;
+        // Replacements not wired into this build's generated code (disabled
+        // in guest_overrides.json) never run: listed only when they did.
+        if (c == 0U && d == 0U) continue;
+        char text[48];
+        std::snprintf(text, sizeof(text), " %X=%" PRIu64 "/%" PRIu64, info.Entry, c, d);
+        entries += text;
+    }
+    char head[128];
+    std::snprintf(head, sizeof(head), "natives: overrides=%s calls=%" PRIu64 " declined=%" PRIu64
+                  " disabled=%zu", Oot3dGuestOverridesEnabled() ? "on" : "off", calls, declined,
+                  disabled);
+    return head + entries + "\n";
+#else
+    return {};
 #endif
 }
 
@@ -1102,6 +1162,14 @@ bool Oot3dWholeAotAvailable() noexcept {
     return !Oot3dWholeAotEntryPoints().empty();
 #else
     return false;
+#endif
+}
+
+Oot3dWholeAotHookGateSet Oot3dLinkedWholeAotHookGates() noexcept {
+#if defined(OOT3D_NATIVE_GENERATED_WHOLE_AOT)
+    return Oot3dWholeAotHookGates();
+#else
+    return {};
 #endif
 }
 
@@ -1267,6 +1335,11 @@ bool ExecuteOot3dCompiledFunction(
     }
     const auto blockEntrySelection = SelectBlockEntries(
         blockEntryPcs, blockEntryPcCount);
+    // Before any guest instruction runs: the guest thread faults with the
+    // message (window setup refuses the same lists up front).
+    if (blockEntry != nullptr && !blockEntrySelection.GateError->empty()) [[unlikely]] {
+        throw std::runtime_error(*blockEntrySelection.GateError);
+    }
     return ExecuteOot3dWholeAotFunction(
         pc, state, memory, result, &gWholeAotStats,
         enableManualCompiledFunctions

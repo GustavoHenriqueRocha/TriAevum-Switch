@@ -1,24 +1,21 @@
 #pragma once
 
-// Arquivo de status pequeno, substituído e não acrescentado (boot-status.txt),
-// com o texto mais novo escrito por uma thread de serviço
-// (config/async_status_writes; SWITCH_PORT.md "Heartbeat do boot-status.txt
-// fora da thread do jogo").
+// A small status file that is replaced, not appended (boot-status.txt), with
+// its latest text written by a service thread (config/async_status_writes;
+// SWITCH_PORT.md "boot-status.txt heartbeat off the game thread").
 //
-// A thread do jogo reescrevia o boot-status.txt a cada 600 quadros do host:
-// um open/truncate/write/close no SD dentro do quadro, 30-80 ms de thread do
-// jogo sem tempo de guest (hitches.txt: todo present 600k-3). Post entrega o
-// texto e volta; um texto ainda não escrito é trocado pelo mais novo (só o
-// último estado importa). WriteNow escreve na thread que chama, depois da
-// escrita em andamento, e descarta um texto postado que ainda espera: as
-// etapas do boot e o estado final completed/failed nunca são sobrescritos
-// por um heartbeat mais velho.
+// The game thread rewrote boot-status.txt every 600 host frames: one SD
+// open/truncate/write/close inside the frame, 30-80 ms of game-thread time
+// with no guest time (logs19-logs20f hitches.txt: every present 600k-3).
+// Post hands the text over and returns; a text not yet written is replaced
+// by the newer one (only the last state matters). WriteNow writes on the
+// calling thread after the write in flight and drops a posted text still
+// waiting: the boot stages and the final completed/failed/terminated state
+// can never be overwritten by an older heartbeat.
 //
-// Toda escrita do boot-status.txt do processo passa por
+// Every write of the process's boot-status.txt goes through
 // SwitchBootStatusFile() (oot3d_native_a32_window.cpp, oot3d_native_game.cpp).
-// Testes: oot3d_native_status_file_tests.
-//
-// Portado de JohnUzoka/TriAevum-Switch a85cb85d.
+// Tests: oot3d_native_status_file_tests.
 
 #include "oot3d_native_offload.h"
 
@@ -37,12 +34,12 @@
 namespace Oot3dNativeGame {
 
 struct StatusFileWriterStats {
-    uint64_t Posted = 0U;            // textos entregues à thread de serviço
-    uint64_t Written = 0U;           // desses, escritos (os outros foram substituídos)
-    uint64_t Superseded = 0U;        // trocados por um texto mais novo antes da escrita
-    uint64_t SyncWrites = 0U;        // chamadas de WriteNow
-    uint64_t WriteNanoseconds = 0U;  // thread de serviço: open, write, close
-    uint64_t SyncNanoseconds = 0U;   // WriteNow: espera da escrita em andamento + a própria
+    uint64_t Posted = 0U;            // texts handed to the service thread
+    uint64_t Written = 0U;           // of those, written (the others superseded)
+    uint64_t Superseded = 0U;        // replaced by a newer text before their write
+    uint64_t SyncWrites = 0U;        // WriteNow calls
+    uint64_t WriteNanoseconds = 0U;  // service thread: open, write, close
+    uint64_t SyncNanoseconds = 0U;   // WriteNow: wait for the write in flight + its own write
 };
 
 class StatusFileWriter final {
@@ -52,8 +49,8 @@ class StatusFileWriter final {
     StatusFileWriter(const StatusFileWriter&) = delete;
     StatusFileWriter& operator=(const StatusFileWriter&) = delete;
 
-    // Entrega o texto à thread de serviço; nunca espera o arquivo. Depois do
-    // Stop escreve aqui mesmo (WriteNow).
+    // Hands the text to the service thread; never waits for the file. After
+    // Stop it writes here instead (WriteNow).
     void Post(std::string text) {
         bool taken = false, notify = false;
         {
@@ -71,9 +68,9 @@ class StatusFileWriter final {
         if (!taken) (void)WriteNow(text);
     }
 
-    // Escreve nesta thread quando a escrita em andamento (se houver) termina;
-    // um texto postado que ainda espera é descartado (este é mais novo).
-    // False quando o arquivo não pôde ser escrito.
+    // Writes on this thread once the write in flight (if any) is done; a
+    // posted text still waiting is dropped (this one is newer). False when
+    // the file could not be written.
     bool WriteNow(std::string_view text) {
         const auto start = std::chrono::steady_clock::now();
         std::lock_guard file(mFileMutex);
@@ -91,13 +88,13 @@ class StatusFileWriter final {
         return written;
     }
 
-    // Espera até não haver texto postado esperando nem sendo escrito.
+    // Waits until no posted text is waiting or being written.
     void Flush() {
         std::unique_lock lock(mMutex);
         mIdle.wait(lock, [&] { return !mPending.has_value() && !mWriting; });
     }
 
-    // Escreve o texto postado que ainda espera e junta a thread (idempotente).
+    // Writes the posted text still waiting and joins the thread (idempotent).
     void Stop() {
         {
             std::lock_guard lock(mMutex);
@@ -138,9 +135,9 @@ class StatusFileWriter final {
         return !output.fail();
     }
 
-    // Ordem dos locks: mFileMutex, depois mMutex (aqui e no WriteNow). O texto
-    // só sai de mPending com mFileMutex na mão, então um WriteNow posterior
-    // nunca é sobrescrito por um texto tirado antes dele.
+    // Lock order: mFileMutex, then mMutex (here and in WriteNow). The text is
+    // taken from mPending only under mFileMutex, so a WriteNow that follows
+    // can never be overwritten by a text taken before it.
     void Loop() {
         std::unique_lock lock(mMutex);
         for (;;) {
@@ -157,7 +154,7 @@ class StatusFileWriter final {
                 std::optional<std::string> text;
                 {
                     std::lock_guard again(mMutex);
-                    text.swap(mPending);  // um WriteNow pode ter descartado no meio-tempo
+                    text.swap(mPending);  // a WriteNow may have dropped it meanwhile
                     mWriting = text.has_value();
                 }
                 if (text.has_value()) {
@@ -193,17 +190,17 @@ class StatusFileWriter final {
 
 inline constexpr const char* kSwitchBootStatusPath = "sdmc:/switch/oot3dre/boot-status.txt";
 
-// O boot-status.txt do processo (Switch): as etapas do boot, o heartbeat e o
-// estado final passam todos por este único escritor.
+// The process's boot-status.txt (Switch): the boot stages, the heartbeat and
+// the final state all go through this one writer.
 inline StatusFileWriter& SwitchBootStatusFile() {
     static StatusFileWriter writer(kSwitchBootStatusPath);
     return writer;
 }
 
-// config/async_status_writes: o heartbeat do boot-status.txt (a cada 600
-// quadros do host) escrito por uma thread de serviço. Switch: arquivo ausente
-// = ligado, "0" = escrito na thread do jogo como antes. Desktop:
-// TRIAEVUM_ASYNC_STATUS_WRITES=1 (desligado sem ela; lá nada posta).
+// config/async_status_writes: boot-status.txt's heartbeat (every 600 host
+// frames) written by a service thread. Switch: the file absent = on, "0" =
+// written on the game thread as before. Desktop:
+// TRIAEVUM_ASYNC_STATUS_WRITES=1 (off otherwise; nothing posts there).
 inline bool ReadNativeAsyncStatusWrites() {
 #if defined(__SWITCH__)
     std::ifstream input("sdmc:/switch/oot3dre/config/async_status_writes");

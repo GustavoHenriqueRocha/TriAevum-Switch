@@ -14,6 +14,7 @@
 #include "oot3d_native_preparation_screen.h"
 #include "oot3d_input_bench.h"
 #include "oot3d_game_language_panel.h"
+#include "oot3d_gameplay_options_log.h"
 #include "oot3d_graphics_settings_schedule.h"
 #include "oot3d_scene_environment.h"
 #include "oot3d_savestate_library.h"
@@ -40,6 +41,7 @@
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_a32_registry.h"
 #include "oot3d_native_a32_savestate.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_native_a32_scene_view.h"
 #include "oot3d_native_actor_interactions.h"
 #include "fast/oot3d/grass_interaction_bridge.h"
@@ -53,6 +55,7 @@
 #include "oot3d_native_interpolation_pacing.h"
 #include "oot3d_native_reduced_replay.h"
 #include "oot3d_native_launch_frame_rate.h"
+#include "oot3d_native_rate_pacing.h"
 #include "oot3d_native_game_bootstrap.h"
 #include "oot3d_native_mass_aot.h"
 #include "oot3d_native_pcm_diagnostics.h"
@@ -71,6 +74,7 @@
 #include "oot3d_native_offload.h"
 #include "oot3d_native_status_file.h"
 #include "oot3d_hitch_recorder.h"
+#include "oot3d_native_guest_fault_report.h"
 #include "oot3d_frame_spike_log.h"
 #include "oot3d_vsync_clock.h"
 #include "oot3d_native_player_temporal_bridge.h"
@@ -80,6 +84,7 @@
 #include "oot3d_native_ui_lifecycle_bridge.h"
 #include "oot3d_native_ui_texture_provider.h"
 #include "oot3d_top_screen_ocarina_text_runtime.h"
+#include "oot3d_top_screen_menu_cadence.h"
 #include "oot3d_native_whole_aot_runtime.h"
 #ifdef OOT3D_NATIVE_DIRECT_AOT_PLUGIN
 #include "oot3d_native_direct_aot.h"
@@ -182,8 +187,8 @@ inline uint64_t gSwitchPicaGeometryPersistentUploads = 0U;
 inline uint64_t gSwitchPicaGeometryRegistryEntries = 0U;
 inline bool gSwitchPicaGeometryCacheObserved = false;
 
-// boot-status.txt (oot3d_native_status_file.h): Write escreve nesta thread,
-// Post pela thread de serviço (config/async_status_writes).
+// boot-status.txt (oot3d_native_status_file.h): Write on this thread, Post
+// through the service thread (config/async_status_writes).
 void WriteSwitchBootStage(const char* stage);
 void PostSwitchBootStage(const char* stage);
 #endif
@@ -193,9 +198,12 @@ inline double SecondsSince(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
+// Runs the guest until it waits. `betweenRuns` (optional) runs between two
+// Run() calls that yielded: the second core's DSP pump.
 Oot3dNativeGame::NativeA32ProcessRunResult
 RunUntilGuestWait(Oot3dNativeGame::NativeA32Process &process,
-                  uint32_t wholeAotBlockBudget);
+                  uint32_t wholeAotBlockBudget,
+                  const std::function<void()> *betweenRuns = nullptr);
 
 void RequireRunnableGuest(
     const Oot3dNativeGame::NativeA32ProcessRunResult &result);
@@ -293,7 +301,28 @@ private:
   bool UpdateGuestServicesForRefresh(
       bool &topScreenStartRoutingEligible,
       Oot3dNativeGame::NativeA32InputFrame &inputFrame);
-  void DeliverDspAudioFrames(uint32_t dspAudioFrames);
+  // dspAudioFrames frames: HLE mix, DSP interrupt, then (runGuest) the guest
+  // threads it woke on the game thread, then the host audio output.
+  void DeliverDspAudioFrames(uint32_t dspAudioFrames, bool runGuest = true);
+  // config/second_core (SWITCH_PORT.md "Second guest core").
+  void StartSecondCore();
+  void StopSecondCore() noexcept;
+  // Between two yielded Run() calls of the game thread: one deferred DSP
+  // frame, once the work the previous one woke is done (the second core on
+  // without the host audio stream).
+  void PumpDspAudioFrame();
+  // The second core's idle work (dspOnSecondCore): one deferred DSP frame on
+  // its host thread, kernel lock held on entry and return (config/kernel_retake:
+  // released around the mix and the host audio submit).
+  void DeliverDspAudioFrameOnSecondCore();
+  // Statistics, PCM dump and host output of mixed DSP samples.
+  void AccountDspSamples(const std::vector<int16_t> &samples);
+  // The pump for RunUntilGuestWait (null with the second core off, or when
+  // the second core delivers the DSP frames itself).
+  const std::function<void()> *SecondCorePump() const noexcept {
+    return secondCoreThread.joinable() && !dspOnSecondCore ? &secondCorePump
+                                                           : nullptr;
+  }
   void RunGuestRefresh();
   void PresentVisualFrame(const double &presentationElapsedSeconds, const float &visualInterpolationAlpha);
   void Finish();
@@ -307,6 +336,10 @@ private:
   void SetTopScreenSessionMinimapVisible(bool visible);
   void ApplySelectedUiProfile();
   void UpdateScenePresentation();
+  // Roll dash (oot3d_roll_dash_runtime.h), outside guest code at each host
+  // frame and after a state load: the option of the frame, its guest
+  // regions, and the game log lines of the Gameplay settings on a change.
+  void UpdateRollDash();
   // The OpenGL widescreen moves the relocated lower menu's bottom corners to
   // the window's corners (TopScreen frontend menus); touch follows.
   bool WidescreenMenuCornersActive();
@@ -318,7 +351,7 @@ private:
   void RestoreSavestatePicaVisualReplayState(const Oot3dNativeGame::NativeA32SavestateRuntimeState &runtime);
   Fast::Renderer3ds::PicaFrameCompositionPolicy ResolveFrameCompositionPolicy(const Fast::Oot3d::PresentationPacingPolicy& pacing);
   void PublishNativeSceneView();
-  void RequireStoppedGuest();
+  void RequireStoppedGuest(const char *access);
   std::vector<Fast::Renderer3ds::PicaTextureCopyReference> CollectGuestCopyReferences();
   void PinGpuCopyResources(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample& sample);
   bool FlushNativeDependencies();
@@ -425,6 +458,8 @@ private:
   Oot3dNativeGame::Oot3dNativePicaFrontend picaFrontend;
   Oot3dNativeGame::Oot3dNativePicaCompositionTracker picaCompositionTracker;
   Oot3dNativeGame::Oot3dPicaCompositionDomain picaCompositionDomain{};
+  // The domain of the last refresh (hostConfig.PicaRefreshCompositionDomain).
+  Oot3dNativeGame::Oot3dPicaCompositionDomain picaRefreshCompositionDomain{};
   Oot3dNativeGame::NativeA32CtrHostConfig hostConfig;
   std::shared_ptr<Oot3dNativeGame::GameLanguageSettings> languageSettings{};
   std::filesystem::path saveDataDirectory{};
@@ -452,7 +487,7 @@ private:
   Oot3dNativeGame::NativeA32PlayerTemporalBridge playerTemporalBridge;
   NativeWidescreenProjectionState widescreenProjection;
   std::optional<ScopedA32BlockTraceWriter> blockTraceWriterStorage;
-  // Perfil por função do código guest (config/guest_profile); inativo por padrão.
+  // Per-function profile of the guest code (config/guest_profile); inactive by default.
   Oot3dNativeGame::GuestBlockProfiler guestProfiler;
   bool guestProfilerInstalled = true;
   std::vector<uint32_t> blockEntryHooks{};
@@ -497,8 +532,16 @@ private:
   std::optional<Oot3dNativeGame::TopScreenSystemPageRuntime> systemPageStorage;
   std::optional<Oot3dNativeGame::TopScreenItemDescriptionRuntime> itemDescriptionStorage;
   std::optional<Oot3dNativeGame::TopScreenWideItemsRuntime> wideItemsStorage;
+  std::optional<Oot3dNativeGame::RollDashRuntime> rollDashStorage;
+  Oot3dNativeGame::GameplayOptionsLog gameplayOptionsLog;
+  // Simple shadow (oot3d_simple_shadow.h): its hook, and the shadow of each
+  // native frame for the deko3d backend (fast/oot3d/player_shadow.h).
+  Oot3dNativeGame::SimpleShadowRuntime simpleShadow;
   std::optional<oot3d::ui::Fast3dUiRenderBackend> uiRenderBackendStorage;
   std::optional<oot3d::ui::N64UiFast3dRenderer> n64UiRendererStorage;
+  // The UI texture revision at which every HUD texture was asked for ahead
+  // of its first draw (N64UiFast3dRenderer::RequestAhead); none yet: empty.
+  std::optional<std::uint64_t> hudTexturesAheadRevision;
   std::array<std::vector<oot3d::ui::UiPrimitive>, oot3d::ui::kUiSubsystemCount> lastTopScreenPrimitivesBySubsystem;
   Oot3dNativeGame::NativeA32InputTimeline inputTimeline{};
   Oot3dNativeGame::GraphicsSettingsSchedule graphicsSettingsSchedule{};
@@ -575,7 +618,10 @@ private:
   Fast::Oot3d::PresentationPacingPolicy presentationPacingPolicy{};
   // Set on the Switch from the launch (ResolveLaunchFrameRateMode): it
   // replaces the graphics settings' FrameRate when pacing is resolved.
+  // L3+R3 > Video > FPS replaces it at a frame boundary (LiveFrameRate);
+  // liveFrameRateRevision is the last choice applied (game thread).
   std::optional<Fast::Oot3d::FrameRateMode> launchFrameRateMode;
+  uint64_t liveFrameRateRevision = 0U;
   Fast::Oot3d::FrameRateMode EffectiveFrameRateMode() const;
   Fast::Renderer3ds::PicaFrameCompositionPolicy frameCompositionPolicy{};
   std::optional<Oot3dNativeGame::NativeRealtimeRefreshPacer> realtimePacerStorage;
@@ -634,6 +680,10 @@ private:
     // config/native_replay=1: replay the native namespace although the
     // backend never observes it (A/B).
     bool ForceNativeReplay = false;
+    // config/pacer_entry_recover ("0": off): sooner probes after a scene
+    // entry, back-off after failed probes, render-thread holds left out of
+    // the frame cost (oot3d_native_interpolation_pacing.h).
+    bool PacerEntryRecover = true;
     // config/fps60_mode (oot3d_native_cadence_governor.h): adaptive
     // (default), strict60 or legacy, then options.
     Oot3dNativeGame::Fps60ModeConfig Fps60Mode{};
@@ -642,11 +692,33 @@ private:
     // scale ("2.25").
     bool DynamicResolution = false;
     std::string DynamicResolutionText;
+    // config/drs_60 (L3+R3 > Video > Resolution at 60 FPS): Full holds the
+    // full scale at 60 FPS. Changed live through LiveDynamicResolutionSixty.
+    Oot3dNativeGame::DynamicResolutionSixtyMode DynamicResolutionSixty =
+        Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
+    // config/interp_menu = 1: the TopScreen pause menu's in-between frames
+    // interpolated as before (oot3d_top_screen_menu_cadence.h; A/B).
+    bool MenuInterpolation = false;
   } interpolationPacingOptions;
   Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
   // Dynamic resolution of the top-screen scene (render thread).
   Oot3dNativeGame::DynamicResolutionController dynamicResolution;
   bool dynamicResolutionActive = false;
+  // deko3d: a reduced in-between frame is a dynamic-resolution step for
+  // that frame alone (DynamicStepReducedScale), not a namespace of its own.
+  // reducedStepScale: the scale the step frame asked for, while an
+  // in-between frame drew lower; a full in-between frame after it asks for
+  // it again.
+  bool reducedViaDynamicScale = false;
+  std::optional<float> reducedStepScale;
+  // The Resolution at 60 FPS mode the pacing was configured with, and the
+  // last LiveDynamicResolutionSixty revision applied.
+  Oot3dNativeGame::DynamicResolutionSixtyMode dynamicResolutionSixtyMode =
+      Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
+  uint64_t liveDynamicResolutionSixtyRevision = 0U;
+  // The scale 60 FPS last ran at: a switch back to 60 begins there
+  // (oot3d_native_rate_pacing.h; log16).
+  Oot3dNativeGame::RatePacingResolutionMemory dynamicResolutionMemory;
   // Render-thread busy time per frame (no acquire wait), averaged: a
   // governor that sheds with this above the GPU is CPU-bound and fewer
   // pixels do not help (dynamic resolution ignores that shedding).
@@ -657,6 +729,10 @@ private:
   // Render thread -> game thread: the cadence is locked at 30 (the game
   // thread then runs both refreshes of a step in one host frame).
   std::atomic<bool> cadenceLockedThirty{false};
+  // New images presented (a step's frame or an interpolated in-between
+  // frame, not a repeat of the previous one); the render thread counts them
+  // in FinishRenderFrameCost, the performance overlay reads the total.
+  std::atomic<uint64_t> newImagesPresented{0U};
   // Game thread: the previous host frame, for the governor's game-thread
   // cost (busy = duration minus the waits for the renderer).
   struct HostFrameCost {
@@ -677,14 +753,35 @@ private:
   Oot3dNativeGame::NativeOffloadOptions offload;
   // logs/perf.txt through a service thread (config/offload_perf).
   std::optional<Oot3dNativeGame::AsyncLineWriter> perfWriter;
+  // boot-status.txt's heartbeat every 600 host frames: posted to a service
+  // thread (config/async_status_writes, default) or written here, as before.
+  // Game-thread time spent on it and the updates, cumulative (perf.txt
+  // status_* fields).
+  bool asyncStatusWrites = true;
+  uint64_t statusUpdates = 0U;
+  uint64_t statusGameNanoseconds = 0U;
   // logs/hitches.txt (render thread): one line per late presentation.
   std::optional<Oot3dNativeGame::AsyncLineWriter> hitchWriter;
   Oot3dNativeGame::HitchRecorder hitchRecorder;
   uint64_t hitchPresents = 0U;
   double hitchGameBusyMs = 0.0;
   double hitchGuestMs = 0.0;
+  Oot3dNativeGame::NativeArea hitchArea{};
   std::array<std::atomic<uint64_t>, static_cast<size_t>(Oot3dNativeGame::HitchCause::Count)>
       hitchCounts{};
+  // The game's scene and room, read once per host frame on the game thread
+  // (hitches.txt lines, perf.txt windows; oot3d_native_area.h).
+  Oot3dNativeGame::NativeArea frameArea{};
+  // The scene last handed to the texture pack runtime (deko3d; -2 = none yet).
+  int texturePackScene = -2;
+  // The scene of the last frame for the pacing governor's entries
+  // (InterpolationPacingGovernor::NoteEntry; -2 = none yet).
+  int pacerEntryScene = -2;
+  Oot3dNativeGame::NativeAreaWindow perfAreaWindow;
+  // Actor cost profile (config/actor_profile; oot3d_native_actor_profile.h).
+  std::optional<Oot3dNativeGame::NativeActorProfile> actorProfile;
+  // Indirect call profile (config/indirect_profile; oot3d_native_indirect_profile.h).
+  std::optional<Oot3dNativeGame::Oot3dIndirectProfileInstall> indirectProfile;
   // Frame spikes (oot3d_frame_spike_log.h): config/frame_spikes or
   // config/gpu_timing. Render-thread scratch below is written by
   // FinishRenderFrameCost and the scene lambda, read at the present.
@@ -714,13 +811,50 @@ private:
   // or enqueue), ms, and of the PICA capture inside the guest's GX
   // commands (SubmitDrawPacket), cumulative.
   double perfLineGameMs = 0.0;
-  // Heartbeat do boot-status.txt a cada 600 quadros do host: postado a uma
-  // thread de serviço (config/async_status_writes, padrão) ou escrito aqui,
-  // como antes. Tempo da thread do jogo gasto nele e as atualizações,
-  // acumulados (campos status_* do perf.txt).
-  bool asyncStatusWrites = true;
-  uint64_t statusUpdates = 0U;
-  uint64_t statusGameNanoseconds = 0U;
+  // Game-thread work outside the perf.txt phases (logs/perf.txt "untimed:"),
+  // cumulative seconds: RunFrame's head before host_frame_start, each
+  // refresh's input sampling and service update, the UI submission, and the
+  // kernel lock taken back after the frame start and the presentation
+  // hand-off (config/second_core: a wait for the second core's SVC).
+  struct UntimedSeconds {
+    double FrameHead = 0.0;
+    double RefreshPrep = 0.0;
+    double UiSubmit = 0.0;
+    double KernelReacquire = 0.0;
+    // Inside `input`: PollNativeA32Input alone.
+    double InputPoll = 0.0;
+    // frame_head in four parts: the frame-rate policy (PrepareNextWindowDemoFrame
+    // and a mode change), the area read and texture-pack scene note, the
+    // cadence report and refresh plan, and the UI/config head
+    // (ApplyTopScreenConfigSnapshot .. UpdateScenePresentation).
+    double HeadPolicy = 0.0;
+    double HeadArea = 0.0;
+    double HeadCadence = 0.0;
+    double HeadUi = 0.0;
+    // ui_submit in four parts: the HUD textures asked for ahead, the
+    // presentation build (guest memory reads), PrepareTextures (texture
+    // keys, provider resolves) and the render-stream submission.
+    double UiAhead = 0.0;
+    double UiBuild = 0.0;
+    double UiPrepare = 0.0;
+    double UiQueue = 0.0;
+    // Game-thread kernel-lock acquisitions (SecondCore::gCore0Lock*) inside
+    // ui_submit and inside the frame start's released region (host frame
+    // start, input, savestate requests: up to the kernel_reacquire there).
+    uint64_t UiLockTakes = 0U;
+    uint64_t UiLockWaits = 0U;
+    double UiLockWait = 0.0;
+    uint64_t StartLockTakes = 0U;
+    uint64_t StartLockWaits = 0U;
+    double StartLockWait = 0.0;
+  } untimed;
+  // config/kernel_ui_lock (oot3d_native_kernel_options.h): the UI submission
+  // keeps the kernel lock (one acquisition) instead of releasing it and
+  // taking it again at every guest memory read.
+  bool uiSubmitHoldsKernel = false;
+  // config/kernel_retake (oot3d_native_kernel_options.h): the second core's
+  // DSP frame mixes with the kernel lock released.
+  bool dspMixReleasesKernel = false;
   // DSP HLE frames of one refresh: storage reused across refreshes.
   std::vector<int16_t> refreshAudioSamples;
   // config/audio_deferred (Switch, absent = on, "0" = off): DSP frames of
@@ -728,6 +862,25 @@ private:
   bool deferDspAudio = false;
   uint32_t deferredDspAudioFrames = 0U;
   uint64_t dspAudioInRenderWait = 0U;
+  // config/second_core: the second core's host thread. With the host audio
+  // stream (dspOnSecondCore) every DSP frame is deferred and the second core
+  // delivers it as its idle work, as soon as it is pending and its threads
+  // are parked; the game thread only adds frames. Without it a pump delivers
+  // them while the game thread runs guest code, or the deferred points above
+  // after a bounded wait for the second core to go idle.
+  std::thread secondCoreThread;
+  std::function<void()> secondCorePump;
+  bool dspOnSecondCore = false;
+  // Second core's DSP frame storage (its host thread only).
+  std::vector<int16_t> secondCoreDspSamples;
+  struct SecondCoreDspStats {
+    uint64_t Pumped = 0U;    // delivered by the pump
+    uint64_t Flushed = 0U;   // delivered at a deferred point
+    uint64_t Late = 0U;      // ... after the idle wait timed out
+    double WaitSeconds = 0.0; // game thread waiting for the second core
+  } secondCoreDsp;
+  SecondCoreDspStats secondCoreDspWindowStart;
+  Oot3dNativeGame::NativeA32GuestThreadProfile secondCoreProfileWindowStart;
   // Kind of the frame the render thread is drawing (RenderFrameKind) and
   // its render-thread milliseconds so far.
   uint8_t renderFrameKind = 0U;
@@ -761,7 +914,24 @@ private:
     uint64_t NativeReplaysSkipped = 0;
     uint64_t ReducedRefused = 0;
     uint64_t RepeatFallbacks = 0;
+    // In-between frames of the TopScreen pause menu that showed the step
+    // image again (oot3d_top_screen_menu_cadence.h; counted as Other).
+    uint64_t MenuHeld = 0;
     uint64_t Probes = 0;
+    // config/pacer_entry_recover (InterpolationPacingStats): failed and
+    // entry probes, scene entries, in-between decisions below full in their
+    // entry windows, the current probe interval (back-off), the frames
+    // whose render-thread hold (texture pack, grass) left the cost and the
+    // frames of an entry window with its work still running.
+    uint64_t FailedProbes = 0;
+    uint64_t EntryProbes = 0;
+    uint64_t StaleProbes = 0; // probes made early for a stale ratio
+    uint64_t Entries = 0;
+    uint64_t EntryBelowDecisions = 0;
+    uint32_t ProbeInterval = 0U;
+    uint64_t HoldFrames = 0;
+    double HoldMs = 0.0;
+    uint64_t EntryWorkFrames = 0;
     uint64_t LevelChanges = 0;
     uint8_t Level = 0;
     bool GpuTimer = false;
@@ -786,11 +956,18 @@ private:
     double CadenceHoldSeconds = 0.0;
     double GamePairP90Ms = 0.0;
     uint64_t SupersededFrames = 0;
+    // The rate the governors are configured for and the cadence mode in
+    // effect (config/fps60_mode at 60, legacy at 30): both change with
+    // L3+R3 > Video > FPS.
+    uint32_t RateHz = 0U;
+    Oot3dNativeGame::Fps60Mode CadenceMode = Oot3dNativeGame::Fps60Mode::Legacy;
     // Dynamic resolution (config/dynamic_resolution): on, current and lowest
     // scale, the controller's pair average and its changes.
     bool DrsActive = false;
     float DrsScale = 0.0F;
     float DrsMinScale = 0.0F;
+    Oot3dNativeGame::DynamicResolutionSixtyMode DrsMode =
+        Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
     double DrsPairMs = 0.0;
     Oot3dNativeGame::DynamicResolutionStats Drs{};
   };

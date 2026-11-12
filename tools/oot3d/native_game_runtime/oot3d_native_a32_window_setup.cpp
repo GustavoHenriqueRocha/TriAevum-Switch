@@ -2,8 +2,17 @@
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_native_a32_ctr_save_safety.h"
+#include "oot3d_gameplay_settings_panel.h"
+#include "oot3d_draw_distance_config.h"
+#include "oot3d_landing_roll.h"
+#include "oot3d_roll_dash.h"
+#include "oot3d_romfs_mods.h"
+#include "oot3d_native_block_entry_hooks.h"
 #include "oot3d_native_guest_overrides.h"
+#include "oot3d_native_a32_memory_peek.h"
+#include "oot3d_native_kernel_options.h"
 #include "oot3d_switch_threads.h"
+#include "oot3d_switch_guest_window.h"
 #if defined(__SWITCH__)
 #include <EGL/egl.h>
 #include <glad/glad.h>
@@ -11,15 +20,28 @@
 #include "fast/backends/gfx_sdl.h"
 #include <algorithm>
 #include <fstream>
+#include "oot3d_build_version.h"
+#include "oot3d_update_panel.h"
+#include "oot3d_switch_code_pages.h"
+#include "oot3d_whole_aot_gcov.h"
+#include "oot3d_game_log.h"
+#include <spdlog/spdlog.h>
 #endif
 // Deko3dRendererSelected() (sempre falso fora do Switch): o build Linux
 // do executável com janela não compilava sem este include.
 #include "fast/backends/gfx_deko3d.h"
+#include <cstdio>
+#include <algorithm>
 #include <cstdlib>
+#include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include "oot3d_native_direct_aot.h"
 #include "oot3d_title_grass_rules.h"
+#include "oot3d/renderer/azahar_texture_pack.h"
+#include <stb_image.h>
 #include "fast/oot3d/graphics_settings_persistence.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 
@@ -211,6 +233,26 @@ void NativeA32WindowSession::Setup() {
   picaFrontend.SetDiagnosticHistoryEnabled(false);
   picaCompositionDomain =
       Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
+  picaRefreshCompositionDomain = picaCompositionDomain;
+  {
+    // A list the GPU queue kicks after the next frame's HUD phase began is
+    // attributed as on time; config/late_lists_as_ui restores the HUD-phase
+    // attribution (A/B for the per-pixel blink, SWITCH_PORT.md).
+    std::error_code ignored;
+#if defined(__SWITCH__)
+    const std::filesystem::path configDirectory = "sdmc:/switch/oot3dre/config";
+#else
+    const std::filesystem::path configDirectory =
+        std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "config";
+#endif
+    picaFrontend.SetLateCommandListsOnTime(
+        !std::filesystem::exists(configDirectory / "late_lists_as_ui", ignored));
+    // A scene draw written inside a CMB pass but outside its mesh packets
+    // takes that pass's composition; config/no_pass_span_fallback leaves it
+    // without one (A/B, SWITCH_PORT.md "Per-pixel blink in test.10").
+    picaFrontend.SetPassSpanFallback(
+        !std::filesystem::exists(configDirectory / "no_pass_span_fallback", ignored));
+  }
   languageSettings = std::make_shared<Oot3dNativeGame::GameLanguageSettings>(
       std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "game_language.json",
       titleProfile.Kind == Oot3dNativeGame::CtrTitleKind::Oot3d
@@ -230,8 +272,49 @@ void NativeA32WindowSession::Setup() {
   hostConfig.RomFsImageOffset = manifest->RomFsImageOffset;
   hostConfig.RomFsImageSize = manifest->RomFsImageSize;
   hostConfig.ExeFsDirectory = manifest->ExeFsDirectory;
+  if (!launch.RomFsOverlayPath.empty()) {
+    // User-enabled RomFS mods (upstream 9c90abb9): the overlay was built over
+    // this exact image (Forge on the PC, the start-up's composer on the
+    // Switch, oot3d_romfs_mods.h).
+    std::ifstream image(manifest->RomFsImagePath, std::ios::binary);
+    const uint64_t imageOffset = manifest->RomFsImageOffset;
+    std::string overlayError;
+    hostConfig.RomFsOverlay = Oot3dNativeGame::NativeA32RomFsOverlay::Load(
+        launch.RomFsOverlayPath, manifest->RomFsImageSize,
+        [&](uint64_t offset, std::span<uint8_t> bytes) {
+          image.clear();
+          image.seekg(static_cast<std::streamoff>(imageOffset + offset), std::ios::beg);
+          image.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+          return static_cast<bool>(image);
+        },
+        &overlayError);
+    if (!hostConfig.RomFsOverlay) {
+#if defined(__SWITCH__)
+      // Never fatal on the console: the game starts without mods.
+      Oot3dNativeGame::WriteGameLog("romfs mods: overlay rejected, starting without mods: " +
+                                    overlayError);
+      Oot3dNativeGame::RomFsModsStartupState().BootStatus = "rejected";
+      Oot3dNativeGame::RomFsModsStartupState().PanelLine =
+          "At this start: the overlay was rejected, the game runs without mods (see the log).";
+#else
+      throw std::runtime_error(overlayError);
+#endif
+    } else {
+      const std::string line =
+          "romfs mods: overlay active (" +
+          std::to_string(hostConfig.RomFsOverlay->PatchCount()) + " metadata patches, " +
+          std::to_string(hostConfig.RomFsOverlay->ViewSize() - manifest->RomFsImageSize) +
+          " appended bytes)";
+#if defined(__SWITCH__)
+      Oot3dNativeGame::WriteGameLog(line);
+#else
+      std::cout << "oot3d_native_game: " << line << '\n';
+#endif
+    }
+  }
   hostConfig.PicaFrontend = &picaFrontend;
   hostConfig.PicaCompositionDomain = &picaCompositionDomain;
+  hostConfig.PicaRefreshCompositionDomain = &picaRefreshCompositionDomain;
   hostConfig.PicaCompositionProvider = &picaCompositionTracker;
   // Pasta por título: um título que não é o OoT3D nunca grava na pasta de
   // save do Zelda (o argv padrão do NRO passa sdmc:/switch/oot3dre/savedata);
@@ -298,15 +381,36 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::CtrFrameBoundarySource::GspPresent) {
     hostConfig.FrameBoundary = frameBoundaryProvider.get();
   }
+  // Guest kernel fast paths (config/kernel_*, oot3d_native_kernel_options.h).
+  const Oot3dNativeGame::NativeKernelOptions kernelOptions =
+      Oot3dNativeGame::ReadNativeKernelOptions();
+  hostConfig.FastSvc = kernelOptions.Svc;
+  Oot3dNativeGame::SecondCore::gQuietWakes = kernelOptions.Wake;
+  uiSubmitHoldsKernel = kernelOptions.UiLock;
+  dspMixReleasesKernel = kernelOptions.Retake;
+  {
+    const std::string line = std::string("kernel_fast: wake=") +
+                             (kernelOptions.Wake ? "1" : "0") +
+                             " svc=" + (kernelOptions.Svc ? "1" : "0") +
+                             " ui_lock=" + (kernelOptions.UiLock ? "1" : "0") +
+                             " retake=" + (kernelOptions.Retake ? "1" : "0");
+#if defined(__SWITCH__)
+    // Before InitContextForDemo: kept until the game log exists (oot3d_game_log.h).
+    Oot3dNativeGame::WriteGameLog(line);
+#else
+    std::fprintf(stderr, "%s\n", line.c_str());
+#endif
+  }
   auto &hostServices = hostServicesStorage.emplace(std::move(hostConfig));
   frameRateContract =
       Oot3dNativeGame::ResolveNativeFrameRateContract(
           launch.GameplayTiming, launch.PresentationRateHz);
   savestateCompatibility.GameplayTiming = frameRateContract.Mode;
 #if defined(__SWITCH__)
-  gSwitchVisualInterpolation = frameRateContract.VisualInterpolationAllowed;
   // The homebrew arguments always name the timing and presentation rate
   // (config/fps60); they, not the graphics settings, set the pacing here.
+  // L3+R3 > Video > FPS replaces it while the game runs (RunFrame,
+  // TakeLiveFrameRateMode).
   launchFrameRateMode = Oot3dNativeGame::ResolveLaunchFrameRateMode(
       launch.GameplayTiming, launch.PresentationRateHz);
 #endif
@@ -325,8 +429,8 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.ProfileA32Blocks = launch.ProfileA32Blocks;
   widescreenProjection.TraceA32Blocks = !launch.A32BlockTracePath.empty();
   {
-    // Perfil por função do código guest e chave das substituições nativas.
-    // Os dois só leem arquivos de configuração; sem eles nada muda.
+    // Per-function profile of the guest code and switch for the native overrides.
+    // Both only read config files; without them nothing changes.
     std::filesystem::path guestProfileConfig;
 #if defined(__SWITCH__)
     guestProfileConfig = "sdmc:/switch/oot3dre/config/guest_profile";
@@ -351,9 +455,9 @@ void NativeA32WindowSession::Setup() {
     // As substituições de guest_overrides.json são PCs do OoT3D.
     if (!titleProfile.GuestOverrides)
       Oot3dNativeGame::SetOot3dGuestOverridesActive(false);
-    // Perfil de pico (config/guest_spike_ms; desligado por padrão): liga o
-    // perfil em todos os quadros mesmo sem config/guest_profile (aí sem o
-    // relatório periódico) e grava logs/guest_spikes.txt e
+    // Spike profile (config/guest_spike_ms; off by default): turns the
+    // profile on for every frame even without config/guest_profile (then without the
+    // periodic report) and writes logs/guest_spikes.txt and
     // logs/guest_spikes_summary.txt (oot3d_guest_spike_profile.h).
     std::filesystem::path guestSpikeConfig;
 #if defined(__SWITCH__)
@@ -378,13 +482,27 @@ void NativeA32WindowSession::Setup() {
         &guestProfileOptions);
     if (!guestProfileOn && guestSpikes) {
       guestProfileOptions = {};
-      guestProfileOptions.DumpEveryHostFrames = 0U; // só o perfil de pico
+      guestProfileOptions.DumpEveryHostFrames = 0U; // spike profile only
       guestProfileOptions.OutputPath = guestProfileOutput;
       guestProfileOptions.FunctionMapPath = guestFunctionMap;
       guestProfileOn = true;
     }
+    // The profile takes the block-entry callback on every block, which sparse
+    // whole-AOT code (--sparse-block-entries) never calls outside its gates:
+    // it would see nothing and the runtime refuses the request. The game runs
+    // on without it.
+    if (guestProfileOn &&
+        !Oot3dNativeGame::Oot3dLinkedWholeAotHookGates().EveryBlock) {
+      std::fprintf(stderr,
+                   "TRIAEVUM_GUEST_PROFILE refused: the whole-AOT code was "
+                   "generated with --sparse-block-entries, which calls the "
+                   "block-entry callback only at its hook gates; the guest "
+                   "profile (config/guest_profile, config/guest_spike_ms) needs "
+                   "a build without that flag\n");
+      guestProfileOn = false;
+    }
     if (guestProfileOn) {
-      // Segmento de texto do OoT3D (ExHeader): 0x00100000..0x004CA000.
+      // OoT3D text segment (ExHeader): 0x00100000..0x004CA000.
       guestProfiler.Start(guestProfileOptions, 0x00100000U, 0x003CA000U);
       guestProfiler.SetAppendix([](std::ostream &out) {
         out << Oot3dNativeGame::DescribeOot3dGuestOverrides();
@@ -408,14 +526,9 @@ void NativeA32WindowSession::Setup() {
   }
   auto &blockTraceWriter = blockTraceWriterStorage.emplace(
       launch.A32BlockTracePath, widescreenProjection);
-  blockEntryHooks = std::vector<uint32_t>{
-      kMtx4x4BuildFrustum,
-      kMtx4x4BuildOrthographicProjectionRotated,
-      Oot3dNativeGame::kOot3dPlayerUpdateEntry,
-      Oot3dNativeGame::kOot3dMeshCommandPacketSubmitEntry,
-  };
-  // GameState_Update e o limitador (0x00417014, 0x003FD27C/3A8/3B8) vêm do
-  // provedor de fronteira do OoT3D; o do GSP não pede gancho nenhum.
+  // GameState_Update e o limitador (0x00417014, 0x003FD27C/3A8/3B8) da lista
+  // do OoT3D (Oot3dNativeBlockEntryHookPcs) são os do provedor de fronteira
+  // do OoT3D; o do GSP não pede gancho nenhum (título genérico, abaixo).
   static_assert(Oot3dNativeGame::kOot3dFrameBoundaryGameStateUpdatePc ==
                     kGameStateUpdate &&
                 Oot3dNativeGame::kOot3dFrameBoundaryPacingBeginPc ==
@@ -426,134 +539,48 @@ void NativeA32WindowSession::Setup() {
                     Oot3dNativeGame::kOot3dFramePacingCommitEntry,
                 "OoT3D frame boundary hooks must match the frame-rate policy");
   const auto frameBoundaryHooks = frameBoundaryProvider->GuestHookPcs();
-  blockEntryHooks.insert(blockEntryHooks.end(), frameBoundaryHooks.begin(),
-                         frameBoundaryHooks.end());
-  const auto actorVisibilityHooks =
-      Oot3dNativeGame::NativeActorVisibilityHookPcs();
-  blockEntryHooks.insert(blockEntryHooks.end(), actorVisibilityHooks.begin(),
-                         actorVisibilityHooks.end());
-  widescreenProjection.ActorVisibility.Diagnostics =
-      std::getenv("OOT3D_ACTOR_VISIBILITY_DIAGNOSTICS") != nullptr;
   picaCompositionHooks =
       Oot3dNativeGame::Oot3dNativePicaCompositionHookPcs();
-  blockEntryHooks.insert(blockEntryHooks.end(),
-                         picaCompositionHooks.begin(),
-                         picaCompositionHooks.end());
-  if (widescreenProjection.PlayerTemporalBridge != nullptr) {
-    const auto temporalHooks =
-        Oot3dNativeGame::NativeA32PlayerTemporalHookPcs();
-    blockEntryHooks.insert(blockEntryHooks.end(), temporalHooks.begin(),
-                           temporalHooks.end());
-  }
   typedGameplayObservableExitHooks =
       Oot3dNativeGame::Oot3dTypedGameplayObservableExitPoints();
+  // The block-entry hook list comes only from Oot3dNativeBlockEntryHookPcs
+  // (oot3d_native_block_entry_hooks.h): sparse whole-AOT code
+  // (--sparse-block-entries) gates exactly the union it reports, through
+  // tools/oot3d/native_a32_runtime/whole_aot_hook_gates.json.
+  Oot3dNativeGame::Oot3dBlockEntryHookOptions blockEntryHookOptions;
+  blockEntryHookOptions.PlayerTemporal =
+      widescreenProjection.PlayerTemporalBridge != nullptr;
 #if !defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
-  blockEntryHooks.insert(blockEntryHooks.end(),
-                         typedGameplayObservableExitHooks.begin(),
-                         typedGameplayObservableExitHooks.end());
+  blockEntryHookOptions.TypedGameplayObservableExits = true;
 #endif
-  const auto &uiLifecycleEntries =
-      Oot3dNativeGame::Oot3dNativeUiLifecycleBridge::GuestEntryPoints();
-  blockEntryHooks.insert(blockEntryHooks.end(), uiLifecycleEntries.begin(),
-                         uiLifecycleEntries.end());
-  if (launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen) {
-    const std::array topScreenHooks{
-        Oot3dNativeGame::kTopScreenQuestMaterializedHook,
-        Oot3dNativeGame::kTopScreenQuestSubmitModelsHook,
-        Oot3dNativeGame::kTopScreenQuestDrawHook,
-        0x00300588U,
-        0x002FEABCU,
-        0x00311364U,
-        kPauseProjectionPrepare,
-        kPauseUiDraw,
-        kPauseUiDrawReturn,
-        kPauseRendererVisibilityNativeDraw,
-        kPauseIconBuild};
-    // Texture payloads are patched when the native pause owner has loaded
-    // them, before its update can submit HUD or pause draws.
-    blockEntryHooks.push_back(kPauseUiUpdate);
-    blockEntryHooks.insert(blockEntryHooks.end(), topScreenHooks.begin(),
-                           topScreenHooks.end());
-    const std::array topScreenSourcePortHooks{
-        kPauseTouchButtonsDrawCall,
-        kPauseTouchButtonsTouchBranch,
-        kPauseLowerScreenBlock,
-        kPauseUiNativeUpdateCall,
-        kPauseProjectionPrepareCall,
-        kPauseAlternateViewportDrawCall,
-        kPauseConditionalDrawCall,
-        kPauseRoutedCommandCallA,
-        kPauseRoutedCommandCallB,
-        kPauseOverlayViewportDrawCall,
-        kPauseAlternateRendererUpdateCall,
-        kPauseSceneSevenDrawCall,
-        kPauseSceneViewportDrawCall,
-        kPauseSceneFiveDrawCall,
-        Oot3dNativeGame::kTopScreenSystemPageBoundary,
-        kPauseTouchButtonsHeldDownQuery,
-        kPauseTouchCoordinateUpdateCall,
-        kPauseRendererVisibilityCall,
-        kPauseControllerDrawCall,
-        kTopScreenCameraNormal1Scalar,
-        kTopScreenCameraFovScalar,
-        kTopScreenCameraUpdateEntry,
-        kTopScreenCameraUpdatePatchSite,
-        kTopScreenGameplayCompositionPrefix,
-        Oot3dNativeGame::kTopScreenPageProjectionUploadCall,
-        Oot3dNativeGame::kTopScreenItemsPageDrawCall,
-        Oot3dNativeGame::kTopScreenItemsCursorDrawCallA,
-        Oot3dNativeGame::kTopScreenItemsCursorDrawCallB,
-    };
-    blockEntryHooks.insert(blockEntryHooks.end(),
-                           topScreenSourcePortHooks.begin(),
-                           topScreenSourcePortHooks.end());
-    for (const auto &contract :
-         Oot3dNativeGame::TopScreenVerifiedControlFlowContracts()) {
-      blockEntryHooks.push_back(contract.Entry);
-    }
-    for (const auto &contract :
-         Oot3dNativeGame::TopScreenVerifiedFloatLoadContracts()) {
-      blockEntryHooks.push_back(contract.Entry);
-    }
-    for (const auto pc : Oot3dNativeGame::TopScreenDungeonMapIconCoordinateSites())
-      blockEntryHooks.push_back(pc);
-    const auto itemHooks = Oot3dNativeGame::TopScreenItemDispatchEntries();
-    blockEntryHooks.insert(blockEntryHooks.end(), itemHooks.begin(), itemHooks.end());
-    blockEntryHooks.push_back(Oot3dNativeGame::kTopScreenInputUpdateBoundary);
+  blockEntryHookOptions.TopScreen =
+      launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen;
+  blockEntryHookOptions.ExtendedDiagnostics = launch.ExtendedDiagnostics;
+  blockEntryHookOptions.HdFonts = hdFontsLoaded;
+#if defined(__SWITCH__)
+  // Actor cost profile (config/actor_profile; off by default): its hooks
+  // exist only while it is on (oot3d_native_actor_profile.h).
+  if (std::error_code profileError;
+      std::filesystem::exists("sdmc:/switch/oot3dre/config/actor_profile", profileError)) {
+    actorProfile.emplace(Oot3dNativeGame::NativeProfileTicksPerMs());
+    widescreenProjection.ActorProfile = &*actorProfile;
+    blockEntryHookOptions.ActorProfile = true;
+    std::fprintf(stderr, "TRIAEVUM_ACTOR_PROFILE enabled=1 hooks=%zu\n",
+                 Oot3dNativeGame::NativeActorProfile::HookPcs().size());
   }
-  if (launch.ExtendedDiagnostics) {
-    const std::array diagnosticHooks{
-        kEnMagInit,
-        kEnMagUpdate,
-        kEnMagDraw,
-        kPauseUiUpdate,
-        kPauseUiDraw,
-        kFileSelectUpdate,
-        kFileSelectInit,
-        kFileChooseInit,
-        kPlayTransitionUpdate,
-        kFileSelectActivate,
-        kBlockingQueuePop,
-        kBlockingQueuePush,
-        kRendererCommandQueueProcessPending,
-        kBlockingQueueTryPush,
-        kTaskQueueTakeFirstFromPriority,
-        kTaskQueueEnqueuePriorityNode,
-        kTaskQueueWorkerDrainPriorityNodes,
-        kNngxP3dCallback,
-        kNngxCommonInterruptHandler,
-        kNngxCmdlistCompletionDispatch,
-        kRendererGlobalCallbackAfterLookup,
-    };
-    blockEntryHooks.insert(blockEntryHooks.end(), diagnosticHooks.begin(),
-                           diagnosticHooks.end());
+  // Indirect call profile (config/indirect_profile; off by default): the
+  // dispatcher counts call site and target pairs while it is installed
+  // (oot3d_native_indirect_profile.h). A PGO generate build has installed its
+  // session profile already (oot3d_whole_aot_pgo.cpp): the perf line reuses it.
+  if (std::error_code profileError;
+      std::filesystem::exists("sdmc:/switch/oot3dre/config/indirect_profile", profileError)) {
+    indirectProfile.emplace();
+    std::fprintf(stderr, "TRIAEVUM_INDIRECT_PROFILE enabled=1 shared=%d\n",
+                 indirectProfile->Shared() ? 1 : 0);
   }
-  std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
-  if (hdFontsLoaded) blockEntryHooks.push_back(Oot3dNativeGame::kNativeQbfA4Blit);
-  std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
-  blockEntryHooks.erase(
-      std::unique(blockEntryHooks.begin(), blockEntryHooks.end()),
-      blockEntryHooks.end());
+#endif
+  blockEntryHooks =
+      Oot3dNativeGame::Oot3dNativeBlockEntryHookPcs(blockEntryHookOptions);
 #if defined(__SWITCH__)
   gSwitchBlockHookCount = blockEntryHooks.size();
   gSwitchBlockHooksSorted =
@@ -826,6 +853,9 @@ void NativeA32WindowSession::Setup() {
   auto &uiLifecycleBridge = uiLifecycleBridgeStorage.emplace(
       process.Memory());
   uiLifecycleBridge.SetTopScreenConfig(activeTopScreenConfig);
+  uiLifecycleBridge.SetTopScreenUiAtlasAvailable(
+      topScreenTextureOverridePackPointer != nullptr &&
+      topScreenTextureOverridePack.FindProfileTexture(Oot3dNativeGame::kTopScreen30UiAtlasSemantic) != nullptr);
   uiLifecycleBridge.SetVersionChoiceRevealRequired(
       launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen);
   widescreenProjection.UiLifecycleBridge = &uiLifecycleBridge;
@@ -837,7 +867,7 @@ void NativeA32WindowSession::Setup() {
   const bool blockEntryForAll =
       launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks;
   if (guestProfiler.Active()) {
-    // O perfil vê todos os blocos e repassa à política só os ganchos dela.
+    // The profile sees every block and forwards to the policy only its hooks.
     guestProfiler.Chain(&ApplyNativeWidescreenProjectionPolicy,
                         &widescreenProjection, blockEntryHooks,
                         blockEntryForAll);
@@ -846,6 +876,35 @@ void NativeA32WindowSession::Setup() {
       blockEntryForAll || guestProfiler.Active()
           ? std::span<const uint32_t>{}
           : std::span<const uint32_t>{blockEntryHooks};
+  // Sparse whole-AOT code (--sparse-block-entries) calls the callback only at
+  // the PCs of whole_aot_hook_gates.json: refuse a hook outside them, and the
+  // every-block callback of --trace-a32-blocks/--profile-a32-blocks, here
+  // rather than let them silently never run (ExecuteOot3dCompiledFunction
+  // refuses the same at run time).
+  if (enableWholeAot) {
+    if (const std::string error = Oot3dNativeGame::Oot3dWholeAotHookGatesError(
+            Oot3dNativeGame::Oot3dLinkedWholeAotHookGates(), nativeBlockEntryPcs);
+        !error.empty())
+      throw std::runtime_error(error);
+#if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
+    // A gate runs only where the title module starts a block.
+    const auto entries = Oot3dNativeGame::Oot3dWholeAotEntryPoints();
+    std::vector<uint32_t> sortedEntries(entries.begin(), entries.end());
+    std::sort(sortedEntries.begin(), sortedEntries.end());
+    std::string missing;
+    for (const uint32_t pc : Oot3dNativeGame::Oot3dGameplayOptionBlockPcs()) {
+      if (!std::binary_search(sortedEntries.begin(), sortedEntries.end(), pc)) {
+        char text[16];
+        std::snprintf(text, sizeof(text), " 0x%08X", pc);
+        missing += text;
+      }
+    }
+    if (!missing.empty())
+      throw std::runtime_error(
+          "the title module does not start a block at the gameplay option sites" + missing +
+          "; rebuild it with whole_aot_observed_sites.json");
+#endif
+  }
   nativeCandidateDispatch = NativeCandidateDispatchState{
       guestProfiler.Active() ? &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry
                              : &ApplyNativeWidescreenProjectionPolicy,
@@ -884,8 +943,8 @@ void NativeA32WindowSession::Setup() {
   // After the rebuild above, which would discard an earlier assignment.
   nativeCandidateDispatch.ProductTopScreenBlocks = std::move(productTopScreenBlocks);
   if (nativeCandidateDispatch.TopScreenUiProfile) {
-    // Depuração: força o Game Over depois de N segundos de jogo (o texto do
-    // arquivo é N; vazio = 10). Sem o arquivo/variável, nada muda.
+    // Debugging: forces Game Over after N seconds of gameplay (the file's
+    // text is N; empty = 10). Without the file/variable, nothing changes.
 #if defined(__SWITCH__)
     std::ifstream debugGameOver("sdmc:/switch/oot3dre/config/debug_force_game_over");
     if (debugGameOver) {
@@ -928,11 +987,6 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.WholeAotObservableExitPcs =
       wholeAotObservableExitBlocks;
   process.SetTimingEnabled(launch.ProfileA32Runtime);
-  // Guest time per guest thread in logs/perf.txt (config/gpu_timing or
-  // config/thread_timing): which thread the audio chain runs on and its cost.
-  process.SetThreadTimingEnabled(
-      std::ifstream("sdmc:/switch/oot3dre/config/gpu_timing").good() ||
-      std::ifstream("sdmc:/switch/oot3dre/config/thread_timing").good());
 #if !defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
   // Native candidates are experimental reconstruction aids.  The product
   // executes the audited whole-AOT graph and never substitutes source-native
@@ -1009,16 +1063,36 @@ void NativeA32WindowSession::Setup() {
   submissionQueue.SetLeanCapture(offload.Capture);
   submissionQueue.SetSubRectDisplayTransfers(titleProfile.SubRectDisplayTransfers);
   picaFrontend.SetInPlaceDrawPackets(offload.Capture);
+  // config/capture_delta: only what changed per draw on this thread.
+  {
+    const bool captureDelta = Oot3dNativeGame::ReadNativeCaptureDelta();
+    submissionQueue.SetCaptureDelta(captureDelta);
+    picaFrontend.SetCaptureDelta(captureDelta);
+  }
+  // config/list_walk_fast: the command-list walk's dispatch table and batches.
+  picaFrontend.SetListWalkFast(Oot3dNativeGame::ReadNativeListWalkFast());
+  // config/vertex_snapshot_fast: index/vertex snapshots viewed and certified
+  // directly, compared page by page; certificates peek at clean cards
+  // (before the second core starts).
+  {
+    const bool vertexSnapshotFast = Oot3dNativeGame::ReadNativeVertexSnapshotFast();
+    submissionQueue.SetVertexSnapshotFast(vertexSnapshotFast);
+    Oot3dNativeGame::SetRangeWriteGenerationCardPeek(vertexSnapshotFast);
+  }
+  // config/texture_snapshot_fast: textures viewed and certified directly,
+  // found through a front table, compared page by page; the next packet
+  // prefetched.
+  submissionQueue.SetTextureSnapshotFast(Oot3dNativeGame::ReadNativeTextureSnapshotFast());
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
-  // config/async_status_writes: heartbeat do boot-status.txt por uma thread
-  // de serviço (oot3d_native_status_file.h).
-  asyncStatusWrites = Oot3dNativeGame::ReadNativeAsyncStatusWrites();
 #if defined(__SWITCH__)
   if (offload.Perf) {
     perfWriter.emplace("sdmc:/switch/oot3dre/logs/perf.txt");
     hitchWriter.emplace("sdmc:/switch/oot3dre/logs/hitches.txt", 64U);
     (void)hitchWriter->Push("session_start\n");
   }
+  // config/async_status_writes: boot-status.txt's heartbeat through a
+  // service thread (oot3d_native_status_file.h).
+  asyncStatusWrites = Oot3dNativeGame::ReadNativeAsyncStatusWrites();
 #endif
 
   hostArgs = launch.Host;
@@ -1043,6 +1117,14 @@ void NativeA32WindowSession::Setup() {
     std::error_code overridesError;
     if (std::filesystem::exists("sdmc:/switch/oot3dre/config/no_guest_overrides", overridesError)) {
       Oot3dNativeGame::SetOot3dGuestOverridesEnabled(false);
+    }
+    // Per-replacement A/B: hex entries and/or "mirror" (the Profile18
+    // round's replacements); logs/perf.txt "natives:" shows the effect.
+    std::ifstream disableList("sdmc:/switch/oot3dre/config/guest_overrides_disable");
+    if (disableList) {
+      const std::string list((std::istreambuf_iterator<char>(disableList)),
+                             std::istreambuf_iterator<char>());
+      Oot3dNativeGame::DisableOot3dGuestOverridesFromList(list);
     }
   }
 #endif
@@ -1122,7 +1204,20 @@ void NativeA32WindowSession::Setup() {
   applicationSettingsTabs.push_back(Oot3dNativeGame::CreateGameLanguagePanel(languageSettings));
 #if defined(__SWITCH__)
   applicationSettingsTabs.push_back(
+      Oot3dNativeGame::CreateGameplaySettingsPanel("sdmc:/switch/oot3dre/config"));
+#else
+  applicationSettingsTabs.push_back(Oot3dNativeGame::CreateGameplaySettingsPanel(
+      std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "config"));
+#endif
+#if defined(__SWITCH__)
+  applicationSettingsTabs.push_back(
       Oot3dNativeGame::CreateVideoSettingsPanel("sdmc:/switch/oot3dre/config"));
+#endif
+#if defined(__SWITCH__)
+  // OTA updates from GitHub Releases, and the version at the top of the menu.
+  applicationSettingsTabs.push_back(Oot3dNativeGame::CreateUpdatePanel("sdmc:/switch/oot3dre"));
+  Fast::Oot3d::DebugMenuTitleText().store(Oot3dNativeGame::BuildVersion(),
+                                          std::memory_order_relaxed);
 #endif
 #if defined(TRIAEVUM_DEVELOPER_TOOLS)
   devWarp = std::make_shared<Oot3dNativeGame::DevWarpRuntime>(
@@ -1182,7 +1277,20 @@ void NativeA32WindowSession::Setup() {
       std::move(applicationSettingsTabs));
   InitContextForDemo(hostArgs);
 #if defined(__SWITCH__)
+  // The game log exists from here: the lines kept before it (kernel_fast:,
+  // the Video panel's TRIAEVUM_PERF_*), then every later WriteGameLog line,
+  // queued for the logger's thread at warning level (the release logger
+  // drops info).
+  Oot3dNativeGame::GameLog().Attach([](const std::string &line) { SPDLOG_WARN("{}", line); });
   WriteSwitchBootStage("host_context_initialized");
+  // What the start-up constructor did with the code (oot3d_switch_code_pages.cpp):
+  // remapped (size, time), off or why it stayed on 4 KB pages. Warning level:
+  // the release logger drops info.
+  SPDLOG_WARN("{}", Oot3dNativeGame::FormatCodePagesStatus(
+                        Oot3dNativeGame::CurrentCodePagesStatus()));
+  // Instrumented (PGO generate) builds: where the counts go.
+  if (const std::string pgo = Oot3dNativeGame::Oot3dWholeAotPgoDescribe(); !pgo.empty())
+    SPDLOG_WARN("{}", pgo);
 #endif
 #if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE) && defined(_WIN32)
   std::string crashDiagnosticsError;
@@ -1232,6 +1340,138 @@ void NativeA32WindowSession::Setup() {
 #endif
   auto &nativeUiTextureProvider = nativeUiTextureProviderStorage.emplace(
       picaMemoryView, topScreenTextureOverridePackPointer);
+  // TopScreen's HD UI atlas (on the Switch, config/topscreen_ui_atlas_hd.png
+  // from the mod's 4096x2048 redraw reduced to 3x): it replaces the exact
+  // native ui_atlas bytes, and a texture pack image of that atlas wins. A
+  // missing or unusable file keeps the native atlas.
+  // Ported from upstream TriAevum (coccofresco/TriAevum commit 14edc1eb,
+  // GPL-3.0-or-later).
+  std::shared_ptr<const Oot3dNativeGame::Oot3dUiHdAtlas> uiHdAtlas;
+  if (!launch.TopScreenUiAtlasHdPath.empty() && topScreenTextureOverridePackPointer != nullptr) {
+    const auto *native = topScreenTextureOverridePack.FindProfileTexture("oot3d/topscreen/3.0/ui_atlas");
+    int width = 0, height = 0, channels = 0;
+    stbi_uc *decoded = native == nullptr ? nullptr
+                                         : stbi_load(launch.TopScreenUiAtlasHdPath.string().c_str(),
+                                                     &width, &height, &channels, 4);
+    if (native == nullptr) {
+      std::fprintf(stderr, "topscreen: HD UI atlas unused: the texture pack has no 3.0 ui_atlas\n");
+    } else if (decoded == nullptr) {
+      std::fprintf(stderr, "topscreen: HD UI atlas unused: cannot decode %s (%s)\n",
+                   launch.TopScreenUiAtlasHdPath.string().c_str(),
+                   stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+    } else if (!Oot3dNativeGame::IsUiHdAtlasSize(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                                                 native->Width, native->Height)) {
+      std::fprintf(stderr, "topscreen: HD UI atlas unused: %dx%d is not a whole multiple of %ux%u\n", width,
+                   height, static_cast<unsigned>(native->Width), static_cast<unsigned>(native->Height));
+    } else {
+      auto atlas = std::make_shared<Oot3dNativeGame::Oot3dUiHdAtlas>();
+      atlas->rgba8 = std::make_shared<const std::vector<uint8_t>>(
+          decoded, decoded + static_cast<size_t>(width) * static_cast<size_t>(height) * 4U);
+      atlas->width = static_cast<uint32_t>(width);
+      atlas->height = static_cast<uint32_t>(height);
+      atlas->native_payload = native->EncodedPayload;
+      uiHdAtlas = std::move(atlas);
+      std::fprintf(stderr, "topscreen: HD UI atlas %dx%d (%zu KiB)\n", width, height,
+                   uiHdAtlas->rgba8->size() / 1024U);
+    }
+    if (decoded != nullptr) stbi_image_free(decoded);
+  }
+  // The mod's HD images of the game's own HUD textures (on the Switch,
+  // config/topscreen_hd/, 3x): Azahar names them by its legacy hash of the
+  // native texture, so each is matched the way a legacy-hash pack would be.
+  struct UiHdImage {
+    uint16_t NativeWidth = 0, NativeHeight = 0;
+    uint8_t NativeFormat = 0;
+    uint64_t LegacyHash = 0;
+    Oot3dNativeGame::Oot3dUiHdAtlas Image;
+  };
+  auto uiHdImages = std::make_shared<std::vector<UiHdImage>>();
+  if (!launch.TopScreenHdTexturesPath.empty() && topScreenTextureOverridePackPointer != nullptr) {
+    std::error_code listError;
+    for (const auto &entry : std::filesystem::directory_iterator(launch.TopScreenHdTexturesPath, listError)) {
+      const std::string name = entry.path().filename().string();
+      unsigned width = 0, height = 0, format = 0;
+      unsigned long long hash = 0;
+      int consumed = 0;
+      if (std::sscanf(name.c_str(), "tex1_%ux%u_%16llX_%u_mip0.png%n", &width, &height, &hash, &format,
+                      &consumed) != 4 ||
+          static_cast<size_t>(consumed) != name.size() || width == 0U || height == 0U || width > 1024U ||
+          height > 1024U || format > 13U) {
+        continue;
+      }
+      int imageWidth = 0, imageHeight = 0, channels = 0;
+      stbi_uc *decoded = stbi_load(entry.path().string().c_str(), &imageWidth, &imageHeight, &channels, 4);
+      if (decoded == nullptr) {
+        std::fprintf(stderr, "topscreen: HD image unused: cannot decode %s (%s)\n", name.c_str(),
+                     stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+        continue;
+      }
+      if (!Oot3dNativeGame::IsUiHdAtlasSize(static_cast<uint32_t>(imageWidth), static_cast<uint32_t>(imageHeight),
+                                            width, height)) {
+        std::fprintf(stderr, "topscreen: HD image unused: %s is %dx%d, not a whole multiple of %ux%u\n",
+                     name.c_str(), imageWidth, imageHeight, width, height);
+      } else {
+        UiHdImage image;
+        image.NativeWidth = static_cast<uint16_t>(width);
+        image.NativeHeight = static_cast<uint16_t>(height);
+        image.NativeFormat = static_cast<uint8_t>(format);
+        image.LegacyHash = hash;
+        image.Image.rgba8 = std::make_shared<const std::vector<uint8_t>>(
+            decoded, decoded + static_cast<size_t>(imageWidth) * static_cast<size_t>(imageHeight) * 4U);
+        image.Image.width = static_cast<uint32_t>(imageWidth);
+        image.Image.height = static_cast<uint32_t>(imageHeight);
+        uiHdImages->push_back(std::move(image));
+        std::fprintf(stderr, "topscreen: HD image %s %dx%d\n", name.c_str(), imageWidth, imageHeight);
+      }
+      stbi_image_free(decoded);
+    }
+  }
+  // HUD textures resolve the player's texture pack exactly as native PICA
+  // uploads do (same identity, same async decode) while HD textures are on,
+  // reduced to 3x native (kUiTextureMaxScale) whatever "HD texture size"
+  // says. The pack's generation changes when HD textures are turned on or
+  // off, so the UI renderer resolves its textures again at once. A request
+  // ahead of the first draw (N64UiFast3dRenderer::RequestAhead) only queues.
+  // The legacy hash (Henriko's pack; the HD images) is computed once per
+  // texture and returned for the provider's identity cache: a texture
+  // resolved again (a pack change, a poll) comes with both hashes and is
+  // neither decoded nor hashed again here.
+  nativeUiTextureProvider.SetCustomTextureSource({
+      [uiHdAtlas, uiHdImages](const Oot3dNativeGame::Oot3dNativeUiCustomTextureRequest &request) {
+        Oot3d::Renderer::AzaharTextureRequest identity{
+            .Width = request.width,
+            .Height = request.height,
+            .NativeFormat = request.native_pica_format,
+            .MipLevel = 0U,
+            .NativeBytes = request.encoded_base_level,
+            .NativeRgba8 = request.rgba8,
+            .UserInterface = true,
+            .Ahead = request.ahead,
+            .KnownModernHash = request.modern_hash,
+            .KnownLegacyHash = request.legacy_hash,
+        };
+        if (!identity.KnownLegacyHash && !request.ahead) {
+          std::string error;
+          const uint64_t legacy = Oot3d::Renderer::ComputeAzaharTextureHash(identity, false, &error);
+          if (error.empty()) identity.KnownLegacyHash = legacy;
+        }
+        const auto pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue(identity);
+        const Oot3dNativeGame::Oot3dUiHdAtlas *hdImage = nullptr;
+        for (const auto &image : *uiHdImages) {
+          if (image.NativeWidth == request.width && image.NativeHeight == request.height &&
+              image.NativeFormat == request.native_pica_format && identity.KnownLegacyHash == image.LegacyHash) {
+            hdImage = &image.Image;
+            break;
+          }
+        }
+        auto custom = Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get(), hdImage);
+        custom.legacy_hash = identity.KnownLegacyHash;
+        return custom;
+      },
+      // Not bumped by a change of only "HD texture size" (HUD images are 3x
+      // whatever it says): the HUD does nothing then.
+      [] { return Oot3d::Renderer::AzaharTexturePackRuntime::Instance().UiRevision(); },
+  });
   if (hdFontsLoaded) nativeUiTextureProvider.SetGeneratedTextureTransform(
       [&](const Oot3dNativeGame::Oot3dPicaTextureState& texture,
           Oot3dNativeGame::Oot3dPicaResourceSnapshot& resource) {
@@ -1251,6 +1491,18 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.ItemDescription = &itemDescription;
   auto &wideItems = wideItemsStorage.emplace(process.Memory());
   nativeCandidateDispatch.WideItems = &wideItems;
+  // Roll dash (L3+R3 > Game > Gameplay, config/roll_dash; oot3d_roll_dash.h):
+  // its block-entry hooks are always in the list, inert while it is off.
+#if defined(__SWITCH__)
+  const std::filesystem::path rollDashConfig = "sdmc:/switch/oot3dre/config";
+#else
+  const std::filesystem::path rollDashConfig =
+      std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "config";
+#endif
+  auto &rollDash = rollDashStorage.emplace(
+      process.Memory(), rollDashConfig / Oot3dNativeGame::kRollDashAnimationsName);
+  widescreenProjection.RollDash = &rollDash;
+  widescreenProjection.SimpleShadow = &simpleShadow;
   auto &uiRenderBackend = uiRenderBackendStorage.emplace(api);
   auto &n64UiRenderer = n64UiRendererStorage.emplace(uiRenderBackend,
                                                &ocarinaText);
@@ -1370,6 +1622,40 @@ void NativeA32WindowSession::Setup() {
                    process.Memory().RangeWatchActive() ? 1 : 0,
                    process.Memory().WatchedRangeCount());
     }
+  }
+  // fastmem window (config/fastmem_window; SWITCH_PORT.md "fastmem window"):
+  // where the image's regions live once the image is mounted, or why they
+  // stay on the heap, and whether the guest's typed accesses take the window
+  // (access=window) or the slow path for every access (access=slow).
+  // Warning level: the release logger drops info.
+  {
+    const std::string fastmemWindow =
+        Oot3dNativeGame::GuestWindow::FormatStatus(Oot3dNativeGame::GuestWindow::CurrentStatus()) +
+        (process.Memory().InGuestWindow() ? " access=window" : " access=slow");
+#if defined(__SWITCH__)
+    SPDLOG_WARN("{}", fastmemWindow);
+#else
+    std::fprintf(stderr, "%s\n", fastmemWindow.c_str());
+#endif
+  }
+  // config/second_core (SWITCH_PORT.md "Second guest core"; desktop:
+  // TRIAEVUM_SECOND_CORE=1): guest threads that ask for processor 1 run on
+  // their own host thread on core 1. Absent = every guest thread on the game
+  // thread, as before. Started before the first guest code and before an
+  // initial savestate load, which then places its threads.
+  {
+    bool secondCore = false;
+#if defined(__SWITCH__)
+    std::error_code secondCoreError;
+    secondCore = std::filesystem::exists(
+        "sdmc:/switch/oot3dre/config/second_core", secondCoreError);
+#else
+    if (const char *value = std::getenv("TRIAEVUM_SECOND_CORE")) {
+      secondCore = std::string_view(value) != "0";
+    }
+#endif
+    std::fprintf(stderr, "TRIAEVUM_SECOND_CORE enabled=%d\n", secondCore ? 1 : 0);
+    if (secondCore) StartSecondCore();
   }
   if (!launch.LoadStatePath.empty()) {
 #if defined(__SWITCH__)
@@ -1550,6 +1836,11 @@ void NativeA32WindowSession::Setup() {
   // changes against its own copies.
   guestCompositionPolicy = frameCompositionPolicy;
   guestInterpolationEnabled = visualInterpolationEnabled;
+#if defined(__SWITCH__)
+  // The receipt's visual_interpolation: what the start presents (the launch
+  // contract allows it at both rates since the FPS switches live).
+  gSwitchVisualInterpolation = visualInterpolationEnabled;
+#endif
   lastPresentationTime = std::chrono::steady_clock::now();
   picaPresentationScheduler.SetTimingEnabled(launch.ExtendedDiagnostics);
 #if defined(__SWITCH__)
@@ -1566,11 +1857,11 @@ void NativeA32WindowSession::Setup() {
 #endif
   api.SetPicaPhysicalMemoryAccess(
       [&](uint32_t address, std::span<uint8_t> bytes) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("memory read");
         return picaMemoryView.Read(address, bytes);
       },
       [&](std::span<const Fast::Renderer3ds::PicaPhysicalMemoryWrite> writes) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("memory write");
         // The writeback is the renderer writing the copy itself, not a guest or
         // service access; keep it out of the guest-access counters. Scope, not
         // a pair of calls: an early return must not leave the watch suppressed.
@@ -1592,7 +1883,7 @@ void NativeA32WindowSession::Setup() {
       },
       [&](std::span<const Fast::Renderer3ds::PicaRawCopySpan> spans,
           Fast::Renderer3ds::PicaRenderBackend::PhysicalMemoryRead reader) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("raw copy");
         std::vector<std::pair<uint32_t, size_t>> ranges;
         for (const auto& span : spans) {
           if (!picaMemoryView.ForEachGuestAlias(span.DestinationAddress, span.ByteCount,
@@ -1616,14 +1907,14 @@ void NativeA32WindowSession::Setup() {
             });
       },
       [&](uint64_t) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("PPF interrupt");
         if (!hostServices.SignalPicaInterrupt(process.Memory(), Oot3dNativeGame::Oot3dPicaInterruptId::Ppf)) return false;
         ++picaStats.CompletedPpfCount;
         ++picaStats.RecordedCompletionCount;
         return true;
       },
       [&]() {
-        RequireStoppedGuest();
+        RequireStoppedGuest("deferred writes");
         return process.Memory().MaterializeDeferredWrites();
       });
   physicalMemoryAccessLifetime.emplace(api);
@@ -1726,7 +2017,7 @@ void NativeA32WindowSession::Setup() {
       std::error_code framesInFlightError;
       if (std::filesystem::exists("sdmc:/switch/oot3dre/config/frames_in_flight",
                                   framesInFlightError)) {
-        std::fprintf(stderr, "TRIAEVUM frames_in_flight ignorado (1 quadro em voo)\n");
+        std::fprintf(stderr, "TRIAEVUM frames_in_flight ignored (1 frame in flight)\n");
       }
       renderStream.SetMaxFramesInFlight(1U);
     }
@@ -1797,6 +2088,42 @@ void NativeA32WindowSession::Setup() {
             "sdmc:/switch/oot3dre/config/no_texture_predecode", picaPlanError);
 #endif
     picaPlanBuilder.SetPredecodeTextures(predecodeTextures);
+    // Plan build cost per draw (SWITCH_PORT.md): the canonical identity is
+    // left out where nothing reads it (deko3d without the semantic trace or
+    // extended diagnostics, whose serial builds share these options), plans
+    // are built in place, and the worker and the render thread build
+    // different slots at once. Kill switches: config/plan_full_identity,
+    // config/plan_copy_build, config/plan_one_lock. Desktop:
+    // TRIAEVUM_PLAN_BUILD=legacy turns all three off.
+    {
+      bool fullIdentity = false;
+      bool copyBuild = false;
+      bool oneLock = false;
+#if defined(__SWITCH__)
+      fullIdentity = std::filesystem::exists(
+          "sdmc:/switch/oot3dre/config/plan_full_identity", picaPlanError);
+      copyBuild = std::filesystem::exists(
+          "sdmc:/switch/oot3dre/config/plan_copy_build", picaPlanError);
+      oneLock = std::filesystem::exists(
+          "sdmc:/switch/oot3dre/config/plan_one_lock", picaPlanError);
+#else
+      const char* planBuildEnvironment = std::getenv("TRIAEVUM_PLAN_BUILD");
+      if (planBuildEnvironment != nullptr &&
+          std::string_view(planBuildEnvironment) == "legacy") {
+        fullIdentity = copyBuild = oneLock = true;
+      }
+#endif
+      const bool identityUnread =
+          std::string_view(apiPointer->GetName()) == "deko3d" &&
+          !picaSemanticTrace.Enabled() && !launch.ExtendedDiagnostics;
+      picaPlanBuilder.SetBuildOptions(!identityUnread || fullIdentity,
+                                      !copyBuild, !oneLock);
+      std::fprintf(stderr,
+                   "TRIAEVUM_PLAN_BUILD canonical_identity=%d in_place=%d "
+                   "parallel=%d\n",
+                   (!identityUnread || fullIdentity) ? 1 : 0, copyBuild ? 0 : 1,
+                   oneLock ? 0 : 1);
+    }
     picaPlanBuilder.Configure(deferredPicaPlans && parallelPresentation,
                               picaPlanWorker);
   }
@@ -1844,6 +2171,13 @@ void NativeA32WindowSession::Setup() {
       options.ReducedAlways = trimmed(*text) == "always";
     if (const auto text = readText("native_replay", "TRIAEVUM_NATIVE_REPLAY"))
       options.ForceNativeReplay = trimmed(*text) == "1";
+    // config/pacer_entry_recover (TRIAEVUM_PACER_ENTRY_RECOVER): on without
+    // the file; "0" keeps the former probe schedule and counts the
+    // render-thread holds as frame work (SWITCH_PORT.md "60 FPS back sooner
+    // after entering an area").
+    if (const auto text =
+            readText("pacer_entry_recover", "TRIAEVUM_PACER_ENTRY_RECOVER"))
+      options.PacerEntryRecover = trimmed(*text) != "0";
     // Draws that exist in only one of two guest frames (culling/LOD while
     // the camera turns fast; oot3d_native_pica_visual_frame.h): the step
     // frame shows the previous guest frame itself (config/interp_exact_step)
@@ -1862,6 +2196,11 @@ void NativeA32WindowSession::Setup() {
         transitionOptions.CarryUnmatched = trimmed(*text) != "0";
       preparedVisualTransition.SetOptions(transitionOptions);
     }
+    // config/interp_menu (TRIAEVUM_INTERP_MENU): "1" interpolates the
+    // TopScreen pause menu at 60 FPS as before; otherwise its in-between
+    // frames show the step image (oot3d_top_screen_menu_cadence.h).
+    if (const auto text = readText("interp_menu", "TRIAEVUM_INTERP_MENU"))
+      options.MenuInterpolation = trimmed(*text) == "1";
     // config/dynamic_resolution (TRIAEVUM_DYNAMIC_RESOLUTION): present = on;
     // optional text = lowest scale (oot3d_native_dynamic_resolution.h).
     if (const auto text =
@@ -1869,6 +2208,14 @@ void NativeA32WindowSession::Setup() {
       options.DynamicResolution = true;
       options.DynamicResolutionText = trimmed(*text);
     }
+    // config/drs_60 (TRIAEVUM_DRS_60): "full" holds the full scale at 60
+    // FPS (L3+R3 > Video > Resolution at 60 FPS; the menu changes it live).
+    if (const auto text = readText("drs_60", "TRIAEVUM_DRS_60"))
+      options.DynamicResolutionSixty =
+          Oot3dNativeGame::ParseDynamicResolutionSixtyMode(trimmed(*text));
+    std::fprintf(stderr, "TRIAEVUM_DRS_60 mode=%s\n",
+                 Oot3dNativeGame::DynamicResolutionSixtyModeName(
+                     options.DynamicResolutionSixty).data());
     // config/fps60_mode: legacy (default), adaptive, strict60 (A/B of the
     // presentation cadence, oot3d_native_cadence_governor.h). Without it,
     // config/interp_pacing=0 keeps its meaning (every in-between frame
@@ -1962,9 +2309,33 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   const auto graphics = Fast::Oot3d::GraphicsSettingsRuntime::Instance().Snapshot();
   widescreenProjection.Projection.FovMultiplier = graphics.FovMultiplier;
   auto &visibility = widescreenProjection.ActorVisibility;
-  visibility.ExtendedDrawDistance = graphics.ExtendedDrawDistance;
+  // F1 > Display > Extended draw distance (PC) or L3+R3 > Video > Draw
+  // distance (Switch, config/draw_distance): the farther one wins.
+  const auto choice = Oot3dNativeGame::LiveActorDrawDistance().load(std::memory_order_relaxed);
+  visibility.DistanceMultiplier = std::max(
+      graphics.ExtendedDrawDistance ? Oot3dNativeGame::kExtendedActorDistanceMultiplier : 1.0F,
+      Oot3dNativeGame::ActorDrawDistanceMultiplier(choice));
+  visibility.ExtendGroups = choice != Oot3dNativeGame::ActorDrawDistance::Original &&
+                            !Oot3dNativeGame::LiveDrawDistanceNativeGroups().load(std::memory_order_relaxed);
+  visibility.NoKokiriFade = graphics.ExtendedDrawDistance;
+  visibility.ExtensionLimit = Oot3dNativeGame::ActorExtensionLimit(choice);
+  // Game log: the effective draw distance at start and on each change.
+  if (auto line = Oot3dNativeGame::TakeNativeActorVisibilitySettingsLine(visibility, choice))
+    Oot3dNativeGame::WriteGameLog(std::move(*line));
   visibility.Presentation = widescreenProjection.Projection.Presentation;
   visibility.FovMultiplier = graphics.FovMultiplier;
+}
+
+void NativeA32WindowSession::UpdateRollDash() {
+  if (!rollDashStorage.has_value()) return;
+  auto &rollDash = *rollDashStorage;
+  rollDash.Prepare(Oot3dNativeGame::RollDashEnabled().load(std::memory_order_relaxed));
+  // Game log: the Gameplay settings at start and on each change.
+  if (auto line = rollDash.TakeSettingsLine(
+          Oot3dNativeGame::LandingRollEnabled().load(std::memory_order_relaxed)))
+    Oot3dNativeGame::WriteGameLog(std::move(*line));
+  if (auto line = gameplayOptionsLog.Take())
+    Oot3dNativeGame::WriteGameLog(std::move(*line));
 }
 
 bool NativeA32WindowSession::WidescreenMenuCornersActive() {

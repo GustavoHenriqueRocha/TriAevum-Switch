@@ -11,11 +11,10 @@ struct ComposedMotion {
 
 // Relative orientation of a virtual 3DS with respect to the physical controller.
 // Transform gravity and body rates together; never feed virtual gyro against
-// unrelated physical gravity to the guest's sensor fusion. O SensorToVirtual é
-// só um offset preso ao corpo (pitch sintético e alinhamento da troca de dono):
-// o yaw sintético é em torno do "para cima" do mundo, invisível na gravidade e
-// nas taxas do corpo, e não é guardado; as taxas físicas mapeiam igual depois
-// de qualquer quantidade dele.
+// unrelated physical gravity to the guest's sensor fusion. SensorToVirtual is a
+// body-fixed offset (synthetic pitch and handoff alignment) only: synthetic yaw
+// is about world up, invisible in body-frame gravity and rates, and is not
+// stored, so physical rates map the same way after any amount of it.
 struct MotionCompositionState {
     std::array<double, 4> SensorToVirtual{1, 0, 0, 0};
     std::array<float, 3> LastGravity{0, -1, 0};

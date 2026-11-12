@@ -394,8 +394,8 @@ int main() {
 #endif
     RunSpecialGrid();
 #if defined(OOT3D_VFP_TEST_QUICK)
-    // Só para as mutações (run_vfp_zero_aware_mutations.sh): grade especial
-    // e uma campanha curta; o teste completo é o de baixo.
+    // Only for the mutations (run_vfp_zero_aware_mutations.sh): special grid
+    // and a short campaign; the full test is the one below.
     RunCampaign(0x0A32F00DULL, 20000U);
 #else
     RunUnarySweep();

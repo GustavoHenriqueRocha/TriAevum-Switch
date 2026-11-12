@@ -16,8 +16,8 @@ namespace {
 
 constexpr float kFactor169 = (16.0F / 9.0F) / (5.0F / 3.0F); // 1.0667
 
-// Ortográfica girada com o framebuffer, como Mtx4x4_BuildOrthographicProjectionRotated:
-// clip x a partir do y de view (altura `height`), clip y a partir do x (largura `width`).
+// Orthographic rotated with the framebuffer, like Mtx4x4_BuildOrthographicProjectionRotated:
+// clip x from view y (height `height`), clip y from x (width `width`).
 std::array<float, 16> RotatedOrtho(float width, float height) {
     return {0.0F, 2.0F / height, 0.0F, 0.0F,
             -2.0F / width, 0.0F, 0.0F, 0.0F,
@@ -25,8 +25,8 @@ std::array<float, 16> RotatedOrtho(float width, float height) {
             0.0F, 0.0F, 0.0F, 1.0F};
 }
 
-// Perspectiva girada: `aspect` = largura/altura do frustum, `widen` = quanto o
-// hook de projeção alargou o eixo horizontal.
+// Rotated perspective: `aspect` = frustum width/height, `widen` = how much the
+// projection hook widened the horizontal axis.
 std::array<float, 16> RotatedPerspective(float aspect, float widen = 1.0F) {
     const float fy = 1.0F / std::tan(0.5F);
     const float fx = fy / aspect / widen;
@@ -51,19 +51,19 @@ TEST(GlWidescreenMenuPolicy, DecodesProjectionShapes) {
 }
 
 TEST(GlWidescreenMenuPolicy, NativeMappingIsSquareForSceneAndUi) {
-    // Cena: frustum 5:3 no viewport 480x400 (eixo vertical com 2 amostras/linha).
+    // Scene: 5:3 frustum in the 480x400 viewport (vertical axis with 2 samples/row).
     const auto scene = DecodeGlProjection(RotatedPerspective(5.0F / 3.0F));
     EXPECT_NEAR(GlNativePixelAnisotropy(scene, 480.0F, 400.0F, 480U), 1.0F, 1.0e-4F);
-    // O hook alargou o frustum: 1/fator.
+    // The hook widened the frustum: 1/factor.
     const auto wide = DecodeGlProjection(RotatedPerspective(5.0F / 3.0F, kFactor169));
     EXPECT_NEAR(GlNativePixelAnisotropy(wide, 480.0F, 400.0F, 480U), 1.0F / kFactor169, 1.0e-4F);
-    // UI ortográfica 400x240 na tela inteira e o menu de baixo realocado
-    // (320x240 no viewport Y 40..360).
+    // Orthographic 400x240 UI over the whole screen and the relocated bottom menu
+    // (320x240 in the Y 40..360 viewport).
     EXPECT_NEAR(GlNativePixelAnisotropy(DecodeGlProjection(RotatedOrtho(400.0F, 240.0F)),
                                         480.0F, 400.0F, 480U), 1.0F, 1.0e-4F);
     EXPECT_NEAR(GlNativePixelAnisotropy(DecodeGlProjection(RotatedOrtho(320.0F, 240.0F)),
                                         480.0F, 320.0F, 480U), 1.0F, 1.0e-4F);
-    // Ortográfica -1..1 nos dois eixos (lavagem de tela): não é quadrada.
+    // Orthographic -1..1 on both axes (screen wash): not square.
     EXPECT_FALSE(GlAnisotropyNear(
         GlNativePixelAnisotropy(DecodeGlProjection(RotatedOrtho(2.0F, 2.0F)), 480.0F, 400.0F, 480U),
         1.0F));
@@ -78,7 +78,7 @@ GlWidescreenDrawEvidence FullViewport() {
 
 GlWidescreenDrawEvidence RelocatedMenuDraw();
 
-// Menu de baixo realocado no quadro, com os cantos de baixo nas bordas.
+// Relocated bottom menu in the frame, with the bottom corners at the edges.
 const GlWidescreenDrawPlacement kRelocatedCanvas{true, false, false, 1.0F, true};
 
 TEST(GlWidescreenMenuPolicy, KeepsFormerRulesWhenDisabled) {
@@ -89,7 +89,7 @@ TEST(GlWidescreenMenuPolicy, KeepsFormerRulesWhenDisabled) {
     ui.GeometryCoversViewport = true;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(ui, kFactor169, false),
               (GlWidescreenDrawPlacement{false, false}));
-    // Fora do domínio Ui nada muda, nem o menu realocado nem um painel.
+    // Outside the Ui domain nothing changes, neither the relocated menu nor a panel.
     auto relocated = FullViewport();
     relocated.ViewportCoversTarget = false;
     relocated.ViewportSpansPresentedWidth = false;
@@ -98,7 +98,7 @@ TEST(GlWidescreenMenuPolicy, KeepsFormerRulesWhenDisabled) {
     panel.Projection = GlProjectionShape::Orthographic;
     panel.PixelAnisotropy = 1.0F;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(panel, kFactor169, false).Canvas);
-    // Nem a compensação da perspectiva na UI.
+    // Nor the perspective compensation in the UI.
     auto model = FullViewport();
     model.UiDomain = true;
     model.Projection = GlProjectionShape::Perspective;
@@ -113,9 +113,9 @@ TEST(GlWidescreenMenuPolicy, SceneStaysStretched) {
     scene.PixelAnisotropy = 1.0F / kFactor169;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(scene, kFactor169, true),
               (GlWidescreenDrawPlacement{false, false}));
-    // Sem projeção reconhecível, também.
+    // Without a recognizable projection, too.
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(FullViewport(), kFactor169, true).Canvas);
-    // Fade/lavagem ortográfica que cobre a tela: estica.
+    // Orthographic fade/wash covering the screen: stretches.
     auto wash = FullViewport();
     wash.Projection = GlProjectionShape::Orthographic;
     wash.PixelAnisotropy = 1.0F;
@@ -130,10 +130,10 @@ TEST(GlWidescreenMenuPolicy, OrthographicPanelsGoToTheCanvas) {
     EXPECT_TRUE(GlWidescreenOrthographicPanelCandidate(panel));
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(panel, kFactor169, true),
               (GlWidescreenDrawPlacement{true, false}));
-    // Pixels não quadrados (desenho de tela inteira intencional): não.
+    // Non-square pixels (intentional full-screen drawing): no.
     panel.PixelAnisotropy = 1.0F / kFactor169;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(panel, kFactor169, true).Canvas);
-    // Redesenho de cópia do quadro e atmosfera ficam com a cena.
+    // Frame-copy redraw and atmosphere stay with the scene.
     panel.PixelAnisotropy = 1.0F;
     panel.SamplesRenderedCopy = true;
     EXPECT_FALSE(GlWidescreenOrthographicPanelCandidate(panel));
@@ -148,28 +148,28 @@ TEST(GlWidescreenMenuPolicy, RelocatedLowerMenuGoesToTheCanvas) {
     menu.ViewportSpansPresentedWidth = false; // Y 40..360
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true),
               (kRelocatedCanvas));
-    // Mesmo um fundo que cobre o próprio viewport do menu.
+    // Even a background covering the menu's own viewport.
     menu.GeometryCoversViewport = true;
     EXPECT_TRUE(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true).Canvas);
-    // Um modelo 3D do menu cujo frustum o hook alargou é compensado.
+    // A 3D menu model whose frustum the hook widened is compensated.
     menu.Projection = GlProjectionShape::Perspective;
     menu.PixelAnisotropy = 1.0F / kFactor169;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true),
               (GlWidescreenDrawPlacement{true, true}));
-    // Perspectiva não alargada: só o quadro.
+    // Non-widened perspective: just the frame.
     menu.PixelAnisotropy = 1.0F;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true),
               (kRelocatedCanvas));
-    // Cópia do quadro: fica com a cena.
+    // Frame copy: stays with the scene.
     menu.SamplesRenderedCopy = true;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true).Canvas);
 }
 
 TEST(GlWidescreenMenuPolicy, UiFadeOfTheRelocatedMenuCoversTheWholeTarget) {
-    // Trace do host, transição seleção de arquivo -> jogo: o preto é um quad
-    // do domínio Ui (dom=2, camada 4), sem textura, 4 vértices, com a
-    // ortográfica 400x240 da tela de cima (c1 = -1/200) no viewport do menu
-    // 0,40,480,320 (anisotropia 0,8). Antes: quadro, só x 160..1120.
+    // Host trace, file select -> game transition: the black is a quad
+    // in the Ui domain (dom=2, layer 4), untextured, 4 vertices, with the
+    // top screen's 400x240 orthographic (c1 = -1/200) in the menu viewport
+    // 0,40,480,320 (anisotropy 0.8). Before: frame, only x 160..1120.
     auto fade = RelocatedMenuDraw();
     fade.UiDomain = true;
     fade.Untextured = true;
@@ -184,20 +184,20 @@ TEST(GlWidescreenMenuPolicy, UiFadeOfTheRelocatedMenuCoversTheWholeTarget) {
     const auto placement = ResolveGlWidescreenDrawPlacement(fade, kFactor169, true);
     EXPECT_TRUE(placement.FillTarget);
     EXPECT_FLOAT_EQ(placement.FillHorizontalExtent, 1.0F);
-    // No trace o recorte do jogo está desligado (modo 0); ligado, respeita-se.
+    // In the trace the game scissor is off (mode 0); when on, it is respected.
     fade.GuestScissor = true;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(fade, kFactor169, true).FillTarget);
-    // Desligado: regra anterior do domínio Ui (quadro).
+    // Off: previous Ui-domain rule (frame).
     fade.GuestScissor = false;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(fade, kFactor169, false),
               (GlWidescreenDrawPlacement{true, false}));
 }
 
 TEST(GlWidescreenMenuPolicy, RelocatedMenuIgnoresTheAtmosphereLayer) {
-    // Trace do host (seleção/escolha de modo com TopScreen): os draws do menu
-    // realocado vêm com camada 3 (atmosfera), ortográficos 320x240
-    // (c0 = 0,-1/120,0,1; c1 = -1/160,0,0,1), anisotropia 1. Antes iam
-    // esticados: a aba BACK em x 128..310 de 1280, fora do canto do menu.
+    // Host trace (select/mode choice with TopScreen): the relocated menu's
+    // draws come with layer 3 (atmosphere), orthographic 320x240
+    // (c0 = 0,-1/120,0,1; c1 = -1/160,0,0,1), anisotropy 1. Before they were
+    // stretched: the BACK tab at x 128..310 of 1280, outside the menu corner.
     auto back = RelocatedMenuDraw();
     back.Atmosphere = true;
     back.Projection = GlProjectionShape::Orthographic;
@@ -208,17 +208,17 @@ TEST(GlWidescreenMenuPolicy, RelocatedMenuIgnoresTheAtmosphereLayer) {
     EXPECT_NEAR(back.PixelAnisotropy, 1.0F, 1.0e-4F);
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(back, kFactor169, true),
               (kRelocatedCanvas));
-    // O fade dele também cobre a tela.
+    // Its fade also covers the screen.
     back.Untextured = true;
     back.GeometryCoversViewport = true;
     EXPECT_TRUE(ResolveGlWidescreenDrawPlacement(back, kFactor169, true).FillTarget);
-    // Na tela inteira (Y 0..400) a atmosfera continua presa à cena.
+    // Over the whole screen (Y 0..400) the atmosphere stays tied to the scene.
     auto flare = FullViewport();
     flare.Atmosphere = true;
     flare.Projection = GlProjectionShape::Orthographic;
     flare.PixelAnisotropy = 1.0F;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(flare, kFactor169, true).Canvas);
-    // Desligado: como antes.
+    // Off: as before.
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(back, kFactor169, false).Canvas);
 }
 
@@ -229,18 +229,18 @@ TEST(GlWidescreenMenuPolicy, CompensatesWidenedPerspectiveUi) {
     model.PixelAnisotropy = 1.0F / kFactor169;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(model, kFactor169, true),
               (GlWidescreenDrawPlacement{true, true}));
-    // Sem alargar (fator 1) não há o que compensar.
+    // Without widening (factor 1) there's nothing to compensate.
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(model, 1.0F, true),
               (GlWidescreenDrawPlacement{true, false}));
-    // UI ortográfica: só o quadro.
+    // Orthographic UI: just the frame.
     model.Projection = GlProjectionShape::Orthographic;
     model.PixelAnisotropy = 1.0F;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(model, kFactor169, true),
               (GlWidescreenDrawPlacement{true, false}));
 }
 
-// Seleção de arquivo/escolha de modo com TopScreen: o menu de baixo realocado
-// (viewport Y 40..360 de 400) com o fade/escurecimento de cor sólida.
+// File select/mode choice with TopScreen: the relocated bottom menu
+// (viewport Y 40..360 of 400) with the solid-color fade/dimming.
 GlWidescreenDrawEvidence RelocatedMenuDraw() {
     GlWidescreenDrawEvidence menu;
     menu.ViewportSpansPresentedWidth = false;
@@ -248,9 +248,9 @@ GlWidescreenDrawEvidence RelocatedMenuDraw() {
 }
 
 TEST(GlWidescreenMenuPolicy, RelocatedSolidFadeCoversTheWholeTarget) {
-    // Fade de transição (seleção de arquivo -> jogo, escolha de modo ->
-    // seleção): cor sólida sobre todo o menu. Antes ficava no 4:3 do menu com
-    // o céu da cena nas laterais.
+    // Transition fade (file select -> game, mode choice ->
+    // select): solid color over the whole menu. Before it stayed in the menu's 4:3 with
+    // the scene's sky at the sides.
     auto fade = RelocatedMenuDraw();
     fade.Untextured = true;
     fade.Projection = GlProjectionShape::Orthographic;
@@ -262,7 +262,7 @@ TEST(GlWidescreenMenuPolicy, RelocatedSolidFadeCoversTheWholeTarget) {
     EXPECT_FALSE(placement.Canvas);
     EXPECT_FALSE(placement.CompensateWidening);
     EXPECT_FLOAT_EQ(placement.FillHorizontalExtent, 1.0F);
-    // Em perspectiva alargada pelo hook, a borda nativa fica em 1/fator.
+    // In perspective widened by the hook, the native edge is at 1/factor.
     fade.Projection = GlProjectionShape::Perspective;
     fade.PixelAnisotropy = 1.0F / kFactor169;
     EXPECT_FLOAT_EQ(GlWidescreenNativeHorizontalExtent(fade, kFactor169), 1.0F / kFactor169);
@@ -272,32 +272,32 @@ TEST(GlWidescreenMenuPolicy, RelocatedSolidFadeCoversTheWholeTarget) {
 }
 
 TEST(GlWidescreenMenuPolicy, OtherRelocatedDrawsStayOnTheCanvas) {
-    // Sem a prova de cobertura (um botão, uma barra): quadro.
+    // Without the coverage proof (a button, a bar): frame.
     auto bar = RelocatedMenuDraw();
     bar.Untextured = true;
     EXPECT_TRUE(ResolveGlWidescreenDrawPlacement(bar, kFactor169, true).Canvas);
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(bar, kFactor169, true).FillTarget);
-    // Com textura (uma imagem que cobre o menu): quadro, nunca esticada.
+    // Textured (an image covering the menu): frame, never stretched.
     auto picture = RelocatedMenuDraw();
     picture.GeometryCoversViewport = true;
     EXPECT_FALSE(GlWidescreenRelocatedFillCandidate(picture));
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(picture, kFactor169, true),
               (kRelocatedCanvas));
-    // Recorte do próprio jogo: respeitado no quadro.
+    // The game's own scissor: respected in the frame.
     auto clipped = RelocatedMenuDraw();
     clipped.Untextured = true;
     clipped.GeometryCoversViewport = true;
     clipped.GuestScissor = true;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(clipped, kFactor169, true).FillTarget);
-    // Cópia do quadro segue com a cena.
+    // Frame copy stays with the scene.
     auto copy = RelocatedMenuDraw();
     copy.Untextured = true;
     copy.GeometryCoversViewport = true;
     copy.SamplesRenderedCopy = true;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(copy, kFactor169, true),
               (GlWidescreenDrawPlacement{false, false}));
-    // Painéis do Game Over (domínio Ui no mesmo viewport 0,40,480,320, com
-    // textura): no quadro, como antes.
+    // Game Over panels (Ui domain in the same 0,40,480,320 viewport, with
+    // texture): in the frame, as before.
     auto gameOver = RelocatedMenuDraw();
     gameOver.UiDomain = true;
     gameOver.GeometryCoversViewport = true;
@@ -308,7 +308,7 @@ TEST(GlWidescreenMenuPolicy, OtherRelocatedDrawsStayOnTheCanvas) {
     gameOver.Untextured = true;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(gameOver, kFactor169, true),
               (GlWidescreenDrawPlacement{true, false}));
-    // Menus desligados: regra anterior (esticado).
+    // Menus off: previous rule (stretched).
     auto off = RelocatedMenuDraw();
     off.Untextured = true;
     off.GeometryCoversViewport = true;
@@ -316,8 +316,8 @@ TEST(GlWidescreenMenuPolicy, OtherRelocatedDrawsStayOnTheCanvas) {
               (GlWidescreenDrawPlacement{false, false}));
 }
 
-// Console: escala 2, saída 1280x720 -> alvo 853 de altura (fator 16:9/5:3),
-// quadro 5:3 de 800 com deslocamento 26. Na saída cada pixel vale 1280/853.
+// Console: scale 2, 1280x720 output -> target 853 high (factor 16:9/5:3),
+// 5:3 frame of 800 with offset 26. In the output each pixel is worth 1280/853.
 GlWidescreenPresentedAxisInput ConsoleAxis(float viewportY, float viewportHeight) {
     GlWidescreenPresentedAxisInput input;
     input.ViewportY = viewportY;
@@ -335,34 +335,34 @@ TEST(GlWidescreenMenuPolicy, SceneStretchesOverTheWholeTarget) {
 }
 
 TEST(GlWidescreenMenuPolicy, RelocatedMenuSitsInTheCanvas) {
-    // Painel ortográfico do menu: viewport nativo Y 40..360 no quadro.
+    // Orthographic menu panel: native viewport Y 40..360 in the frame.
     const auto axis = ResolveGlWidescreenPresentedAxis({true, false},
                                                        ConsoleAxis(40.0F, 320.0F));
     EXPECT_EQ(axis.ViewportBegin, 26 + 80);
     EXPECT_EQ(axis.ViewportEnd, 26 + 720);
-    // Recorte: o quadro inteiro (26..826).
+    // Scissor: the whole frame (26..826).
     EXPECT_EQ(axis.ScissorBegin, 26);
     EXPECT_EQ(axis.ScissorEnd, 826);
 }
 
 TEST(GlWidescreenMenuPolicy, CompensatedModelIsClippedAtItsNativeViewport) {
-    // Modelo 3D de menu no viewport realocado: perspectiva alargada pelo hook,
-    // viewport alargado em torno do centro (85..767). O recorte fica no
-    // viewport nativo (antes: o quadro inteiro, 26..826), então o que no 3DS
-    // está fora da tela de baixo continua fora.
+    // 3D menu model in the relocated viewport: perspective widened by the hook,
+    // viewport widened around the center (85..767). The scissor stays at the
+    // native viewport (before: the whole frame, 26..826), so what on the 3DS
+    // is outside the bottom screen stays outside.
     const auto axis = ResolveGlWidescreenPresentedAxis({true, true},
                                                        ConsoleAxis(40.0F, 320.0F));
     EXPECT_EQ(axis.ViewportBegin, 85);
     EXPECT_EQ(axis.ViewportEnd, 767);
     EXPECT_EQ(axis.ScissorBegin, 26 + 80);
     EXPECT_EQ(axis.ScissorEnd, 26 + 720);
-    // Na saída 1280: 159..1119 (o retângulo 4:3 do menu).
+    // At 1280 output: 159..1119 (the menu's 4:3 rectangle).
     EXPECT_NEAR(axis.ScissorBegin * 1280.0 / 853.0, 160.0, 1.5);
     EXPECT_NEAR(axis.ScissorEnd * 1280.0 / 853.0, 1120.0, 1.5);
-    // Proporções: largura do viewport / largura nativa do menu = fator.
+    // Proportions: viewport width / native menu width = factor.
     EXPECT_NEAR(static_cast<double>(axis.ViewportEnd - axis.ViewportBegin) / 640.0,
                 kFactor169, 0.005);
-    // Recorte do jogo mais estreito continua valendo.
+    // A narrower game scissor still applies.
     auto input = ConsoleAxis(40.0F, 320.0F);
     input.GuestScissor = true;
     input.ScissorY1 = 100;
@@ -373,7 +373,7 @@ TEST(GlWidescreenMenuPolicy, CompensatedModelIsClippedAtItsNativeViewport) {
 }
 
 TEST(GlWidescreenMenuPolicy, RelocatedFadeFillsTheTarget) {
-    // Ortográfico: a geometria chega a 1, o viewport é o alvo inteiro.
+    // Orthographic: the geometry reaches 1, the viewport is the whole target.
     GlWidescreenDrawPlacement fill;
     fill.FillTarget = true;
     auto axis = ResolveGlWidescreenPresentedAxis(fill, ConsoleAxis(40.0F, 320.0F));
@@ -381,8 +381,8 @@ TEST(GlWidescreenMenuPolicy, RelocatedFadeFillsTheTarget) {
     EXPECT_GE(axis.ViewportEnd, 853);
     EXPECT_EQ(axis.ScissorBegin, 0);
     EXPECT_EQ(axis.ScissorEnd, 853);
-    // Perspectiva alargada: a geometria chega a 1/fator; o viewport cresce o
-    // fator para a borda dela cair fora do alvo.
+    // Widened perspective: the geometry reaches 1/factor; the viewport grows by the
+    // factor so its edge lands outside the target.
     fill.FillHorizontalExtent = 1.0F / kFactor169;
     axis = ResolveGlWidescreenPresentedAxis(fill, ConsoleAxis(40.0F, 320.0F));
     const double centre = 853.0 / 2.0;
@@ -393,8 +393,8 @@ TEST(GlWidescreenMenuPolicy, RelocatedFadeFillsTheTarget) {
     EXPECT_EQ(axis.ScissorEnd, 853);
 }
 
-// Quad com transformação tipada (projeção c0-c3, view c4-c6, model c20-c22),
-// como o fixture de cobertura de oot3d_graphics_foundation_tests.
+// Quad with typed transform (projection c0-c3, view c4-c6, model c20-c22),
+// like the coverage fixture in oot3d_graphics_foundation_tests.
 struct QuadDraw {
     std::vector<float> Positions;
     std::array<uint16_t, 4> Indices{0, 1, 2, 3};
@@ -403,8 +403,8 @@ struct QuadDraw {
     Fast::Renderer3ds::PicaVertexBindingView Binding{};
     Fast::Renderer3ds::PicaDrawView View;
 
-    // Ortográfica 400x240 -> NDC, com o eixo da linha 1 multiplicado por
-    // `squeeze` (1/fator: frustum alargado pelo hook).
+    // Orthographic 400x240 -> NDC, with the row-1 axis multiplied by
+    // `squeeze` (1/factor: frustum widened by the hook).
     QuadDraw(std::vector<float> positions, float squeeze) : Positions(std::move(positions)) {
         const auto row = [this](size_t uniform, std::array<float, 4> values) {
             std::copy(values.begin(), values.end(), Uniforms.begin() + uniform * 4U);
@@ -456,19 +456,19 @@ struct QuadDraw {
 };
 
 TEST(GlWidescreenMenuPolicy, CoverageProofFollowsTheWidenedFrustum) {
-    // Fade do menu: o retângulo nativo inteiro (400x240 no espaço da view).
+    // Menu fade: the whole native rectangle (400x240 in view space).
     const QuadDraw fade({0, 0, 0, 400, 0, 0, 0, 240, 0, 400, 240, 0}, 1.0F / kFactor169);
     const auto bounds = fade.Bounds();
     ASSERT_TRUE(bounds.has_value());
-    // Com o frustum alargado não chega a 1 (a prova antiga recusava)...
+    // With the widened frustum it doesn't reach 1 (the old proof refused it)...
     EXPECT_FALSE(bounds->Reaches({1.0F, 1.0F}));
-    // ...mas cobre o viewport nativo, cuja borda está em 1/fator.
+    // ...but it covers the native viewport, whose edge is at 1/factor.
     EXPECT_TRUE(bounds->Reaches({1.0F, 1.0F / kFactor169}));
-    // Um botão não cobre nada disso.
+    // A button covers none of that.
     const QuadDraw button({0, 0, 0, 60, 0, 0, 0, 40, 0, 60, 40, 0}, 1.0F / kFactor169);
     ASSERT_TRUE(button.Bounds().has_value());
     EXPECT_FALSE(button.Bounds()->Reaches({1.0F, 1.0F / kFactor169}));
-    // Sem frustum alargado, a regra antiga (PicaDrawGeometryCoversViewport).
+    // Without a widened frustum, the old rule (PicaDrawGeometryCoversViewport).
     const QuadDraw native({0, 0, 0, 400, 0, 0, 0, 240, 0, 400, 240, 0}, 1.0F);
     EXPECT_TRUE(native.Bounds()->Reaches({1.0F, 1.0F}));
     EXPECT_TRUE(Fast::Renderer3ds::PicaDrawGeometryCoversViewport(
@@ -488,19 +488,19 @@ TEST(GlWidescreenMenuPolicy, DiagnosticLineNamesTheDecision) {
     fade.GeometryCoversViewport = true;
     const auto fill = ResolveGlWidescreenDrawPlacement(fade, kFactor169, true);
     const auto line = FormatGlWidescreenDrawLogLine(facts, fade, fill);
-    EXPECT_EQ(line.rfind("TELA vp=0,40,480,320", 0), 0U) << line;
-    EXPECT_NE(line.find("sem_tex=1"), std::string::npos) << line;
+    EXPECT_EQ(line.rfind("SCREEN vp=0,40,480,320", 0), 0U) << line;
+    EXPECT_NE(line.find("no_tex=1"), std::string::npos) << line;
     auto card = RelocatedMenuDraw();
     card.Projection = GlProjectionShape::Perspective;
     card.PixelAnisotropy = 1.0F / kFactor169;
     const auto placed = ResolveGlWidescreenDrawPlacement(card, kFactor169, true);
-    EXPECT_EQ(FormatGlWidescreenDrawLogLine(facts, card, placed).rfind("QUADRO+COMP", 0), 0U);
+    EXPECT_EQ(FormatGlWidescreenDrawLogLine(facts, card, placed).rfind("FRAME+COMP", 0), 0U);
     EXPECT_NE(GlWidescreenDrawLogSignature(facts, fade, fill),
               GlWidescreenDrawLogSignature(facts, card, placed));
 }
 
 TEST(GlWidescreenMenuPolicy, OnlyRelocatedMenuDrawsSplitTheirCorners) {
-    // Menu de baixo realocado (fora do domínio Ui): sim.
+    // Relocated bottom menu (outside the Ui domain): yes.
     auto menu = RelocatedMenuDraw();
     menu.Atmosphere = true;
     menu.Projection = GlProjectionShape::Orthographic;
@@ -508,8 +508,8 @@ TEST(GlWidescreenMenuPolicy, OnlyRelocatedMenuDrawsSplitTheirCorners) {
     auto placement = ResolveGlWidescreenDrawPlacement(menu, kFactor169, true);
     EXPECT_TRUE(placement.Canvas);
     EXPECT_TRUE(placement.SplitCorners);
-    // Sem alargar (fator 1), com menus desligados, no domínio Ui (Game Over),
-    // compensado, fade de tela inteira ou na tela inteira: não.
+    // Without widening (factor 1), with menus off, in the Ui domain (Game Over),
+    // compensated, full-screen fade or over the whole screen: no.
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(menu, 1.0F, true).SplitCorners);
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(menu, kFactor169, false).SplitCorners);
     auto gameOver = menu;
@@ -530,9 +530,9 @@ TEST(GlWidescreenMenuPolicy, OnlyRelocatedMenuDrawsSplitTheirCorners) {
 }
 
 TEST(GlWidescreenMenuPolicy, BottomCornersGoToTheWidenedTargetEdges) {
-    // Console: alvo 853 de altura, menu 106..746 (quadro em 26); X do alvo
-    // 0..960 (240 linhas x 2 amostras x escala 2), linha de baixo em X = 0.
-    // Canto: 64 px do menu (128 no alvo) por 40 linhas (160 no alvo).
+    // Console: target 853 high, menu 106..746 (frame at 26); target X
+    // 0..960 (240 rows x 2 samples x scale 2), bottom row at X = 0.
+    // Corner: 64 menu px (128 in the target) by 40 rows (160 in the target).
     const auto axis = ResolveGlWidescreenPresentedAxis({true, false},
                                                        ConsoleAxis(40.0F, 320.0F));
     GlWidescreenCornerInput input;
@@ -544,21 +544,21 @@ TEST(GlWidescreenMenuPolicy, BottomCornersGoToTheWidenedTargetEdges) {
     input.TargetHeight = 853;
     std::array<GlWidescreenPass, 4> passes{};
     ASSERT_EQ(ResolveGlWidescreenCornerPasses(axis, input, passes), 4U);
-    // Tudo acima da faixa de baixo, no lugar (o recorte do quadro).
+    // Everything above the bottom strip, in place (the frame scissor).
     EXPECT_EQ(passes[0], (GlWidescreenPass{0, 160, 960, 26, 826}));
-    // A faixa de baixo entre os cantos, no lugar.
+    // The bottom strip between the corners, in place.
     EXPECT_EQ(passes[1], (GlWidescreenPass{0, 0, 160, 106 + 128, 746 - 128}));
-    // Canto do começo encostado em 0 (na saída 1280: x 0..192), canto do fim
-    // em 853.
+    // Start corner against 0 (at 1280 output: x 0..192), end corner
+    // at 853.
     EXPECT_EQ(passes[2], (GlWidescreenPass{-106, 0, 160, 0, 128}));
     EXPECT_EQ(passes[3], (GlWidescreenPass{853 - 746, 0, 160, 853 - 128, 853}));
-    // Os pixels do menu saem uma vez só: as áreas somam a do menu no quadro.
+    // Menu pixels come out only once: the areas add up to the menu's in the frame.
     std::int64_t area = 0;
     for (const auto& pass : passes)
         area += std::int64_t{pass.ScissorX1 - pass.ScissorX0} * (pass.ScissorY1 - pass.ScissorY0);
     EXPECT_EQ(area, std::int64_t{960} * 800 - std::int64_t{160} * (106 - 26) -
                         std::int64_t{160} * (826 - 746));
-    // Recorte do jogo que não toca a faixa de baixo: só o passe de cima.
+    // Game scissor not touching the bottom strip: only the top pass.
     GlWidescreenCornerInput high = input;
     high.ScissorX0 = 400;
     EXPECT_EQ(ResolveGlWidescreenCornerPasses(axis, high, passes), 1U);
@@ -566,40 +566,40 @@ TEST(GlWidescreenMenuPolicy, BottomCornersGoToTheWidenedTargetEdges) {
 }
 
 TEST(GlWidescreenMenuPolicy, TouchInTheWindowCornerReachesTheMenuCorner) {
-    // Janela 1280x720: quadro 5:3 em x 40..1240, menu em 160..1120; canto de
-    // 64 px nativos = 192 px por 40 linhas = 120 px.
-    // A aba BACK desenhada em x 0..170 (y 610..720) toca o BACK do jogo.
+    // 1280x720 window: 5:3 frame at x 40..1240, menu at 160..1120; corner of
+    // 64 native px = 192 px by 40 rows = 120 px.
+    // The BACK tab drawn at x 0..170 (y 610..720) hits the game's BACK.
     auto pointer = RemapGlWidescreenCornerPointer(20.0F, 680.0F, 1280.0F, 720.0F);
     EXPECT_FLOAT_EQ(pointer.X, 180.0F);
     EXPECT_FLOAT_EQ(pointer.Y, 680.0F);
     pointer = RemapGlWidescreenCornerPointer(170.0F, 700.0F, 1280.0F, 720.0F);
     EXPECT_FLOAT_EQ(pointer.X, 330.0F);
-    // Canto da direita, espelhado.
+    // Right corner, mirrored.
     pointer = RemapGlWidescreenCornerPointer(1270.0F, 650.0F, 1280.0F, 720.0F);
     EXPECT_FLOAT_EQ(pointer.X, 1110.0F);
-    // Fora da faixa de baixo ou no meio: inalterado (cartões, botões).
+    // Outside the bottom strip or in the middle: unchanged (cards, buttons).
     EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(20.0F, 590.0F, 1280.0F, 720.0F).X, 20.0F);
     EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(640.0F, 700.0F, 1280.0F, 720.0F).X, 640.0F);
     EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(400.0F, 700.0F, 1280.0F, 720.0F).X, 400.0F);
-    // Janela 5:3 (sem margem): nada a remapear.
+    // 5:3 window (no margin): nothing to remap.
     EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(20.0F, 700.0F, 1200.0F, 720.0F).X, 20.0F);
 }
 
 TEST(GlWidescreenMenuPolicy, RelocatedMenuPiecesSampleTheirTexelsAtIntegerScales) {
-    // Peça do atlas do menu realocado: ortográfica 320x240 no viewport Y 40..360.
+    // Atlas piece of the relocated menu: orthographic 320x240 in the Y 40..360 viewport.
     GlWidescreenDrawEvidence piece = RelocatedMenuDraw();
     piece.Projection = GlProjectionShape::Orthographic;
     piece.PixelAnisotropy = GlNativePixelAnisotropy(
         DecodeGlProjection(RotatedOrtho(320.0F, 240.0F)), 480.0F, 320.0F, 480U);
     EXPECT_TRUE(GlRelocatedMenuNearestSampling(piece, 2.0F));
     EXPECT_TRUE(GlRelocatedMenuNearestSampling(piece, 3.0F));
-    // Escala 1: o linear já cai no centro do texel. Fracionária: texels
-    // desiguais com nearest; as duas ficam lineares.
+    // Scale 1: linear already lands at the texel center. Fractional: unequal
+    // texels with nearest; both stay linear.
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(piece, 1.0F));
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(piece, 1.5F));
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(piece, 2.5F));
 
-    // Cena e painéis na tela inteira continuam lineares.
+    // Scene and full-screen panels stay linear.
     GlWidescreenDrawEvidence scene = FullViewport();
     scene.Projection = GlProjectionShape::Perspective;
     scene.PixelAnisotropy = 1.0F;
@@ -608,16 +608,16 @@ TEST(GlWidescreenMenuPolicy, RelocatedMenuPiecesSampleTheirTexelsAtIntegerScales
     panel.Projection = GlProjectionShape::Orthographic;
     panel.PixelAnisotropy = 1.0F;
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(panel, 2.0F));
-    // Domínio Ui no mesmo viewport (criação de nome, Game Over): também.
+    // Ui domain in the same viewport (name entry, Game Over): also.
     GlWidescreenDrawEvidence ui = piece;
     ui.UiDomain = true;
     EXPECT_TRUE(GlRelocatedMenuNearestSampling(ui, 2.0F));
-    // HUD na tela inteira: linear.
+    // Full-screen HUD: linear.
     GlWidescreenDrawEvidence hud = panel;
     hud.UiDomain = true;
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(hud, 2.0F));
-    // Modelo em perspectiva no menu, cópia do quadro e cor sólida (fade):
-    // lineares.
+    // Perspective model in the menu, frame copy and solid color (fade):
+    // linear.
     GlWidescreenDrawEvidence model = piece;
     model.Projection = GlProjectionShape::Perspective;
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(model, 2.0F));
@@ -630,6 +630,41 @@ TEST(GlWidescreenMenuPolicy, RelocatedMenuPiecesSampleTheirTexelsAtIntegerScales
     GlWidescreenDrawEvidence fade = piece;
     fade.Untextured = true;
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(fade, 2.0F));
+}
+
+// deko3d resolves a relocated menu piece's texture pack image as menu art
+// (gfx_deko3d_pica_resources.cpp): the file-select cards come in the title
+// scene's atmosphere layer, outside the Ui domain, and popped from the
+// game's art to the pack's at every start (test.10).
+TEST(GlWidescreenMenuPolicy, FileSelectPiecesAreRelocatedMenuDrawsInEitherDomain) {
+    GlWidescreenDrawEvidence card = RelocatedMenuDraw();
+    card.Atmosphere = true; // file select: Scene domain, atmosphere layer
+    card.Projection = GlProjectionShape::Orthographic;
+    card.PixelAnisotropy = GlNativePixelAnisotropy(
+        DecodeGlProjection(RotatedOrtho(320.0F, 240.0F)), 480.0F, 320.0F, 480U);
+    EXPECT_TRUE(GlRelocatedMenuDraw(card));
+    GlWidescreenDrawEvidence nameEntry = card;
+    nameEntry.Atmosphere = false;
+    nameEntry.UiDomain = true;
+    EXPECT_TRUE(GlRelocatedMenuDraw(nameEntry));
+    // The title scene behind it (full viewport, perspective), a full-width
+    // panel, a frame copy and the fade are not.
+    GlWidescreenDrawEvidence scene = FullViewport();
+    scene.Projection = GlProjectionShape::Perspective;
+    scene.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(GlRelocatedMenuDraw(scene));
+    GlWidescreenDrawEvidence panel = FullViewport();
+    panel.Projection = GlProjectionShape::Orthographic;
+    panel.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(GlRelocatedMenuDraw(panel));
+    GlWidescreenDrawEvidence copy = card;
+    copy.SamplesRenderedCopy = true;
+    EXPECT_FALSE(GlRelocatedMenuDraw(copy));
+    GlWidescreenDrawEvidence fade = card;
+    fade.Untextured = true;
+    EXPECT_FALSE(GlRelocatedMenuDraw(fade));
+    // The nearest-sampling rule is this one at an integer scale.
+    EXPECT_EQ(GlRelocatedMenuNearestSampling(card, 2.0F), GlRelocatedMenuDraw(card));
 }
 
 TEST(GlWidescreenMenuPolicy, ParsesTheSwitch) {

@@ -1,32 +1,34 @@
 #pragma once
 
-// Distribuição das threads do processo pelos núcleos do Switch (Horizon).
-// Só a política: puro e testável no host (oot3d_switch_thread_layout_tests);
-// quem aplica é oot3d_switch_threads.cpp.
+// Distribution of the process's threads across the Switch cores (Horizon).
+// Policy only: pure and testable on the host (oot3d_switch_thread_layout_tests);
+// oot3d_switch_threads.cpp applies it.
 //
-// Regras do escalonador do Horizon que a política respeita:
-// - prioridade menor = mais urgente; só a 0x3B reveza tempo entre threads de
-//   mesma prioridade. Em qualquer outra, uma thread ocupada impede as de
-//   prioridade igual ou menor no mesmo núcleo, mesmo com outros núcleos
-//   ociosos (a migração só acontece nos pontos de reescalonamento);
-// - uma thread com máscara de vários núcleos pode ser levada a um núcleo
-//   ocioso; com máscara de um núcleo, nunca.
+// Horizon scheduler rules the policy respects:
+// - lower priority = more urgent; only 0x3B time-slices between threads of
+//   the same priority. At any other, a busy thread blocks those of
+//   equal or lower priority on the same core, even with other cores
+//   idle (migration only happens at rescheduling points);
+// - a thread with a multi-core mask can be moved to an idle
+//   core; with a single-core mask, never.
 //
-// Layouts (arquivo sdmc:/switch/oot3dre/config/thread_layout, primeira
-// palavra; ausente = fixed):
-// - fixed  : jogo sozinho no núcleo 0; render thread fixa no 2; worker de
-//            planos, áudio do host e áudio do SDL no 1; threads de serviço
-//            (log, cache de shader do Mesa, recursos, carregadores) na 0x3B
-//            com máscara 1|2: nunca tomam o lugar de quem desenha ou toca som.
-// - float  : como fixed, mas render thread e worker de planos com máscara
-//            1|2 (núcleo ideal 2 e 1): o kernel pode levá-los ao núcleo livre.
-//            (StevensND/nfsmw-nx: fixar a render thread piorou o pior caso.)
-// - legacy : o comportamento anterior, para A/B: toda pthread nova na
-//            prioridade do jogo (0x2C), alternando núcleos 1/2; áudio do SDL
-//            no núcleo em que nasceu; spin de 500 us no pacer.
-// Opções depois do modo: pacer_spin_us=N (espera ativa antes do prazo do
-// pacer; padrão 0 em fixed/float — svcSleepThread acorda no prazo — e 500
-// em legacy).
+// Layouts (file sdmc:/switch/oot3dre/config/thread_layout, first
+// word; absent = fixed):
+// - fixed  : game alone on core 0; render thread pinned to 2; plan
+//            worker, host audio and SDL audio on 1; service threads
+//            (log, Mesa shader cache, resources, loaders) at 0x3B
+//            with mask 1|2: they never take the place of what draws or plays sound.
+//            The second guest core (config/second_core) is pinned to 1
+//            above the plan worker, in every layout.
+// - float  : like fixed, but render thread and plan worker with mask
+//            1|2 (ideal core 2 and 1): the kernel can move them to the free core.
+//            (StevensND/nfsmw-nx: pinning the render thread made the worst case worse.)
+// - legacy : the previous behavior, for A/B: every new pthread at the
+//            game's priority (0x2C), alternating cores 1/2; SDL audio
+//            on the core it was born on; 500 us spin in the pacer.
+// Options after the mode: pacer_spin_us=N (busy-wait before the pacer
+// deadline; default 0 in fixed/float — svcSleepThread wakes on time — and 500
+// in legacy).
 
 #include <cstdint>
 #include <string_view>
@@ -36,35 +38,43 @@ namespace Oot3dNativeGame {
 enum class SwitchThreadLayout : uint8_t { Fixed, Float, Legacy };
 
 enum class SwitchThreadRole : uint8_t {
-    Game,       // thread principal: o jogo (CPU guest, DSP HLE, submissão)
-    Render,     // NativeRenderCommandStream: todo o GL
-    PicaPlan,   // pré-montagem dos planos PICA
-    HostAudio,  // HostAudioStream: stretch, reamostragem, fila do SDL
-    SdlAudio,   // thread de áudio do SDL (audren)
-    Service,    // qualquer outra pthread (log, Mesa, recursos, carregadores)
+    Game,       // main thread: the game (guest CPU, DSP HLE, submission)
+    Render,     // NativeRenderCommandStream: all of GL
+    PicaPlan,   // pre-assembly of the PICA plans
+    HostAudio,  // HostAudioStream: stretch, resampling, SDL queue
+    SdlAudio,   // SDL audio thread (audren)
+    Service,    // any other pthread (log, Mesa, resources, loaders)
+    GuestCore1, // config/second_core: the guest threads that asked for processor 1
     Count
 };
 
 inline constexpr int kSwitchGamePriority = 0x2C;
 inline constexpr int kSwitchRenderPriority = 0x2D;
 inline constexpr int kSwitchPicaPlanPriority = 0x2E;
+// The second guest core (the game's sound thread and the DSP frames): on
+// core 1 under the audio threads (0x2B preempt it), above the plan worker
+// (0x2E, 26-31 ms idle per 40 ms frame: thread 6's ~1 ms bursts per DSP
+// frame leave it ample time, while its preemption had doubled thread 6's
+// wall time), at the render thread's priority (on core 2), above the
+// time-sliced service threads.
+inline constexpr int kSwitchGuestCore1Priority = 0x2D;
 inline constexpr int kSwitchAudioPriority = 0x2B;
-// A única prioridade com revezamento de tempo; abaixo de todas as outras.
+// The only priority with time-slicing; below all the others.
 inline constexpr int kSwitchServicePriority = 0x3B;
 
 struct SwitchThreadPlacement {
     int Priority = kSwitchServicePriority;
-    // Núcleo ideal (0-2); -1 = não mexer na afinidade; -2 = alternar 1/2 na
-    // criação (legacy).
+    // Ideal core (0-2); -1 = leave affinity alone; -2 = alternate 1/2 on
+    // creation (legacy).
     int IdealCore = -1;
-    uint32_t CoreMask = 0U;  // bits 0-2; 0 = não mexer
+    uint32_t CoreMask = 0U;  // bits 0-2; 0 = leave alone
 };
 
 struct SwitchThreadLayoutConfig {
     SwitchThreadLayout Layout = SwitchThreadLayout::Fixed;
-    // Espera ativa do pacer antes do prazo, em microssegundos.
+    // Pacer busy-wait before the deadline, in microseconds.
     int PacerSpinMicroseconds = 0;
-    bool Valid = true;  // false: texto não reconhecido (cai em fixed)
+    bool Valid = true;  // false: unrecognized text (falls back to fixed)
 };
 
 [[nodiscard]] constexpr const char* SwitchThreadLayoutName(
@@ -86,6 +96,7 @@ struct SwitchThreadLayoutConfig {
     case SwitchThreadRole::HostAudio: return "audio";
     case SwitchThreadRole::SdlAudio: return "sdl_audio";
     case SwitchThreadRole::Service: return "service";
+    case SwitchThreadRole::GuestCore1: return "guest_core1";
     case SwitchThreadRole::Count: break;
     }
     return "?";
@@ -96,7 +107,7 @@ struct SwitchThreadLayoutConfig {
     return layout == SwitchThreadLayout::Legacy ? 500 : 0;
 }
 
-// Conteúdo do arquivo config/thread_layout. Vazio = fixed.
+// Contents of the config/thread_layout file. Empty = fixed.
 [[nodiscard]] constexpr SwitchThreadLayoutConfig ParseSwitchThreadLayoutConfig(
     std::string_view text) noexcept {
     SwitchThreadLayoutConfig config;
@@ -156,8 +167,8 @@ struct SwitchThreadLayoutConfig {
     return config;
 }
 
-// processMask: núcleos permitidos ao processo (bits 0-2). Núcleos fora dela
-// saem da máscara; sem nenhum núcleo sobrando, a afinidade fica como está.
+// processMask: cores allowed to the process (bits 0-2). Cores outside it
+// leave the mask; with no core left, the affinity stays as is.
 [[nodiscard]] constexpr SwitchThreadPlacement ResolveSwitchThreadPlacement(
     SwitchThreadLayout layout, SwitchThreadRole role,
     uint32_t processMask) noexcept {
@@ -181,6 +192,9 @@ struct SwitchThreadLayoutConfig {
         placement = legacy ? SwitchThreadPlacement{kSwitchAudioPriority, -1, 0U}
                            : SwitchThreadPlacement{kSwitchAudioPriority, 1, 0x2U};
         break;
+    case SwitchThreadRole::GuestCore1:
+        placement = {kSwitchGuestCore1Priority, 1, 0x2U};
+        break;
     case SwitchThreadRole::Service:
     case SwitchThreadRole::Count:
         placement = legacy
@@ -193,7 +207,7 @@ struct SwitchThreadLayoutConfig {
         if (placement.CoreMask == 0U) {
             placement.IdealCore = -1;
         } else if ((placement.CoreMask & (1U << placement.IdealCore)) == 0U) {
-            // O núcleo ideal precisa estar na máscara: o menor que sobrou.
+            // The ideal core must be in the mask: the lowest one left.
             for (int core = 0; core < 3; ++core) {
                 if ((placement.CoreMask & (1U << core)) != 0U) {
                     placement.IdealCore = core;

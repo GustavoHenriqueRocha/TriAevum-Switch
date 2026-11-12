@@ -1215,8 +1215,8 @@ struct GfxRenderingAPIOGL::NativePicaState {
     float ResolutionScale = 1.0F;
     // Namespaces drawn at their own scale (a reduced in-between frame).
     std::map<uint64_t, float> NamespaceScales;
-    // Samplers GL_NEAREST das peças do menu realocado, um por unidade PICA
-    // (PicaGlRelocatedMenuNearestSampling); 0 até o primeiro uso.
+    // GL_NEAREST samplers for the relocated menu pieces, one per PICA unit
+    // (PicaGlRelocatedMenuNearestSampling); 0 until first use.
     std::array<GLuint, 3> MenuNearestSamplers{};
     // config/gl_lean (exact savings; see PicaGlScale::ParseLeanSetting).
     bool Lean = true;
@@ -1404,7 +1404,7 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
             static_cast<uint32_t>(std::max(maximum, 0.0F)));
         if (config.Anisotropy <= 1U) {
             config.Anisotropy = 0U;
-            LogPicaGlPost("filtro anisotropico indisponivel neste driver");
+            LogPicaGlPost("anisotropic filter unavailable on this driver");
         }
     }
     if (config.Aa == PicaGlPost::Antialiasing::Fxaa) {
@@ -1413,7 +1413,7 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
                 vertexSource, PicaGlPost::BuildFxaaFragmentShader(),
                 {"scanout.inverse_size"});
         } catch (const std::exception& exception) {
-            LogPicaGlPost(std::string("FXAA desligado: ") + exception.what());
+            LogPicaGlPost(std::string("FXAA off: ") + exception.what());
             config.Aa = PicaGlPost::Antialiasing::Off;
         }
     } else if (config.Aa == PicaGlPost::Antialiasing::Smaa) {
@@ -1444,7 +1444,7 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
                 lookup.SearchRgba8, Oot3d::SmaaLookupData::SearchWidth,
                 Oot3d::SmaaLookupData::SearchHeight);
         } catch (const std::exception& exception) {
-            LogPicaGlPost(std::string("SMAA desligado: ") + exception.what());
+            LogPicaGlPost(std::string("SMAA off: ") + exception.what());
             DeletePicaGlPostProgram(post.SmaaEdges);
             DeletePicaGlPostProgram(post.SmaaWeights);
             DeletePicaGlPostProgram(post.SmaaBlend);
@@ -1462,7 +1462,7 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
                 {"pica_easu_con0", "pica_easu_con1", "pica_easu_con2",
                  "pica_easu_con3"});
         } catch (const std::exception& exception) {
-            LogPicaGlPost(std::string("FSR EASU desligado: ") +
+            LogPicaGlPost(std::string("FSR EASU off: ") +
                           exception.what());
             config.Upscale = PicaGlPost::Upscaler::Linear;
         }
@@ -1480,7 +1480,7 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
                 glUniform2f(post.Rcas.Params[2], 1.0F, 1.0F);
             }
         } catch (const std::exception& exception) {
-            LogPicaGlPost(std::string("RCAS desligado: ") + exception.what());
+            LogPicaGlPost(std::string("RCAS off: ") + exception.what());
             config.Sharpen = 0.0F;
         }
     }
@@ -1488,8 +1488,8 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
         static constexpr std::array<const char*, 3> kAa{"off", "fxaa", "smaa"};
         char summary[160];
         std::snprintf(summary, sizeof(summary),
-                      "pos-processamento: aa=%s upscaler=%s sharpen=%.2f "
-                      "anisotropia=%u",
+                      "post-processing: aa=%s upscaler=%s sharpen=%.2f "
+                      "anisotropy=%u",
                       kAa[static_cast<size_t>(config.Aa)],
                       config.Upscale == PicaGlPost::Upscaler::Fsr ? "fsr"
                                                                   : "linear",
@@ -1746,8 +1746,8 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
     if (!complete) {
         // An intermediate image could not be attached: keep the plain
         // scanout from now on rather than a broken chain.
-        LogPicaGlPost("imagem intermediaria incompleta; pos-processamento "
-                      "desligado");
+        LogPicaGlPost("intermediate image incomplete; post-processing "
+                      "off");
         config.Aa = PicaGlPost::Antialiasing::Off;
         config.Upscale = PicaGlPost::Upscaler::Linear;
         config.Sharpen = 0.0F;
@@ -2230,7 +2230,7 @@ void LogPicaGlWidescreenPlacement(const std::string& path,
         opened = true;
         file.open(path, std::ios::app);
         if (file) {
-            file << "# widescreen_menus: draw_id assinatura decisao ...\n";
+            file << "# widescreen_menus: draw_id signature decision ...\n";
         }
     }
     if (!file) {
@@ -2347,8 +2347,8 @@ Oot3d::GlWidescreenDrawPlacement ResolvePicaGlWidescreenPlacement(
     return placement;
 }
 
-// Peças da tela de baixo realocada: GL_NEAREST na ampliação numa escala
-// inteira (GlRelocatedMenuNearestSampling). Vale com e sem widescreen.
+// Relocated bottom-screen pieces: GL_NEAREST on magnification at an integer
+// scale (GlRelocatedMenuNearestSampling). Applies with and without widescreen.
 bool PicaGlRelocatedMenuNearestSampling(const GfxNativePicaDrawView& draw,
                                         float resolutionScale) {
     if (draw.Textures.empty() || !Oot3d::GlMenuNearestEnabled()) {
@@ -3285,7 +3285,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
     return false;
 #else
     try {
-        GlPerf::PhaseBegin(); // glperf step_draw_*: CPU por fase do draw
+        GlPerf::PhaseBegin(); // glperf step_draw_*: CPU per draw phase
         if (!mNativePica || draw.VertexShaderSource.empty() ||
             draw.FragmentShaderSource.empty() || draw.VertexCount == 0U ||
             draw.VertexBindings.empty() || draw.VertexAttributes.empty()) {
@@ -4056,9 +4056,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             }
         };
 
-        // Peças do menu realocado: GL_NEAREST na ampliação (sem a emenda do
-        // atlas na resolução interna; GlRelocatedMenuNearestSampling). O
-        // sampler sobrepõe filtro e repetição da textura só neste draw.
+        // Relocated menu pieces: GL_NEAREST on magnification (no atlas seam
+        // at the internal resolution; GlRelocatedMenuNearestSampling). The
+        // sampler overrides the texture's filter and wrap only for this draw.
         uint32_t menuNearestUnits = 0U;
         if (PicaGlRelocatedMenuNearestSampling(draw, resolutionScale)) {
             auto& samplers = mNativePica->MenuNearestSamplers;

@@ -3,7 +3,7 @@
 // (command memory + stream memory + fence), the window image acquire and the
 // present. The rendering API (gfx_deko3d.cpp) records into Cmd().
 //
-// Conventions (docs/DEKO3D_PROGRESSO.md, "Decisões"): DepthMinusOneToOne and
+// Conventions (docs/DEKO3D_PROGRESS.md, "Decisions"): DepthMinusOneToOne and
 // OriginUpperLeft, so offscreen images have the GL framebuffer layout (row 0 =
 // y 0) and the GL 4.3 shader texts run unchanged; only drawing into the
 // window flips Y.
@@ -70,6 +70,16 @@ constexpr uint32_t AlignUp(uint32_t value, uint32_t alignment) {
 void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
 // Writes the queued log lines and stops the writer thread (Device::Destroy).
 void FlushLog();
+// dkperf top_w/top_h/top_line_samples (logs/perf.txt): the drawn extent of
+// the last presented top-screen scene target and its samples per presented
+// line (1 or 2, config/deko3d_line_samples). Render thread.
+void NotePresentedTopScene(uint32_t width, uint32_t height, uint32_t lineSamples);
+// dkperf clear_draw / resets / depth_clears / full_clears (config/deko3d_clear_draw,
+// gfx_deko3d_clear_draw.h): whether it is on, and each depth reset of a frame
+// with what it became (0 draw, 1 depth clear, 2 colour and depth clear).
+// Render thread.
+void SetPerfClearDraw(bool enabled);
+void NoteResetDraw(uint8_t action);
 
 struct StreamSpan {
     void* Cpu = nullptr;
@@ -121,8 +131,27 @@ class Device {
     const DkImageView& AcquireWindow(AcquireHook hook);
     [[nodiscard]] bool WindowAcquired() const noexcept { return mWindowSlot >= 0; }
     [[nodiscard]] bool Mailbox() const noexcept { return mMailbox; }
+    // config/deko3d_zcull: the queue was created with ZCULL on.
+    [[nodiscard]] bool Zcull() const noexcept { return mZcull; }
+    // config/deko3d_compression ("0" turns it off): render-target colour,
+    // display and mailbox images get DkImageFlags_HwCompression.
+    [[nodiscard]] bool ColorCompression() const noexcept { return mColorCompression; }
     // FinishRender acquired it (no draw reached the window before the pacer).
     void CountSwapAcquire();
+    // A barrier that waits for earlier work (texture uploads, descriptor
+    // writes): dkperf image_barriers_per_frame.
+    void CountImageBarrier();
+    // config/deko3d_zcull: ZCULL invalidated around a draw whose program
+    // writes gl_FragDepth (dkperf zcull_invalidates).
+    void InvalidateZcull();
+    // dkperf opaque_ms: a timestamp at the frame's first translucent world
+    // draw (once per frame; the frame top to it).
+    void MarkOpaqueEnd();
+    // dkperf shadow_<method>_ms (config/simple_shadow_method): timestamps
+    // around the frame's first Simple shadow draw point, by the method that
+    // drew it (Oot3d::PlayerShadowMethod); End without Start writes nothing.
+    void MarkShadowStart();
+    void MarkShadowEnd(uint32_t method);
 
     // Hands the commands recorded so far to the GPU.
     void Submit();
@@ -131,6 +160,10 @@ class Device {
     void EndFrame(AcquireHook hook);
     // Waits for every submitted command (shutdown, resets).
     void WaitIdle();
+    // Savestate capture: until the present thread has nothing left of the
+    // frames handed to it (the queued window buffer, or the mailbox frame
+    // waiting or being copied). Immediate without the present thread.
+    void WaitPresentIdle();
 
     // Per-frame CPU-visible memory (valid until this slot comes round again).
     StreamSpan Stream(uint32_t size, uint32_t alignment);
@@ -167,6 +200,11 @@ class Device {
         bool Fenced = false;
         bool Timed = false; // its frame top and end timestamps were recorded
         bool Split = false; // and the two around the acquire
+        bool ZcullTimed = false; // config/deko3d_zcull: its ZCULL stats were reported
+        bool Counted = false;    // fragment shader / samples passed at frame top and scene end
+        bool OpaqueTimed = false; // the timestamp at the first translucent world draw
+        bool ShadowTimed = false; // the two around the frame's first shadow draw point
+        uint32_t ShadowMethod = 0; // the method that drew it
         FrameTag Tag; // Deko3dTagFrame of the frame
     };
     void CollectTimestamps(uint32_t slot);
@@ -209,6 +247,9 @@ class Device {
     int mWindowSlot = -1;
     bool mFrameOpen = false;
     bool mRecorded = false;
+    bool mOpaqueMarked = false; // MarkOpaqueEnd ran this frame
+    bool mShadowMarked = false; // MarkShadowStart ran this frame
+    bool mShadowOpen = false;   // and MarkShadowEnd not yet
     bool mSyncCheck = false;
     bool mSyncFailed = false;
     bool mSyncFailurePending = false;
@@ -220,6 +261,10 @@ class Device {
     std::vector<std::string> mSyncPoints;
     bool mSyncNoWait = false;
     bool mPresentThreaded = false;
+    // config/deko3d_zcull (off by default): ZCULL on the queue, its
+    // counters reset at frame top and reported at frame end.
+    bool mZcull = false;
+    bool mColorCompression = true;
     std::thread mPresentThread;
     std::mutex mPresentMutex;
     std::condition_variable mPresentReady;

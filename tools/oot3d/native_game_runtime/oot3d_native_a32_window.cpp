@@ -4,7 +4,9 @@
 #include "oot3d_native_a32_window_summary.h"
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_switch_guard_alloc.h"
+#include "oot3d_switch_threads.h"
 #include "fast/backends/gfx_deko3d.h"
+#include "oot3d_romfs_mods.h"
 #include <sstream>
 
 namespace Oot3dA32Window {
@@ -33,6 +35,7 @@ std::string FormatSwitchBootStage(const char* stage) {
          << "control_profile=" << gSwitchControlProfile << '\n'
          << "topscreen_211_assets=" << (gSwitchTopScreen211Assets ? 1 : 0)
          << '\n'
+         << "romfs_mods=" << Oot3dNativeGame::RomFsModsStartupState().BootStatus << '\n'
          << "whole_aot_block_budget=" << gSwitchWholeAotBlockBudget << '\n'
          << "whole_aot_block_limit_exits="
          << gSwitchWholeAotBlockLimitExits << '\n'
@@ -48,15 +51,10 @@ std::string FormatSwitchBootStage(const char* stage) {
 }
 } // namespace
 
-// Etapas do boot e o fim da janela: síncronas, pelo escritor único do
-// boot-status.txt (oot3d_native_status_file.h), que descarta um heartbeat
-// ainda na fila em vez de deixá-lo sobrescrever esta etapa.
 void WriteSwitchBootStage(const char* stage) {
   (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(FormatSwitchBootStage(stage));
 }
 
-// Heartbeat (config/async_status_writes): formatado aqui, escrito pela
-// thread de serviço.
 void PostSwitchBootStage(const char* stage) {
   Oot3dNativeGame::SwitchBootStatusFile().Post(FormatSwitchBootStage(stage));
 }
@@ -116,7 +114,8 @@ void WriteA32BlockTrace(const std::filesystem::path &path,
 
 Oot3dNativeGame::NativeA32ProcessRunResult
 RunUntilGuestWait(Oot3dNativeGame::NativeA32Process &process,
-                  uint32_t wholeAotBlockBudget) {
+                  uint32_t wholeAotBlockBudget,
+                  const std::function<void()> *betweenRuns) {
   static const bool diagnoseWait = std::getenv("TRIAEVUM_DIAGNOSE_GUEST_WAIT") != nullptr;
   const auto waitStart = diagnoseWait ? std::chrono::steady_clock::now()
                                     : std::chrono::steady_clock::time_point{};
@@ -139,6 +138,7 @@ RunUntilGuestWait(Oot3dNativeGame::NativeA32Process &process,
       }
       throw std::runtime_error("guest did not reach a wait boundary within diagnostic deadline");
     }
+    if (betweenRuns != nullptr) (*betweenRuns)();
     result = process.Run(wholeAotBlockBudget);
   }
   return result;
@@ -147,8 +147,72 @@ RunUntilGuestWait(Oot3dNativeGame::NativeA32Process &process,
 void RequireRunnableGuest(
     const Oot3dNativeGame::NativeA32ProcessRunResult &result) {
   if (result.Kind == Oot3dNativeGame::NativeA32ProcessRunKind::Faulted) {
+    // The report (registers, backtrace, memory, area, last perf windows) goes
+    // to the game log only; boot-status.txt and the error screen keep the
+    // one-line error of the exception.
+    if (!result.GuestReport.empty()) {
+      LogFatalErrorForDemo(
+          (result.GuestReport + Oot3dNativeGame::GuestFaultPerf().Format()).c_str());
+    }
     throw std::runtime_error("native A32 process faulted: " + result.Error);
   }
+}
+
+// config/second_core: guest threads that asked for processor 1 (the sound
+// thread) run on their own host thread, pinned to core 1
+// (SwitchThreadRole::GuestCore1). From here on the game thread holds the
+// kernel lock for all its host work; NativeA32Process::Run releases it
+// around guest code (oot3d_native_a32_second_core.h).
+void NativeA32WindowSession::StartSecondCore() {
+  auto &process = *processStorage;
+  process.EnableSecondCore();
+  Oot3dNativeGame::SecondCore::LockKernel();
+  // With the host audio stream the DSP frames run on the second core's host
+  // thread (DeliverDspAudioFrameOnSecondCore); without it (SDL player and
+  // its resampler on the game thread) the game thread's pump delivers them.
+  dspOnSecondCore = hostAudioStream != nullptr;
+  if (dspOnSecondCore) {
+    process.SetSecondCoreIdleWork(
+        {[this] { return deferredDspAudioFrames != 0U; },
+         [this] { DeliverDspAudioFrameOnSecondCore(); }});
+  } else {
+    secondCorePump = [this] { PumpDspAudioFrame(); };
+  }
+  const uint32_t budget = launch.WholeAotBlockBudget;
+  secondCoreThread = std::thread([&process, budget] {
+    Oot3dNativeGame::PlaceSwitchThread(Oot3dNativeGame::SwitchThreadRole::GuestCore1);
+    process.RunSecondCore(budget);
+  });
+}
+
+void NativeA32WindowSession::StopSecondCore() noexcept {
+  if (!secondCoreThread.joinable()) return;
+  auto &process = *processStorage;
+  process.RequestSecondCoreStop();
+  {
+    // It may be waiting for the lock to see the request.
+    const Oot3dNativeGame::SecondCore::KernelRelease release;
+    secondCoreThread.join();
+  }
+  process.SetSecondCoreIdleWork({});
+  dspOnSecondCore = false;
+  process.DisableSecondCore();
+  Oot3dNativeGame::SecondCore::UnlockKernel();
+}
+
+// Second core: the deferred DSP frames of the host frame go out while the
+// game thread runs guest code, one at a time, each once the work the previous
+// one woke is done: the sound thread back in its wait on the second core and
+// no interrupt-level thread ready on the game thread (as the real DSP's
+// 4.9 ms period leaves it). It is parked while the HLE mix updates the shared
+// regions in place, so the mix never meets its writes; its processing then
+// overlaps the game thread's guest code.
+void NativeA32WindowSession::PumpDspAudioFrame() {
+  if (deferredDspAudioFrames == 0U) return;
+  if (processStorage->AuxiliaryWorkPending()) return;
+  --deferredDspAudioFrames;
+  ++secondCoreDsp.Pumped;
+  DeliverDspAudioFrames(1U, false);
 }
 
 void NativeA32WindowSession::Run() {
@@ -171,11 +235,13 @@ void NativeA32WindowSession::Run() {
 #if defined(__SWITCH__)
   // config/grass (mod): the grass source rules of the product preset (the
   // PC's default Grass object) for the deko3d backend; off without the file.
+  // The budgets follow the FPS: the start's here, a change in L3+R3 > Video
+  // at once (Deko3dSetGrassFrameRate, RunFrame).
   if (Fast::Deko3dRendererSelected()) {
     static constexpr std::string_view kProductGraphics =
 #include "triaevum_product_graphics.inc"
         ;
-    Fast::Deko3dConfigureGrass(kProductGraphics);
+    Fast::Deko3dConfigureGrass(kProductGraphics, visualInterpolationEnabled);
   }
   // Guard pages (config/guard_alloc) from here on: the boot is left out (it
   // ran out of memory with every small block guarded).
@@ -204,7 +270,7 @@ void NativeA32WindowSession::Run() {
               .Str(" worker_idle_waits=").Dec(sync.Waits.WorkerIdleWaits)
               .Str(" signals_skipped=").Dec(sync.Waits.SkippedNotifies);
         } else {
-          text.Str(" mutex=OCUPADO");
+          text.Str(" mutex=BUSY");
         }
         if (session.realtimePacerStorage.has_value()) {
           const auto tail = session.realtimePacerStorage->TailCounters();
@@ -228,6 +294,7 @@ NativeA32WindowSession::~NativeA32WindowSession() {
   // A run that left by an exception never reached Finish.
   Oot3dNativeGame::HangWatch::Stop();
 #endif
+  StopSecondCore();
   StopRendering();
 }
 
@@ -261,6 +328,9 @@ void NativeA32WindowSession::Finish() {
   // Before anything the watchdog's extra section reads goes away.
   Oot3dNativeGame::HangWatch::Stop();
 #endif
+  // The second core's host thread joins first: everything below reads guest
+  // state single-threaded.
+  StopSecondCore();
   auto &hostServices = *hostServicesStorage;
   auto &frameRatePolicy = *frameRatePolicyStorage;
   auto &blockTraceWriter = *blockTraceWriterStorage;

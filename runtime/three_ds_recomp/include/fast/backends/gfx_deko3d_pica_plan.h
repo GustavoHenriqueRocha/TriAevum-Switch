@@ -1,6 +1,6 @@
 #pragma once
 
-// Package 4 of the deko3d backend (docs/DEKO3D_PROGRESSO.md): what a PICA
+// Package 4 of the deko3d backend (docs/DEKO3D_PROGRESS.md): what a PICA
 // draw uploads, as plain decisions free of deko3d so the host checks them
 // (oot3d_deko3d_backend_tests). The console side (gfx_deko3d_pica_resources.cpp)
 // turns them into DkImage/DkSampler descriptors, stream memory and vertex
@@ -9,7 +9,14 @@
 // Every rule mirrors the GL backend (gfx_opengl_pica.cpp) so both backends
 // sample and fetch the same values: ToPicaGlWrap, PicaGlMinFilter, the
 // sampler LOD range, the vertex validation and glVertexAttribPointer with
-// normalized = false.
+// normalized = false. One exception, the PICA LOD bias: the generated
+// fragment shaders add it to their explicit LOD (textureLod(..., lod +
+// texture_lod_bias[n])), so the sampler carries none, as in the Vulkan
+// backend (SamplerState.LodBias = 0). A sampler bias adds to an explicit LOD
+// too (Vulkan: lambda' = lambda_base + sampler.bias; GL: TEXTURE_LOD_BIAS), so
+// the GL backend, which also sets GL_TEXTURE_LOD_BIAS, applies it twice, and
+// so did this backend: -1.7 became -3.4 on the Forest Temple's floors, which
+// then shimmered (SWITCH_PORT.md "Floor shimmer on deko3d").
 
 #include "fast/renderer3ds/pica_native_state.h"
 
@@ -18,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace Fast::Deko3d {
 
@@ -49,7 +57,7 @@ struct PicaSamplerKey {
     PicaMipFilter Mip = PicaMipFilter::None;
     PicaWrap WrapS = PicaWrap::ClampToEdge;
     PicaWrap WrapT = PicaWrap::ClampToEdge;
-    int16_t LodBiasRaw = 0; // 1/256 units, as the GL backend's GL_TEXTURE_LOD_BIAS
+    // No LOD bias: the shader applies the PICA's (see the top of this file).
     uint8_t MinLevel = 0;   // GL_TEXTURE_BASE_LEVEL
     uint8_t MaxLevel = 0;   // GL_TEXTURE_MAX_LEVEL (clamped to the uploaded chain)
 
@@ -61,7 +69,6 @@ struct PicaSamplerKeyHash {
         uint64_t value = static_cast<uint64_t>(key.MinLinear) | (static_cast<uint64_t>(key.MagLinear) << 1U) |
                          (static_cast<uint64_t>(key.Mip) << 2U) | (static_cast<uint64_t>(key.WrapS) << 4U) |
                          (static_cast<uint64_t>(key.WrapT) << 6U) |
-                         (static_cast<uint64_t>(static_cast<uint16_t>(key.LodBiasRaw)) << 8U) |
                          (static_cast<uint64_t>(key.MinLevel) << 24U) | (static_cast<uint64_t>(key.MaxLevel) << 32U);
         value *= 0x9E3779B97F4A7C15ULL;
         return static_cast<size_t>(value ^ (value >> 32U));
@@ -78,7 +85,6 @@ struct PicaSamplerKeyHash {
                               : (texture.MipLinear ? PicaMipFilter::Linear : PicaMipFilter::Nearest);
     key.WrapS = MapPicaWrap(texture.NativeWrapS);
     key.WrapT = MapPicaWrap(texture.NativeWrapT);
-    key.LodBiasRaw = texture.LodBiasRaw;
     const uint32_t top = mipLevels == 0U ? 0U : mipLevels - 1U;
     key.MaxLevel = static_cast<uint8_t>(std::min<uint32_t>(texture.MaxMipLevel, top));
     key.MinLevel = static_cast<uint8_t>(std::min<uint32_t>(texture.MinMipLevel, key.MaxLevel));
@@ -88,7 +94,9 @@ struct PicaSamplerKeyHash {
 // ---- textures -------------------------------------------------------------
 
 // Same identity as the GL backend's PicaGlTextureKey: content, placement,
-// format and sampler state (the sampler is part of the GL texture object).
+// format and sampler state (each texture owns its sampler), except the LOD
+// bias, which is not sampler state here: draws of one texture with two biases
+// (the Forest Temple's water: -1.0 and -1.7) share one image and one pack upload.
 struct PicaTextureKey {
     uint64_t ContentHash = 0;
     uint32_t PhysicalAddress = 0;
@@ -101,7 +109,6 @@ struct PicaTextureKey {
     bool MinLinear = false;
     bool MagLinear = false;
     bool MipLinear = false;
-    int16_t LodBiasRaw = 0;
     uint8_t MinMipLevel = 0;
     uint8_t MaxMipLevel = 0;
 
@@ -120,8 +127,7 @@ struct PicaTextureKeyHash {
             (static_cast<uint64_t>(key.WrapS) << 8U) | key.WrapT);
         mix((static_cast<uint64_t>(key.MinLinear) << 2U) | (static_cast<uint64_t>(key.MagLinear) << 1U) |
             static_cast<uint64_t>(key.MipLinear));
-        mix((static_cast<uint64_t>(static_cast<uint16_t>(key.LodBiasRaw)) << 16U) |
-            (static_cast<uint64_t>(key.MinMipLevel) << 8U) | key.MaxMipLevel);
+        mix((static_cast<uint64_t>(key.MinMipLevel) << 8U) | key.MaxMipLevel);
         return static_cast<size_t>(value);
     }
 };
@@ -130,8 +136,8 @@ struct PicaTextureKeyHash {
                                                           uint64_t contentHash) noexcept {
     return {contentHash,         texture.PhysicalAddress, texture.Width,     texture.Height,
             texture.NativeFormat, texture.NativeType,     texture.NativeWrapS, texture.NativeWrapT,
-            texture.MinLinear,   texture.MagLinear,       texture.MipLinear, texture.LodBiasRaw,
-            texture.MinMipLevel, texture.MaxMipLevel};
+            texture.MinLinear,   texture.MagLinear,       texture.MipLinear, texture.MinMipLevel,
+            texture.MaxMipLevel};
 }
 
 enum class PicaTextureUse : uint8_t {
@@ -148,6 +154,26 @@ enum class PicaTextureUse : uint8_t {
         return texture.NativeType == 2U ? PicaTextureUse::Shadow2D : PicaTextureUse::Color;
     }
     return PicaTextureUse::Unsupported;
+}
+
+// A texture of the game's own 2D menus (pause pages, text boxes): a colour
+// texture without mip levels of a draw in the `Ui` composition domain or
+// layer. With config/texture_pack_menu on (`menuImages`, the default) its
+// texture pack image is resolved as a HUD image
+// (AzaharTextureRequest::UserInterface + Menu): the cache the HUD's own pack
+// images live in, so the pause pages share the images the HUD asked for
+// ahead (menu_item_parts00's tabs, the item icons, the digits), kept for the
+// session instead of decoded again for every new guest address, and listed
+// for the next start (config/texture_pack_hud). Mipmapped textures (3D models
+// in a menu) stay on the world path: HUD images have no mip chain.
+[[nodiscard]] constexpr bool PicaTextureIsMenuArt(const Renderer3ds::PicaTextureView& texture, bool uiDraw,
+                                                  bool menuImages) noexcept {
+    return menuImages && uiDraw && texture.NativeType == 0U && texture.MaxMipLevel == 0U;
+}
+
+// config/texture_pack_menu: absent, empty or anything but a leading `0` = on.
+[[nodiscard]] constexpr bool ParseTexturePackMenuSetting(std::string_view firstLine, bool exists) noexcept {
+    return !exists || firstLine.empty() || firstLine.front() != '0';
 }
 
 constexpr uint32_t kMaxPicaMipLevels = 16U;

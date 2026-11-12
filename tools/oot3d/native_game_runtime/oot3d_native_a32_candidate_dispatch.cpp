@@ -1,6 +1,7 @@
 // Per-block native candidates of the A32 window: TopScreen UI source-port blocks and product hooks.
 #include <cstring>
 #include "oot3d_native_a32_window_shared.h"
+#include "oot3d_free_camera_smoothing_config.h"
 
 namespace Oot3dA32Window {
 
@@ -38,14 +39,11 @@ bool ExecuteTopScreenUiSourcePortBlock(
   // (0x005D19F8, 0x005D1CBC, 0x005D1BE8).
   if (dispatch.WideItems != nullptr) {
     if (pc == Oot3dNativeGame::kTopScreenPageProjectionUploadCall) {
-      if (dispatch.SystemPage != nullptr && dispatch.SystemPage->Drawing()) {
-        try {
-          return dispatch.WideItems->ExecutePageProjection(state, true);
-        } catch (...) {
-          dispatch.SystemPage->Cancel();
-          throw;
-        }
-      }
+      // System draws in the centred page viewport with the page's own
+      // projection (TopScreenSystemPageRuntime::Execute): never widened,
+      // even with another page's word still set.
+      if (dispatch.SystemPage != nullptr && dispatch.SystemPage->Drawing())
+        return dispatch.WideItems->ExecutePageProjection(state, false);
       Oot3dNativeGame::TopScreenPauseDrawInputs inputs;
       if (!Oot3dNativeGame::ReadTopScreenPauseDrawInputs(memory, &inputs)) {
         return false;
@@ -137,9 +135,9 @@ bool ExecuteTopScreenUiSourcePortBlock(
           Oot3dNativeGame::AdvanceTopScreenDebugGameOver(
               globalInputs, static_cast<std::int16_t>(health),
               &dispatch.TopScreenDebugGameOver)) {
-        // config/debug_force_game_over: a morte segue o caminho nativo.
+        // config/debug_force_game_over: the death follows the native path.
         memory.Write16(Oot3dNativeGame::kTopScreenSaveContextHealth, 0U);
-        std::fprintf(stderr, "[topscreen] debug_force_game_over: vida zerada\n");
+        std::fprintf(stderr, "[topscreen] debug_force_game_over: health zeroed\n");
       }
     }
     Oot3dNativeGame::TopScreenRendererVisibilityInputs inputs;
@@ -161,7 +159,7 @@ bool ExecuteTopScreenUiSourcePortBlock(
          !memory.Read16(state.r[1] + 0x318CU, &inputs.CallSceneSequence))) {
       return false;
     }
-    // Produto: o gancho de 0x00427A3C é o dono do Game Over (ver
+    // Product: the 0x00427A3C hook owns the Game Over (see
     // TopScreenRendererVisibilityCallDefersToGameOverDraw).
     if (Oot3dNativeGame::TopScreenRendererVisibilityCallDefersToGameOverDraw(
             std::binary_search(dispatch.ProductTopScreenBlocks.begin(),
@@ -550,6 +548,9 @@ bool ExecuteTopScreenUiSourcePortBlock(
       ++dispatch.TopScreenCameraUpdateCalls;
       bool active = false;
       const auto cameraInput = dispatch.TopScreenCameraInput.Consume();
+      dispatch.TopScreenCamera.Camera.Smoothing =
+          Oot3dNativeGame::LiveFreeCameraSmoothing().load(
+              std::memory_order_relaxed);
       if (!Oot3dNativeGame::BeginTopScreenFreeCameraGuestUpdate(
               memory, state.r[0], state.r[1], cameraStackAddress,
               cameraInput.X, cameraInput.Y,

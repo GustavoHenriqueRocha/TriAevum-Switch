@@ -1,4 +1,4 @@
-// "Piscada" ao girar a câmera rápido com fps60 (native30_interpolated).
+// "Flicker" when turning the camera fast with fps60 (native30_interpolated).
 //
 // The game culls its world pieces with the camera of each guest step. While
 // the camera turns fast, every step adds pieces at one screen edge and drops
@@ -276,9 +276,9 @@ void TestStillCameraIsUnchanged() {
         same = a.Draws[i].BasePlan == b.Draws[i].BasePlan &&
                a.Draws[i].VertexUniforms.has_value() == b.Draws[i].VertexUniforms.has_value();
     }
-    Check(same, "câmera parada: amostra intermediária igual à antiga");
+    Check(same, "still camera: intermediate sample same as the old one");
     Check(fixed.UnmatchedStats().UnmatchedCurrent == 0 && fixed.UnmatchedStats().InsertedPrevious == 0,
-          "câmera parada: nenhum draw sem par");
+          "still camera: no unmatched draw");
 }
 
 } // namespace
@@ -288,22 +288,22 @@ int main() {
     const Oot3dPicaVisualTransitionOptions exactOnly{.ExactStep = true, .CarryUnmatched = false};
     const Oot3dPicaVisualTransitionOptions fixed{.ExactStep = true, .CarryUnmatched = true};
     for (const bool precomposed : {false, true}) {
-        const char* mode = precomposed ? "câmera nas linhas do modelo" : "câmera nas linhas de view";
-        std::printf("== %s, giro de %.0f graus por passo\n", mode, kStepDegrees);
+        const char* mode = precomposed ? "camera in the model rows" : "camera in the view rows";
+        std::printf("== %s, turn of %.0f degrees per step\n", mode, kStepDegrees);
         const auto before = Spin(precomposed, legacy, 80);
         const auto exact = Spin(precomposed, exactOnly, 80);
         Oot3dPicaVisualUnmatchedStats stats;
         const auto after = Spin(precomposed, fixed, 80, &stats);
-        Report("antigo (amostra sobre o quadro novo)", before);
-        Report("so exact_step", exact);
+        Report("old (sample over the new frame)", before);
+        Report("exact_step only", exact);
         Report("exact_step + carry_unmatched", after);
         Check(before.Missing > 0 && before.Displaced > 0,
-              std::string(mode) + ": o caminho antigo mostra o defeito (buracos e peças deslocadas)");
-        Check(exact.Total() < before.Total(), std::string(mode) + ": exact_step sozinho já reduz");
-        Check(after.Total() == 0, std::string(mode) + ": com a correção nenhuma peça falta ou sai do lugar");
-        Check(stats.CameraMeasured && stats.WithoutCamera == 0, std::string(mode) + ": câmera medida nos draws pareados");
+              std::string(mode) + ": the old path shows the defect (holes and displaced pieces)");
+        Check(exact.Total() < before.Total(), std::string(mode) + ": exact_step alone already reduces it");
+        Check(after.Total() == 0, std::string(mode) + ": with the fix no piece is missing or out of place");
+        Check(stats.CameraMeasured && stats.WithoutCamera == 0, std::string(mode) + ": camera measured in the matched draws");
     }
     TestStillCameraIsUnchanged();
-    std::printf("%s\n", gFailures == 0 ? "todos ok" : "FALHOU");
+    std::printf("%s\n", gFailures == 0 ? "all ok" : "FAILED");
     return gFailures == 0 ? 0 : 1;
 }

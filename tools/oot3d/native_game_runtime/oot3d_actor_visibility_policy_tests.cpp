@@ -1,7 +1,9 @@
 #include "oot3d_actor_visibility_policy.h"
+#include "oot3d_draw_distance_config.h"
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -120,6 +122,17 @@ int main() {
         SelectActorExtensions(candidates);
         Expect(!candidates[0].Selected, "NaN incumbent cannot monopolize the budget");
 
+        // The Draw distance choice's limit: Farther and Maximum select more.
+        Expect(ActorExtensionLimit(ActorDrawDistance::Original) == kActorExtensionLimit &&
+                   ActorExtensionLimit(ActorDrawDistance::Far) == kActorExtensionLimit &&
+                   ActorExtensionLimit(ActorDrawDistance::Farther) == 48U &&
+                   ActorExtensionLimit(ActorDrawDistance::Maximum) == 64U,
+               "draw distance limits");
+        candidates[0].DistanceSquared = 1.0F;
+        SelectActorExtensions(candidates, ActorExtensionLimit(ActorDrawDistance::Maximum));
+        Expect(std::all_of(candidates.begin(), candidates.end(), [](const auto& c) { return c.Selected; }),
+               "Maximum's limit selects all 40");
+
         // Obj_Mure2's radial scalar.
         Expect(ObjMure2DistanceScalar(1.0F, 300.0F, 400.0F, 1.0F, false) == 1.0F, "native scalar kept");
         Expect(ObjMure2DistanceScalar(4.0F, 0.0F, 0.0F, 1.0F, true) == 25.0F, "extended is at least 5x squared");
@@ -129,6 +142,60 @@ int main() {
         const float aside = ObjMure2DistanceScalar(1.0F, 600.0F, 0.0F, 1.2F, false);
         Expect(aside > 1.4399F && aside < 1.4401F, "aside the test sees the presented width");
         Expect(ObjMure2DistanceScalar(1.0F, 0.0F, 0.0F, 1.2F, false) == 1.0F, "a zero position is guarded");
+
+        // L3+R3 > Video > Draw distance: choices, words and the config file.
+        Expect(ActorDrawDistanceMultiplier(ActorDrawDistance::Original) == 1.0F &&
+               ActorDrawDistanceMultiplier(ActorDrawDistance::Far) == 2.0F &&
+               ActorDrawDistanceMultiplier(ActorDrawDistance::Farther) == 3.0F &&
+               ActorDrawDistanceMultiplier(ActorDrawDistance::Maximum) == kExtendedActorDistanceMultiplier,
+               "draw distance multipliers");
+        for (const auto choice : {ActorDrawDistance::Original, ActorDrawDistance::Far, ActorDrawDistance::Farther,
+                                  ActorDrawDistance::Maximum})
+            Expect(ParseActorDrawDistance(ActorDrawDistanceWord(choice)) == choice, "draw distance word round trip");
+        Expect(ParseActorDrawDistance(nullptr) == ActorDrawDistance::Original &&
+               ParseActorDrawDistance("5") == ActorDrawDistance::Original &&
+               ParseActorDrawDistance("") == ActorDrawDistance::Original, "unknown words are Original");
+        {
+            const auto dir = std::filesystem::temp_directory_path() / "oot3d_draw_distance_config_test";
+            std::filesystem::remove_all(dir);
+            Expect(ReadActorDrawDistance(dir) == kDefaultActorDrawDistance, "no file is the default");
+            for (const auto choice : {ActorDrawDistance::Far, ActorDrawDistance::Farther, ActorDrawDistance::Maximum,
+                                      ActorDrawDistance::Original}) {
+                Expect(SaveActorDrawDistance(dir, choice), "draw distance saved");
+                Expect(ReadActorDrawDistance(dir) == choice, "draw distance reloaded");
+            }
+            Expect(!std::filesystem::exists(dir / kDrawDistanceConfigName), "the default removes the file");
+            std::filesystem::remove_all(dir);
+        }
+        // 2x and 3x: (forward 1000) * multiplier + scale 50.
+        ActorCullingVolume twice;
+        twice.DistanceMultiplier = ActorDrawDistanceMultiplier(ActorDrawDistance::Far);
+        ActorCullingVolume thrice;
+        thrice.DistanceMultiplier = ActorDrawDistanceMultiplier(ActorDrawDistance::Farther);
+        Expect(ActorInsideExtendedCullingVolume(Actor(0, 0, 2049, 2049), twice) &&
+               !ActorInsideExtendedCullingVolume(Actor(0, 0, 2050, 2050), twice), "2x forward + scale");
+        Expect(ActorInsideExtendedCullingVolume(Actor(0, 0, 3049, 3049), thrice) &&
+               !ActorInsideExtendedCullingVolume(Actor(0, 0, 3050, 3050), thrice), "3x forward + scale");
+        // (200 + 1000) * 2 + 50 = 2450.
+        auto shortTwice = Actor(0, 0, 2449, 2449);
+        shortTwice.Forward = 200.0F;
+        Expect(ActorInsideExtendedCullingVolume(shortTwice, twice), "SoH's +1000 under 500 at 2x");
+        shortTwice.Z = shortTwice.W = 2450.0F;
+        Expect(!ActorInsideExtendedCullingVolume(shortTwice, twice), "beyond the short range at 2x");
+
+        // Exclusions: En_Viewer, Gold Skulltulas (En_Sw types 1 and 2).
+        Expect(ActorExtensionExcluded(0x002A, 0) && ActorExtensionExcluded(0x0095, 0x2000) &&
+               ActorExtensionExcluded(0x0095, 0x4000) && ActorExtensionExcluded(0x0095, 0x5FFF),
+               "excluded actors");
+        Expect(!ActorExtensionExcluded(0x0095, 0x0000) && !ActorExtensionExcluded(0x0095, 0x6000) &&
+               !ActorExtensionExcluded(0x0141, 0x2000), "a Skullwalltula and others extend");
+
+        // Handoff: the extension's fade continues until the title's catches up.
+        Expect(ActorHandoffFade(10, 1, 0) == 10, "a fully shown actor stays shown");
+        Expect(ActorHandoffFade(4, 1, 0) == 5, "a fading-in extension keeps ramping");
+        Expect(ActorHandoffFade(10, 10, 0) == 10 && ActorHandoffFade(3, 9, 0) == 9, "the title's fade wins once ahead");
+        Expect(ActorHandoffFade(10, 1, 20) == 11 && ActorHandoffFade(30, 1, 20) == 20, "custom maximum");
+        Expect(ActorHandoffFade(0, 1, 0) == 1, "no extension history keeps the title's");
     } catch (const std::exception& error) {
         std::cerr << "oot3d_actor_visibility_policy_tests: " << error.what() << '\n';
         return 1;

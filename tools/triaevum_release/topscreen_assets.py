@@ -22,7 +22,9 @@ except ImportError:
 
 IMPORT_VERSION = 1
 FONT_IMPORT_VERSION = 2
-ARCHIVE_NAME = "topscreen211.zip"
+# "Single Screen Experience" 3.2.1 (GameBanana 695893); 2.1.1 is no longer
+# downloadable. The recipe's optional_inputs.topscreen_archive pins it.
+ARCHIVE_NAME = "singlescreen_321.zip"
 
 
 def acquire_archive(root: Path, data_root: Path, contract: dict,
@@ -32,10 +34,10 @@ def acquire_archive(root: Path, data_root: Path, contract: dict,
         if candidate.is_file():
             if (candidate.stat().st_size != contract["bytes"] or
                     sha256_file(candidate) != contract["sha256"]):
-                raise ValueError(f"TopScreen 2.1.1 archive failed verification: {candidate}")
+                raise ValueError(f"TopScreen archive failed verification: {candidate}")
             return candidate
 
-    report("topscreen", "Downloading the official TopScreen 2.1.1 texture source...")
+    report("topscreen", "Downloading the official TopScreen texture source...")
     try:
         return download_verified(contract["url"], cache,
             size=contract["bytes"], sha256=contract["sha256"],
@@ -50,7 +52,7 @@ def acquire_archive(root: Path, data_root: Path, contract: dict,
 def prepare_topscreen_assets(*, root: Path, data_root: Path, recipe: dict,
                             romfs: Path,
                             report: Callable[[str, str], None] = lambda *_: None) -> Path | None:
-    contract = recipe.get("optional_inputs", {}).get("topscreen_2_1_1_archive")
+    contract = recipe.get("optional_inputs", {}).get("topscreen_archive")
     if contract is None:
         return None  # Other title/revision recipes do not inherit OOT3D UI assets.
     identity = {"import_version": IMPORT_VERSION, "archive_sha256": contract["sha256"],

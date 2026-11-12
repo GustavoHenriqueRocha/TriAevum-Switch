@@ -66,13 +66,28 @@ void Oot3dPicaDeferredPlanBuilder::StopWorker() {
     mWorker = false;
 }
 
+void Oot3dPicaDeferredPlanBuilder::SetBuildOptions(bool canonicalIdentity,
+                                                   bool inPlace, bool parallel) {
+    mBuildOptions.CanonicalIdentity = canonicalIdentity;
+    mBuildOptions.InPlace = inPlace;
+    mParallel = parallel;
+}
+
+Oot3dPicaPlanBuildOptions Oot3dPicaDeferredPlanBuilder::BuildOptions() noexcept {
+    auto options = mBuildOptions;
+    // Parallel builds: whoever builds (even under the build mutex) takes the
+    // cache's own mutex, since claimed slots build without the build mutex.
+    options.CacheMutex = mParallel ? &mCacheMutex : nullptr;
+    return options;
+}
+
 bool Oot3dPicaDeferredPlanBuilder::Build(Oot3dPicaDrawSubmission& submission,
                                          Oot3dPicaVulkanDrawPlan& plan,
                                          std::string* error) {
     const auto started = std::chrono::steady_clock::now();
     std::lock_guard lock(mBuildMutex);
     const bool built = BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
-        submission, plan, error, &mShaderCache);
+        submission, plan, error, &mShaderCache, BuildOptions());
     mSerialBuilds.fetch_add(1U, std::memory_order_relaxed);
     mSerialNanoseconds.fetch_add(NanosecondsSince(started),
                                  std::memory_order_relaxed);
@@ -89,6 +104,7 @@ void Oot3dPicaDeferredPlanBuilder::BatchRecycler::operator()(
     // Release what the batch still references (submission snapshots, plans
     // nobody took) but keep every vector's capacity.
     batch->Submissions.clear();
+    batch->Delta.reset();
     for (size_t index = 0; index < batch->Status.size(); ++index) {
         if (batch->Status[index] == Status::Built) {
             batch->Plans[index] = {};
@@ -107,7 +123,8 @@ void Oot3dPicaDeferredPlanBuilder::BatchRecycler::operator()(
 
 std::shared_ptr<Oot3dPicaDeferredPlanBatch>
 Oot3dPicaDeferredPlanBuilder::BeginBatch(
-    std::vector<Oot3dPicaDrawSubmission>& drained) {
+    std::vector<Oot3dPicaDrawSubmission>& drained,
+    std::shared_ptr<Oot3dPicaCaptureDeltaLog> delta) {
     std::unique_ptr<Oot3dPicaDeferredPlanBatch> storage;
     {
         std::lock_guard lock(mPool->Mutex);
@@ -130,6 +147,7 @@ Oot3dPicaDeferredPlanBuilder::BeginBatch(
     // queue fills it next, without regrowing.
     batch->Submissions.clear();
     batch->Submissions.swap(drained);
+    batch->Delta = std::move(delta);
     const size_t count = batch->Submissions.size();
     batch->Slots.resize(count);
     batch->Status.assign(count, Oot3dPicaDeferredPlanBatch::SlotStatus::Unused);
@@ -281,19 +299,50 @@ uint64_t Oot3dPicaDeferredPlanBuilder::BuildSlotLocked(
     if (batch.Status[index] != Status::Pending) {
         return 0U;
     }
-    const auto started = std::chrono::steady_clock::now();
+    SizeSlotStorageLocked(batch);
+    bool built = false;
+    const uint64_t spent = BuildClaimedSlot(batch, index, built);
+    batch.Status[index] = built ? Status::Built : Status::Failed;
+    return spent;
+}
+
+void Oot3dPicaDeferredPlanBuilder::SizeSlotStorageLocked(
+    Oot3dPicaDeferredPlanBatch& batch) {
     if (batch.Plans.size() < batch.Status.size()) {
         // Plans are several kilobytes each: grown by a builder (never on the
-        // guest thread) and kept by the recycled batch.
+        // guest thread) and kept by the recycled batch. With parallel builds
+        // this runs at the batch's first claim, before any of its slots
+        // builds outside the mutex, and never again for that publication.
         batch.Plans.resize(batch.Status.size());
         batch.Errors.resize(batch.Status.size());
     }
+}
+
+bool Oot3dPicaDeferredPlanBuilder::ClaimSlotLocked(
+    Oot3dPicaDeferredPlanBatch& batch, size_t index) {
+    using Status = Oot3dPicaDeferredPlanBatch::SlotStatus;
+    if (batch.Status[index] != Status::Pending) {
+        return false;
+    }
+    SizeSlotStorageLocked(batch);
+    batch.Status[index] = Status::Building;
+    return true;
+}
+
+uint64_t Oot3dPicaDeferredPlanBuilder::BuildClaimedSlot(
+    Oot3dPicaDeferredPlanBatch& batch, size_t index, bool& built) {
+    const auto started = std::chrono::steady_clock::now();
     batch.Errors[index].clear();
-    bool built = false;
+    built = false;
     try {
+        // Capture delta: the submission's register file, uniforms and
+        // default attributes, from the log (every earlier slot on the way).
+        if (batch.Delta != nullptr) {
+            batch.Delta->MaterializeThrough(batch.Submissions, index);
+        }
         built = BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
             batch.Submissions[index], batch.Plans[index],
-            &batch.Errors[index], &mShaderCache);
+            &batch.Errors[index], &mShaderCache, BuildOptions());
     } catch (const std::exception& exception) {
         batch.Errors[index] = exception.what();
     } catch (...) {
@@ -305,9 +354,17 @@ uint64_t Oot3dPicaDeferredPlanBuilder::BuildSlotLocked(
     // cost grow with play time. The packet's shared shader and LUT stores go
     // when the batch is recycled.
     batch.Submissions[index].Resources.clear();
-    batch.Status[index] = built ? Status::Built : Status::Failed;
     const uint64_t spent = NanosecondsSince(started);
     return spent != 0U ? spent : 1U;
+}
+
+void Oot3dPicaDeferredPlanBuilder::FinishSlotLocked(
+    Oot3dPicaDeferredPlanBatch& batch, size_t index, bool built) {
+    using Status = Oot3dPicaDeferredPlanBatch::SlotStatus;
+    batch.Status[index] = built ? Status::Built : Status::Failed;
+    if (mSlotWaiters != 0U) {
+        mSlotBuilt.notify_all();
+    }
 }
 
 void Oot3dPicaDeferredPlanBuilder::WorkerLoop() {
@@ -349,6 +406,33 @@ void Oot3dPicaDeferredPlanBuilder::WorkerLoop() {
             if (mStopRequested.load(std::memory_order_relaxed)) {
                 stopping = true;
                 break;
+            }
+            if (mParallel) {
+                // Claim under the mutex, build outside it (a resolve builds
+                // other slots meanwhile), publish under it.
+                bool claimed = false;
+                {
+                    std::unique_lock buildLock(mBuildMutex, std::defer_lock);
+                    LockBuild(buildLock, mWorkerLockWaits, mWorkerLockWaitNanoseconds);
+                    claimed = ClaimSlotLocked(*batch, index);
+                }
+                if (!claimed) {
+                    continue;
+                }
+                bool built = false;
+                nanoseconds += BuildClaimedSlot(*batch, index, built);
+                ++builds;
+                // The plan is still this thread's until FinishSlotLocked.
+                if (built && mPredecodeTextures.load(std::memory_order_relaxed)) {
+                    CollectPredecodeJobs(batch->Plans[index], predecode);
+                }
+                {
+                    std::unique_lock buildLock(mBuildMutex, std::defer_lock);
+                    LockBuild(buildLock, mWorkerLockWaits, mWorkerLockWaitNanoseconds);
+                    FinishSlotLocked(*batch, index, built);
+                }
+                RunPredecodeJobs(predecode);
+                continue;
             }
             std::unique_lock buildLock(mBuildMutex, std::defer_lock);
             LockBuild(buildLock, mWorkerLockWaits, mWorkerLockWaitNanoseconds);
@@ -408,6 +492,9 @@ Oot3dPicaDeferredPlanStats Oot3dPicaDeferredPlanBuilder::Stats() const noexcept 
     stats.ConsumerLocks = mConsumerLocks.load(std::memory_order_relaxed);
     stats.WorkerIdleNanoseconds =
         mWorkerIdleNanoseconds.load(std::memory_order_relaxed);
+    stats.ConsumerSlotWaits = mConsumerSlotWaits.load(std::memory_order_relaxed);
+    stats.ConsumerSlotWaitNanoseconds =
+        mConsumerSlotWaitNanoseconds.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -510,6 +597,109 @@ class DeferredPlanResolver {
         // True once this run built a slot itself (the worker had not).
         bool mBuiltHere = false;
     };
+
+    // Parallel builds (Oot3dPicaDeferredPlanBuilder::Parallel): a pending
+    // slot is claimed and built here without the build mutex, so the worker
+    // keeps building other slots meanwhile; a slot the worker is building is
+    // left for a second pass (or waited for). Counters are published once,
+    // when the resolution ends.
+    class Parallel {
+      public:
+        Parallel() = default;
+        Parallel(const Parallel&) = delete;
+        Parallel& operator=(const Parallel&) = delete;
+        ~Parallel() { Publish(); }
+
+        // false: an error. With mayDefer, deferred=true leaves a slot that
+        // another thread is building for a later call without mayDefer.
+        bool Resolve(const Oot3dPicaDeferredPlanSlot& slot,
+                     Oot3dPicaVulkanDrawPlan& plan, std::string* error,
+                     bool mayDefer, bool& deferred) {
+            using Status = Oot3dPicaDeferredPlanBatch::SlotStatus;
+            auto& batch = *slot.Batch;
+            auto& builder = *batch.Builder;
+            Use(builder);
+            const size_t index = slot.Index;
+            deferred = false;
+            std::unique_lock lock(builder.mBuildMutex, std::defer_lock);
+            builder.LockBuild(lock, builder.mConsumerLockWaits,
+                              builder.mConsumerLockWaitNanoseconds);
+            ++mLocks;
+            if (index >= batch.Status.size() || !batch.Published) {
+                SetError(error, "native PICA deferred plan was never published");
+                return false;
+            }
+            if (builder.ClaimSlotLocked(batch, index)) {
+                lock.unlock();
+                bool built = false;
+                mNanoseconds += builder.BuildClaimedSlot(batch, index, built);
+                ++mBuilds;
+                builder.LockBuild(lock, builder.mConsumerLockWaits,
+                                  builder.mConsumerLockWaitNanoseconds);
+                ++mLocks;
+                builder.FinishSlotLocked(batch, index, built);
+            } else if (batch.Status[index] == Status::Building) {
+                if (mayDefer) {
+                    deferred = true;
+                    return true;
+                }
+                const auto started = std::chrono::steady_clock::now();
+                ++builder.mSlotWaiters;
+                builder.mSlotBuilt.wait(lock, [&] {
+                    return batch.Status[index] != Status::Building;
+                });
+                --builder.mSlotWaiters;
+                ++mWaits;
+                mWaitNanoseconds += NanosecondsSince(started);
+            }
+            switch (batch.Status[index]) {
+            case Status::Built:
+                plan = std::move(batch.Plans[index]);
+                batch.Status[index] = Status::Taken;
+                return true;
+            case Status::Failed:
+                SetError(error, "native PICA Vulkan plan failed: " +
+                                    batch.Errors[index]);
+                return false;
+            default:
+                SetError(error, "native PICA deferred plan resolved twice");
+                return false;
+            }
+        }
+
+      private:
+        void Use(Oot3dPicaDeferredPlanBuilder& builder) {
+            if (mBuilder != &builder) {
+                Publish();
+                mBuilder = &builder;
+            }
+        }
+
+        void Publish() {
+            if (mBuilder == nullptr) return;
+            const auto add = [](std::atomic<uint64_t>& counter, uint64_t& value) {
+                if (value != 0U) counter.fetch_add(value, std::memory_order_relaxed);
+                value = 0U;
+            };
+            add(mBuilder->mConsumerLocks, mLocks);
+            add(mBuilder->mConsumerBuilds, mBuilds);
+            add(mBuilder->mConsumerNanoseconds, mNanoseconds);
+            add(mBuilder->mConsumerSlotWaits, mWaits);
+            add(mBuilder->mConsumerSlotWaitNanoseconds, mWaitNanoseconds);
+        }
+
+        Oot3dPicaDeferredPlanBuilder* mBuilder = nullptr;
+        uint64_t mLocks = 0U;
+        uint64_t mBuilds = 0U;
+        uint64_t mNanoseconds = 0U;
+        uint64_t mWaits = 0U;
+        uint64_t mWaitNanoseconds = 0U;
+    };
+
+    [[nodiscard]] static bool ParallelBuilds(
+        const Oot3dPicaDeferredPlanSlot& slot) noexcept {
+        return slot.Batch->Builder->mParallel;
+    }
 };
 
 bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan& plan,
@@ -519,6 +709,11 @@ bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan& plan,
     }
     // Holds the batch alive past the assignment that drops plan.Deferred.
     const auto slot = std::move(plan.Deferred);
+    if (DeferredPlanResolver::ParallelBuilds(*slot)) {
+        DeferredPlanResolver::Parallel parallel;
+        bool deferred = false;
+        return parallel.Resolve(*slot, plan, error, false, deferred);
+    }
     DeferredPlanResolver::Run run;
     run.Begin(slot);
     return run.Resolve(*slot, plan, error);
@@ -540,11 +735,31 @@ bool ResolveOot3dPicaDeferredVisualFrame(Oot3dPicaVisualFrame& frame,
         // after a draw the worker had not built yet (built here): the worker
         // then gets the mutex for the next slot, as with a lock per draw.
         DeferredPlanResolver::Run run;
-        for (auto& draw : frame.Draws) {
+        // Parallel builds: every pending slot is built here while the worker
+        // builds others; the slots it was building are taken afterwards.
+        DeferredPlanResolver::Parallel parallel;
+        std::vector<std::pair<size_t, std::shared_ptr<const Oot3dPicaDeferredPlanSlot>>>
+            building;
+        for (size_t drawIndex = 0; drawIndex < frame.Draws.size(); ++drawIndex) {
+            auto& draw = frame.Draws[drawIndex];
             if (draw.Deferred == nullptr) {
                 continue;
             }
-            const auto slot = std::move(draw.Deferred);
+            auto slot = std::move(draw.Deferred);
+            if (DeferredPlanResolver::ParallelBuilds(*slot)) {
+                if (run.Open()) {
+                    run.Close();
+                }
+                bool deferred = false;
+                if (!parallel.Resolve(*slot, draw, error, true, deferred)) {
+                    return false;
+                }
+                if (deferred) {
+                    building.emplace_back(drawIndex, std::move(slot));
+                }
+                resolved = true;
+                continue;
+            }
             if (run.Open() &&
                 (run.Batch() != slot->Batch ||
                  run.Resolved() >= kResolveRunLength || run.BuiltHere())) {
@@ -557,6 +772,14 @@ bool ResolveOot3dPicaDeferredVisualFrame(Oot3dPicaVisualFrame& frame,
                 return false;
             }
             resolved = true;
+        }
+        run.Close();
+        for (auto& [drawIndex, slot] : building) {
+            bool deferred = false;
+            if (!parallel.Resolve(*slot, frame.Draws[drawIndex], error, false,
+                                  deferred)) {
+                return false;
+            }
         }
     }
     if (resolved && frame.StrictDrawIdentities.size() != frame.Draws.size()) {

@@ -1,5 +1,5 @@
-// Política de threads do Switch (oot3d_switch_thread_layout.h): papel ->
-// prioridade/núcleos por layout, leitura de config/thread_layout.
+// Switch thread policy (oot3d_switch_thread_layout.h): role ->
+// priority/cores per layout, parsing of config/thread_layout.
 #include "oot3d_switch_thread_layout.h"
 
 #include <cstdlib>
@@ -56,9 +56,9 @@ void TestParse() {
             "spin above 4 ms is refused");
 }
 
-// O que nunca pode acontecer em layout nenhum: thread de serviço no núcleo
-// do jogo ou com prioridade capaz de interromper render/planos/áudio;
-// render/planos acima do jogo; áudio abaixo da render thread.
+// What must never happen in any layout: a service thread on the game's
+// core or with a priority able to preempt render/plans/audio;
+// render/plans above the game; audio below the render thread.
 void TestInvariants() {
     for (const auto layout : {SwitchThreadLayout::Fixed, SwitchThreadLayout::Float,
                               SwitchThreadLayout::Legacy}) {
@@ -129,6 +129,26 @@ void TestProcessMask() {
             "game without core 0: affinity left alone");
 }
 
+// config/second_core: the guest's second core never shares core 0 with the
+// game thread, never preempts audio or render, preempts the plan worker of
+// its core and stays above the time-sliced service threads, in every layout.
+void TestGuestCore1() {
+    for (const auto layout : {SwitchThreadLayout::Fixed, SwitchThreadLayout::Float,
+                              SwitchThreadLayout::Legacy}) {
+        const auto core1 = Place(layout, SwitchThreadRole::GuestCore1);
+        Require(core1.CoreMask == 0x2U && core1.IdealCore == 1,
+                "second guest core pinned to core 1");
+        Require(core1.Priority > Place(layout, SwitchThreadRole::HostAudio).Priority &&
+                    core1.Priority < Place(layout, SwitchThreadRole::PicaPlan).Priority &&
+                    core1.Priority >= Place(layout, SwitchThreadRole::Render).Priority &&
+                    core1.Priority < kSwitchServicePriority,
+                "second guest core below audio and render, above the plan worker and services");
+    }
+    Require(std::string_view(SwitchThreadRoleName(SwitchThreadRole::GuestCore1)) ==
+                "guest_core1",
+            "second guest core is named in the threads: summary");
+}
+
 } // namespace
 
 int main() {
@@ -136,6 +156,7 @@ int main() {
     TestInvariants();
     TestLayouts();
     TestProcessMask();
+    TestGuestCore1();
     std::cout << "oot3d_switch_thread_layout_tests: ok\n";
     return 0;
 }

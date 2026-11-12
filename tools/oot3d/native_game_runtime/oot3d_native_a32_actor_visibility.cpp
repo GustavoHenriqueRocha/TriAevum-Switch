@@ -1,6 +1,7 @@
 #include "oot3d_native_a32_actor_visibility.h"
 
 #include "fast/oot3d/perspective_fov_policy.h"
+#include "oot3d_game_log.h"
 #include "oot3d_native_a32_memory.h"
 
 #include <algorithm>
@@ -22,8 +23,11 @@ constexpr uint32_t kActorUncullScale = 0x100U;
 constexpr uint32_t kActorUncullDownward = 0x104U;
 constexpr uint32_t kActorCullingState = 0x120U;
 constexpr uint32_t kObjMure2DistanceScalar = 0x1DCU;
-// En_Viewer hides behind culling during cutscene camera pans (SoH skips it).
-constexpr uint16_t kActorEnViewer = 0x002AU; // ACTOR_EN_VIEWER, actor_object_semantics.h
+constexpr uint32_t kActorParams = 0x1CU;
+// Actor_Draw applies the distance fade only with this flag (0x002D6254).
+constexpr uint32_t kActorFlagDistanceFade = 0x80000000U;
+constexpr uint32_t kActorFade = 0x19EU;
+constexpr uint32_t kActorFadeMaximum = 0x19FU;
 // The Kokiri SoH stops fading: En_Ko has its own fade, En_Md (Mido) and
 // En_Sa (Saria) share Actor_UpdateAlphaByDistance.
 constexpr uint16_t kActorEnSa = 0x0146U;
@@ -74,8 +78,7 @@ bool ReadCullingSample(MemoryBus& memory, uint32_t actor, ActorCullingSample& sa
 ActorCullingVolume PresentedVolume(MemoryBus& memory, uint32_t play,
                                    const NativeActorVisibilityState& visibility) {
     ActorCullingVolume volume;
-    volume.DistanceMultiplier =
-        visibility.ExtendedDrawDistance ? kExtendedActorDistanceMultiplier : 1.0F;
+    volume.DistanceMultiplier = visibility.DistanceMultiplier;
     if (play == 0U) return volume;
     std::array<float, 8> rows{};
     for (uint32_t i = 0; i < rows.size(); ++i)
@@ -97,6 +100,17 @@ ActorCullingVolume PresentedVolume(MemoryBus& memory, uint32_t play,
 
 bool Extends(const ActorCullingVolume& volume) {
     return volume.DistanceMultiplier > 1.0F || volume.Horizontal > 1.0F || volume.Vertical > 1.0F;
+}
+
+bool ExtendsDistance(const NativeActorVisibilityState& visibility) {
+    return visibility.DistanceMultiplier > 1.0F;
+}
+
+bool ReadExclusion(MemoryBus& memory, uint32_t actor, uint16_t id, bool& excluded) {
+    uint16_t params = 0U;
+    if (!memory.Read16(actor + kActorParams, &params)) return false;
+    excluded = ActorExtensionExcluded(id, params);
+    return true;
 }
 
 
@@ -132,16 +146,42 @@ void ReleaseReservation(NativeActorVisibilityState& v, NativeActorVisibilityRese
 
 void RestoreNativeCulling(MemoryBus& memory, NativeActorVisibilityReservation& entry) {
     if (!entry.Restore) return;
+    entry.Restore = false;
+    if (entry.Handoff) {
+        // Only the fade was the host's; a draw callback's own write stays.
+        uint8_t fade = 0U;
+        if (memory.Read8(entry.Actor + kActorFade, &fade) && fade == entry.HandoffFade)
+            (void)memory.Write8(entry.Actor + kActorFade, entry.NativeFade);
+        return;
+    }
     uint32_t flags = 0U;
-    (void)memory.Read8(entry.Actor + 0x19EU, &entry.ExtendedFade);
+    (void)memory.Read8(entry.Actor + kActorFade, &entry.ExtendedFade);
     if (memory.Read32(entry.Actor + 4U, &flags)) {
         flags = (flags & ~0x40U) | (entry.NativeFade != 0U ? 0x40U : 0U);
         (void)memory.Write32(entry.Actor + 4U, flags);
         (void)memory.Write8(entry.Actor + kActorCullingState, entry.NativeState);
-        (void)memory.Write8(entry.Actor + 0x19EU, entry.NativeFade);
+        (void)memory.Write8(entry.Actor + kActorFade, entry.NativeFade);
         if (!entry.NativeDraw) (void)memory.Write8(entry.Actor + 0x121U, 0U);
     }
-    entry.Restore = false;
+}
+
+// At Actor_Draw's entry for an actor the title shows again after an
+// extension: the title's fade restarted at its boundary, so show the
+// extension's continued fade instead, for this draw only.
+void ApplyHandoffFade(MemoryBus& memory, NativeActorVisibilityReservation& entry) {
+    if (!entry.Handoff || entry.Restore) return;
+    entry.Handoff = false;
+    uint32_t flags = 0U;
+    uint8_t fade = 0U, maximum = 0U;
+    if (!memory.Read32(entry.Actor + 4U, &flags) || (flags & kActorFlagDistanceFade) == 0U ||
+        !memory.Read8(entry.Actor + kActorFade, &fade) || !memory.Read8(entry.Actor + kActorFadeMaximum, &maximum))
+        return;
+    const uint8_t shown = ActorHandoffFade(entry.ExtendedFade, fade, maximum);
+    if (shown == fade || !memory.Write8(entry.Actor + kActorFade, shown)) return;
+    entry.Handoff = true;
+    entry.NativeFade = fade;
+    entry.HandoffFade = shown;
+    entry.Restore = true;
 }
 
 // These draw callbacks can allocate additional records (Fishing also loops
@@ -173,7 +213,7 @@ bool PrioritySample(MemoryBus& memory, uint32_t actor, const std::array<float, 1
 }
 
 void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibilityState& v) {
-    v.BudgetWalk = v.ExtendedDrawDistance;
+    v.BudgetWalk = ExtendsDistance(v);
     v.BudgetValid = false;
     v.Reservations.clear();
     v.RemainingLights = 0U;
@@ -187,6 +227,7 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
     if (!memory.Read32(state.r[0], &v.Arena) || !ReadLightUsage(memory, v.Arena, used)) return;
     v.LightAllocations = used;
     v.PeakLightAllocations = std::max(v.PeakLightAllocations, used);
+    v.WindowPeakLightAllocations = std::max(v.WindowPeakLightAllocations, used);
     std::array<float, 16> matrix{};
     for (uint32_t i = 0; i < matrix.size(); ++i)
         if (!ReadFloat(memory, state.r[0] + kPlayCullingViewProjection + i * 4U, matrix[i])) return;
@@ -217,7 +258,8 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
             v.Reservations.push_back(entry);
             v.RemainingLights += entry.LightCost;
             ActorCullingSample sample;
-            if (init == 0U && entry.Draw != 0U && entry.Id != kActorEnViewer &&
+            bool excluded = true;
+            if (init == 0U && entry.Draw != 0U && ReadExclusion(memory, actor, entry.Id, excluded) && !excluded &&
                 PrioritySample(memory, actor, matrix, sample) &&
                 !ActorInsideNativeCullingVolume(sample) &&
                 ActorInsideExtendedCullingVolume(sample, v.CullingVolume)) {
@@ -227,11 +269,16 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
             actor = next;
         }
     }
-    SelectActorExtensions(candidates);
-    for (const auto& candidate : candidates)
-        if (candidate.Selected)
-            if (auto* entry = Reservation(v, static_cast<uint32_t>(candidate.Identity >> 16U)))
-                entry->Selected = true;
+    SelectActorExtensions(candidates, v.ExtensionLimit);
+    v.Candidates += candidates.size();
+    for (const auto& candidate : candidates) {
+        if (!candidate.Selected) {
+            ++v.Capped;
+            continue;
+        }
+        if (auto* entry = Reservation(v, static_cast<uint32_t>(candidate.Identity >> 16U)))
+            entry->Selected = true;
+    }
     v.BudgetValid = true;
 }
 
@@ -241,18 +288,12 @@ void EndBudgetWalk(MemoryBus& memory, NativeActorVisibilityState& v) {
     for (auto& entry : v.Reservations) {
         RestoreNativeCulling(memory, entry); // also covers deferred draws skipped by the title
         if (entry.Extended) v.Retained.push_back({ActorIdentity(entry.Actor, entry.Id), entry.ExtendedFade});
+        // The title's fade is still behind the shown one: keep continuing it.
+        else if (entry.HandoffFade > entry.NativeFade)
+            v.Retained.push_back({ActorIdentity(entry.Actor, entry.Id), entry.HandoffFade});
     }
     if (!v.BudgetValid) ++v.BudgetInvalidWalks;
-    if (v.WalkDenied != 0U || !v.BudgetValid) {
-        const auto count = ++v.BudgetLimitedWalks;
-        if ((count & (count - 1U)) == 0U)
-            std::fprintf(stderr, "TRIAEVUM_ACTOR_VISIBILITY_BUDGET walks=%llu epoch=%llu denied=%u "
-                         "valid=%u lights=%u previous=%u peak=%u budget=%u reserve=%u retained=%zu\n",
-                         static_cast<unsigned long long>(count), static_cast<unsigned long long>(v.LightEpoch),
-                         v.WalkDenied, v.BudgetValid ? 1U : 0U, v.LightAllocations,
-                         v.PreviousLightAllocations, v.PeakLightAllocations, kActorLightBudget,
-                         kActorLightAuxiliaryReserve, v.Retained.size());
-    }
+    if (v.WalkDenied != 0U || !v.BudgetValid) ++v.BudgetLimitedWalks;
     v.BudgetWalk = false;
     v.BudgetValid = false;
     v.RemainingLights = 0U;
@@ -262,15 +303,16 @@ bool ApplyBudgetedCulling(GuestState& state, MemoryBus& memory, NativeActorVisib
                          uint8_t nativeState) {
     auto* entry = Reservation(v, state.r[4]);
     uint32_t used = 0U;
-    if (!v.BudgetWalk || !v.BudgetValid || !entry || !entry->Reserved || !entry->Selected ||
-        !ReadLightUsage(memory, v.Arena, used) || !ActorLightBudgetAllows(used, v.RemainingLights)) {
+    const bool selected = v.BudgetWalk && v.BudgetValid && entry && entry->Reserved && entry->Selected;
+    if (!selected || !ReadLightUsage(memory, v.Arena, used) || !ActorLightBudgetAllows(used, v.RemainingLights)) {
+        if (selected) ++v.LightDenied;
         ++v.BudgetDenied;
         ++v.WalkDenied;
         return false;
     }
     uint8_t fade = 0U;
     uint32_t flags = 0U, init = 0U, draw = 0U;
-    if (!memory.Read8(entry->Actor + 0x19EU, &fade) || !memory.Read32(entry->Actor + 4U, &flags) ||
+    if (!memory.Read8(entry->Actor + kActorFade, &fade) || !memory.Read32(entry->Actor + 4U, &flags) ||
         !memory.Read32(entry->Actor + 0x134U, &init) || !memory.Read32(entry->Actor + 0x140U, &draw) ||
         draw != entry->Draw || HasUnbudgetedDraw(draw)) {
         v.BudgetValid = false;
@@ -284,7 +326,7 @@ bool ApplyBudgetedCulling(GuestState& state, MemoryBus& memory, NativeActorVisib
     if (!memory.Write8(entry->Actor + kActorCullingState, 0U)) return false;
     const uint8_t beforeFade = std::max(entry->ExtendedFade,
         static_cast<uint8_t>(entry->NativeFade != 0U ? entry->NativeFade - 1U : 0U));
-    (void)memory.Write8(entry->Actor + 0x19EU, beforeFade);
+    (void)memory.Write8(entry->Actor + kActorFade, beforeFade);
     entry->Restore = true;
     entry->Extended = true;
     // Let the title ramp the extension's separate host-owned alpha. Restore
@@ -301,31 +343,26 @@ void ApplyActorCulling(GuestState& state, MemoryBus& memory, NativeActorVisibili
     visibility.DeferredCountBefore = state.r[5];
     if (state.r[0] != 0U) {
         ++visibility.NativeVisible;
+        // An actor the extension showed last walk: continue its fade.
+        if (visibility.BudgetWalk)
+            if (auto* entry = Reservation(visibility, actor); entry != nullptr && entry->ExtendedFade != 0U)
+                entry->Handoff = true;
         return;
     }
     ++visibility.NativeCulled;
     const auto volume = visibility.CullingVolumeValid
         ? visibility.CullingVolume
         : PresentedVolume(memory, state.r[7] - kPlayHighHalf, visibility);
-    if (visibility.Diagnostics && visibility.NativeCulled % 4096U == 1U)
-        std::fprintf(stderr, "[actor-visibility] presented=%.4f,%.4f visible=%llu culled=%llu extended=%llu budget_denied=%llu limited_walks=%llu invalid_walks=%llu lights=%u previous=%u peak=%u\n",
-                     volume.Horizontal, volume.Vertical,
-                     static_cast<unsigned long long>(visibility.NativeVisible),
-                     static_cast<unsigned long long>(visibility.NativeCulled),
-                     static_cast<unsigned long long>(visibility.Extended),
-                     static_cast<unsigned long long>(visibility.BudgetDenied),
-                     static_cast<unsigned long long>(visibility.BudgetLimitedWalks),
-                     static_cast<unsigned long long>(visibility.BudgetInvalidWalks),
-                     visibility.LightAllocations, visibility.PreviousLightAllocations, visibility.PeakLightAllocations);
     if (!Extends(volume)) return;
     uint16_t id = 0U;
     ActorCullingSample sample;
     uint8_t nativeState = 0U;
-    if (!memory.Read16(actor, &id) || id == kActorEnViewer || !ReadCullingSample(memory, actor, sample) ||
-        !memory.Read8(actor + kActorCullingState, &nativeState))
+    bool excluded = true;
+    if (!memory.Read16(actor, &id) || !ReadExclusion(memory, actor, id, excluded) || excluded ||
+        !ReadCullingSample(memory, actor, sample) || !memory.Read8(actor + kActorCullingState, &nativeState))
         return;
     const auto classified = ClassifyExtendedActorCulling(sample, volume);
-    if (visibility.ExtendedDrawDistance) {
+    if (ExtendsDistance(visibility)) {
         if (classified == ActorCullingClass::Inside)
             (void)ApplyBudgetedCulling(state, memory, visibility, nativeState);
         return;
@@ -362,9 +399,12 @@ void AssertObjMureDistances(NativeActorVisibilityState& visibility) {
         if (bits == wanted) continue;
         if (bits != std::bit_cast<uint32_t>(native) &&
             bits != std::bit_cast<uint32_t>(native * kExtendedActorDistanceMultiplier)) {
-            if (!visibility.ReportedUnknownConstants)
-                std::fprintf(stderr, "[actor-visibility] Obj_Mure distance %08x at %08x is not the EUR value\n",
-                             bits, address(i));
+            if (!visibility.ReportedUnknownConstants) {
+                char line[96];
+                std::snprintf(line, sizeof(line), "actor_visibility: Obj_Mure distance %08x at %08x is not the EUR value",
+                              bits, address(i));
+                WriteGameLog(line);
+            }
             visibility.ReportedUnknownConstants = true;
             return;
         }
@@ -390,6 +430,25 @@ void ApplyObjMure2(GuestState& state, MemoryBus& memory, const NativeActorVisibi
         (void)memory.Write32(actor + kObjMure2DistanceScalar, std::bit_cast<uint32_t>(adjusted));
 }
 
+// En_Wood02 offspring (EUR 0x0034E7B4..0x0034E874): the title's view test
+// takes |1 / stored| of the spawner's +0xF8, which holds 1 / W, so it scales
+// by W and its lateral test seldom passes; offspring then appear only through
+// the fallback |z| + offset < forward * s16 near the camera. With
+// ExtendGroups the result passes inside the extended volume with the correct
+// 1 / W. The offspring are ordinary actors: culled and drawn as any other.
+void ApplyEnWood02(GuestState& state, MemoryBus& memory, const NativeActorVisibilityState& visibility) {
+    if (!visibility.ExtendGroups || !ExtendsDistance(visibility) || state.r[0] != 0U) return;
+    const uint32_t spawner = state.r[4];
+    ActorCullingSample sample;
+    float inverseW = 0.0F;
+    if (!ReadCullingSample(memory, spawner, sample) || !ReadFloat(memory, spawner + kActorProjectedW, inverseW) ||
+        !(inverseW > 0.0F) || !std::isfinite(inverseW))
+        return;
+    sample.W = 1.0F / inverseW;
+    if (ActorInsideExtendedCullingVolume(sample, PresentedVolume(memory, state.r[11] - kPlayHighHalf, visibility)))
+        state.r[0] = 1U;
+}
+
 } // namespace
 
 bool NativeActorVisibilityHasPendingRestore(const NativeActorVisibilityState& visibility) noexcept {
@@ -413,6 +472,45 @@ void ResetNativeActorVisibilityAfterStateLoad(NativeActorVisibilityState& visibi
     visibility.Retained.clear();
 }
 
+std::string TakeNativeActorVisibilityPerfLine(NativeActorVisibilityState& v) {
+    const auto& start = v.WindowStart;
+    char line[320];
+    const auto delta = [](uint64_t now, uint64_t then) { return static_cast<unsigned long long>(now - then); };
+    std::snprintf(line, sizeof(line),
+                  "actor_visibility: multiplier=%.0f groups=%u walks=%llu culled=%llu extended=%llu candidates=%llu "
+                  "capped=%llu light_denied=%llu denied=%llu limited_walks=%llu invalid_walks=%llu peak_lights=%u "
+                  "limit=%u\n",
+                  static_cast<double>(v.DistanceMultiplier), v.ExtendGroups ? 1U : 0U, delta(v.Walks, start.Walks),
+                  delta(v.NativeCulled, start.NativeCulled), delta(v.Extended, start.Extended),
+                  delta(v.Candidates, start.Candidates), delta(v.Capped, start.Capped),
+                  delta(v.LightDenied, start.LightDenied), delta(v.BudgetDenied, start.BudgetDenied),
+                  delta(v.BudgetLimitedWalks, start.BudgetLimitedWalks),
+                  delta(v.BudgetInvalidWalks, start.BudgetInvalidWalks), v.WindowPeakLightAllocations,
+                  v.ExtensionLimit);
+    v.WindowStart = {v.Walks,       v.NativeCulled, v.Extended,           v.Candidates,        v.Capped,
+                     v.LightDenied, v.BudgetDenied, v.BudgetLimitedWalks, v.BudgetInvalidWalks};
+    v.WindowPeakLightAllocations = 0U;
+    return line;
+}
+
+std::optional<std::string> TakeNativeActorVisibilitySettingsLine(NativeActorVisibilityState& v,
+                                                                 ActorDrawDistance choice) {
+    const NativeActorVisibilityState::LoggedSettings now{static_cast<uint8_t>(choice), v.DistanceMultiplier,
+                                                         v.ExtendGroups, v.NoKokiriFade};
+    const auto& logged = v.Logged;
+    if (logged.Choice == now.Choice && logged.DistanceMultiplier == now.DistanceMultiplier &&
+        logged.ExtendGroups == now.ExtendGroups && logged.NoKokiriFade == now.NoKokiriFade)
+        return std::nullopt;
+    v.Logged = now;
+    char line[160];
+    std::snprintf(line, sizeof(line),
+                  "draw_distance: choice=%s multiplier=%.0f groups=%s kokiri_fade=%s limit=%u "
+                  "(L3+R3 > Video > Draw distance, config/draw_distance)",
+                  ActorDrawDistanceWord(choice), static_cast<double>(v.DistanceMultiplier),
+                  v.ExtendGroups ? "extended" : "native", v.NoKokiriFade ? "off" : "native", v.ExtensionLimit);
+    return std::string(line);
+}
+
 std::span<const uint32_t> NativeActorVisibilityHookPcs() noexcept {
     return kHookPcs;
 }
@@ -431,13 +529,16 @@ bool ApplyNativeActorVisibilityHook(
         if (ReadLightUsage(memory, state.r[1], used)) {
             visibility.LightAllocations = used + 1U;
             visibility.PeakLightAllocations = std::max(visibility.PeakLightAllocations, used + 1U);
+            visibility.WindowPeakLightAllocations = std::max(visibility.WindowPeakLightAllocations, used + 1U);
         }
         return true;
     }
     case kActorDrawEntry:
         if (visibility.BudgetWalk) {
-            if (auto* entry = Reservation(visibility, state.r[1])) ReleaseReservation(visibility, *entry);
-            else visibility.BudgetValid = false;
+            if (auto* entry = Reservation(visibility, state.r[1])) {
+                ReleaseReservation(visibility, *entry);
+                ApplyHandoffFade(memory, *entry);
+            } else visibility.BudgetValid = false;
             if (state.r[14] == kActorDeferredDrawReturn) visibility.DeferredActor = state.r[1];
         }
         return true;
@@ -464,6 +565,7 @@ bool ApplyNativeActorVisibilityHook(
         return true;
     case kActorCullingEntry:
         // The culling matrix is fixed for the walk: resolve its view once.
+        ++visibility.Walks;
         visibility.CullingVolume = PresentedVolume(memory, state.r[0], visibility);
         visibility.CullingVolumeValid = true;
         BeginBudgetWalk(state, memory, visibility);
@@ -480,19 +582,19 @@ bool ApplyNativeActorVisibilityHook(
         ApplyObjMure2(state, memory, visibility);
         return true;
     case kEnWood02SpawnZoneResult:
-        // Off was already a no-op. Group offspring remain at native range.
+        ApplyEnWood02(state, memory, visibility);
         return true;
     case kEnKoFadeDistanceA:
     case kEnKoFadeDistanceB:
         // Distance 0 is inside any appear distance: the Kokiri fade in with
         // the title's own smoothing and stay.
-        if (visibility.ExtendedDrawDistance) state.vfp[0] = 0U;
+        if (visibility.NoKokiriFade) state.vfp[0] = 0U;
         return true;
     case kAlphaByDistanceCompare: {
         // Distance 0 takes the near branch: the title raises the alpha to
         // 255 with its own smoothing.
         uint16_t id = 0U;
-        if (visibility.ExtendedDrawDistance && memory.Read16(state.r[4], &id) &&
+        if (visibility.NoKokiriFade && memory.Read16(state.r[4], &id) &&
             (id == kActorEnMd || id == kActorEnSa))
             state.vfp[0] = 0U;
         return true;
