@@ -38,6 +38,14 @@ GUARDS = [
           r'mTargets\.ReadCopyRows\(\*source, key->Height, mFlipY, mCopyRgba, &readError\)',
           "oot3d_deko3d_backend_tests (TestRawTextureCopy)",
           forbid=r'mTargets\.ReadTarget\(\*source, mCopyRgba'),
+    Guard("the frame rate fell to 30 in a Temple of Time cutscene with the camera facing Link (0.2.3 candidate, "
+          "logs34-36: governor estimate 15.3-16.8 ms without the body shadow, 16.2-17.9 with it, budget 16.7): "
+          "the body shadow is skipped while Link is in a cutscene (stateFlags1 0x20000000), the foot shadows "
+          "draw there",
+          "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
+          r'kSimpleShadowCutscene = 0x20000000U;.*?'
+          r'\(actor\.StateFlags1 & \(kSimpleShadowRiding \| kSimpleShadowCutscene\)\) != 0U',
+          "oot3d_simple_shadow_tests (TestDecision)"),
     Guard("a translation in mods/ptbr/romfs/ read 'romfs mods: no file applies, 0 ignored' with no reason "
           "(issue #12): a mod folder without files, and entries the console reads as neither a file nor a "
           "folder, are ignored notes with their reason (log line and panel)",

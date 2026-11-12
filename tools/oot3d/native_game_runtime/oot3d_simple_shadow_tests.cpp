@@ -99,6 +99,7 @@ void TestDecision() {
   };
   reject([](SimpleShadowActor &a) { a.Id = 1U; }, "not the player");
   reject([](SimpleShadowActor &a) { a.StateFlags1 = kSimpleShadowRiding; }, "on Epona: the game draws none");
+  reject([](SimpleShadowActor &a) { a.StateFlags1 = kSimpleShadowCutscene; }, "in a cutscene: the foot shadows");
   reject([](SimpleShadowActor &a) { a.StateFlags2 = kSimpleShadowHidden; }, "the flag the mod skips");
   reject([](SimpleShadowActor &a) { a.FloorPoly = 0U; }, "no floor");
   reject([](SimpleShadowActor &a) { a.ShadowAlpha = 0U; }, "no shadow alpha");

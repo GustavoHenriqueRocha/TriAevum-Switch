@@ -4296,6 +4296,12 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   default darkness, times shadowAlpha/255, times the game's round-shadow fade 1 - min(h, 150)/350 that the
   rise (a smoothstep from 40 to 140 units, `0x005F96F8`) undoes, times max(1 - h/60, rise), times 0.8, with
   the payload's truncations (144/255 on the floor).
+- **No body shadow in cutscenes (11/11, 0.2.3 candidate):** the hook also leaves the foot shadows while Link is
+  in a cutscene (stateFlags1 `0x20000000`, `PLAYER_STATE1_IN_CUTSCENE` in the decomp; the TopScreen free camera
+  stops on the same bit). Seen in logs34-36: a Temple of Time cutscene that faces Link as he plays the ocarina
+  ran at 30 FPS with the body shadow and 60 without (Full resolution at scale 3, per-pixel lighting). The governor
+  estimated 15.3-16.8 ms per frame without it and 16.2-17.9 ms with it, against 16.7, and dropped the in-between
+  frames. Test: `oot3d_simple_shadow_tests` (TestDecision).
 - **Simple shadow, the renderer's side (deko3d, `gfx_deko3d_player_shadow.cpp`, `fast/oot3d/player_shadow.h`):**
   the mod renders his silhouette into a small texture laid on the floor (soft edges); here his meshes are
   projected (sharp edges). Each opaque scene draw of his actor (NativeActorIdentity) that leaves depth to the

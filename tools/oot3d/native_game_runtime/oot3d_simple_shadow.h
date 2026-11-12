@@ -44,6 +44,9 @@ inline constexpr std::uint32_t kSimpleShadowStateFlags1Offset = 0x1710U;
 inline constexpr std::uint32_t kSimpleShadowStateFlags2Offset = 0x1714U;
 inline constexpr std::uint32_t kSimpleShadowRiding = 0x00800000U;  // stateFlags1: on Epona
 inline constexpr std::uint32_t kSimpleShadowHidden = 0x20000000U;  // stateFlags2: the mod skips him
+// stateFlags1: Link is in a cutscene. The port skips the body shadow there (close cutscene cameras made it cost
+// the 60 FPS frame, logs34-36); the game's foot shadows draw instead.
+inline constexpr std::uint32_t kSimpleShadowCutscene = 0x20000000U;
 // CollisionPoly normal (s16 x, y, z, 1/32767 units).
 inline constexpr std::uint32_t kSimpleShadowPolyNormalOffset = 0x000AU;
 inline constexpr float kSimpleShadowNormalScale = 1.0F / 32767.0F;
@@ -89,9 +92,9 @@ struct SimpleShadowActor final {
   std::array<std::int16_t, 3> FloorNormal{};
 };
 
-// The mod's conditions; the shadow of this frame when they hold.
+// The mod's conditions, and none in cutscenes (kSimpleShadowCutscene); the shadow of this frame when they hold.
 inline std::optional<Fast::Oot3d::PlayerShadowFrame> DecideSimpleShadow(const SimpleShadowActor &actor) noexcept {
-  if (actor.Id != 0U || (actor.StateFlags1 & kSimpleShadowRiding) != 0U ||
+  if (actor.Id != 0U || (actor.StateFlags1 & (kSimpleShadowRiding | kSimpleShadowCutscene)) != 0U ||
       (actor.StateFlags2 & kSimpleShadowHidden) != 0U || actor.FloorPoly == 0U || actor.ShadowAlpha == 0U)
     return std::nullopt;
   const float height = actor.Position[1] - actor.FloorHeight;
