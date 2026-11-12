@@ -1,13 +1,14 @@
 #pragma once
-// "Simple shadow" (L3+R3 > Game > Gameplay, config/simple_shadow; issue #8):
-// Link's body flattened onto the floor under him in place of his two foot
-// spots, as "OoT3D: Single Screen Experience" 3.2.2 by M-1 shows it. The game
-// side (oot3d_simple_shadow.h) publishes, per native frame, his actor, the
-// floor under him and the shadow's opacity; the deko3d backend draws his
-// opaque meshes of the frame a second time, flattened along the scene's light
-// (gfx_deko3d_player_shadow.cpp). The mod renders his silhouette into a small
-// texture laid on the floor; here the meshes themselves are projected, so the
-// edges are sharp. Pure math and bookkeeping, unit-tested on the host
+// "Simple shadow" (L3+R3 > Video, config/simple_shadow; issue #8): Link's
+// body flattened onto the floor under him in place of his two foot spots, as
+// "OoT3D: Single Screen Experience" 3.2.2 by M-1 shows it. The game side
+// (oot3d_simple_shadow.h) publishes, per native frame, his actor, the floor
+// under him and the shadow's opacity; the deko3d backend draws his opaque
+// meshes of the frame a second time, flattened along the scene's light
+// (gfx_deko3d_player_shadow.cpp), one of four ways (PlayerShadowMethod). The
+// mod renders his silhouette into a small texture laid on the floor (method
+// Texture); the others draw the flattened meshes themselves, so their edges
+// are sharp. Pure math and bookkeeping, unit-tested on the host
 // (oot3d_player_shadow_tests).
 
 #include "fast/oot3d/pica_uniform_layout.h"
@@ -22,9 +23,11 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace Fast::Oot3d {
 
@@ -44,6 +47,45 @@ struct PlayerShadowFrame {
 };
 
 [[nodiscard]] constexpr uint64_t PlayerShadowActorIdentity(uint32_t actor) noexcept { return actor; }
+
+// How the deko3d backend draws it (config/simple_shadow_method, L3+R3 > Video
+// > Shadow method; a 0.2.3 test, each method's GPU time in the dkperf lines'
+// shadow_<word>_ms):
+// - TwoPass: the meshes darken where the top stencil bit is clear and set it,
+//   then the same meshes without colour zero it (0.2.3 build 33);
+// - OnePass: the meshes darken without the stencil, overlapping limbs darker;
+// - Cover: the meshes only set the bit, inside the screen rectangle of the
+//   floor region (PlayerShadowFloorRegion); one triangle over that rectangle
+//   darkens where it is set and zeroes it;
+// - Texture: the meshes go flat into a silhouette texture of the floor region,
+//   which one quad on the floor samples (the mod's way: soft edges).
+enum class PlayerShadowMethod : uint8_t { TwoPass, OnePass, Cover, Texture };
+inline constexpr size_t kPlayerShadowMethodCount = 4U;
+
+// Its word in config/simple_shadow_method and in the dkperf keys.
+[[nodiscard]] constexpr std::string_view PlayerShadowMethodWord(PlayerShadowMethod method) noexcept {
+    switch (method) {
+    case PlayerShadowMethod::TwoPass: return "two_pass";
+    case PlayerShadowMethod::OnePass: return "one_pass";
+    case PlayerShadowMethod::Cover: return "cover";
+    case PlayerShadowMethod::Texture: return "texture";
+    }
+    return "two_pass";
+}
+
+// The file's first word; anything else (no file included) is TwoPass.
+[[nodiscard]] constexpr PlayerShadowMethod ParsePlayerShadowMethod(std::string_view text) noexcept {
+    constexpr std::string_view blank = " \t\r\n";
+    const size_t first = text.find_first_not_of(blank);
+    if (first == std::string_view::npos) return PlayerShadowMethod::TwoPass;
+    text.remove_prefix(first);
+    text = text.substr(0, text.find_first_of(blank));
+    for (size_t index = 0; index < kPlayerShadowMethodCount; ++index) {
+        const auto method = static_cast<PlayerShadowMethod>(index);
+        if (text == PlayerShadowMethodWord(method)) return method;
+    }
+    return PlayerShadowMethod::TwoPass;
+}
 
 // The mod's rules (EUR 3.2.2 payload 0x005FDA54): lights weaker than 0.02 do not
 // count, a strongest light under 0.35 tilts the shadow toward the vertical, and
@@ -105,6 +147,27 @@ using Mat4 = std::array<float, 16>; // row-major, column vectors
     for (size_t row = 0; row < 3U; ++row)
         out[row * 4U + 3U] = -(out[row * 4U] * m[3] + out[row * 4U + 1U] * m[7] + out[row * 4U + 2U] * m[11]);
     return out;
+}
+[[nodiscard]] inline Vec3 Cross(const Vec3& a, const Vec3& b) noexcept {
+    return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+}
+// m · (v, 1).
+[[nodiscard]] inline std::array<float, 4> Transform(const Mat4& m, const Vec3& v) noexcept {
+    std::array<float, 4> out{};
+    for (size_t row = 0; row < 4U; ++row)
+        out[row] = m[row * 4U] * v[0] + m[row * 4U + 1U] * v[1] + m[row * 4U + 2U] * v[2] + m[row * 4U + 3U];
+    return out;
+}
+// A draw's world-to-view (column-major) as rows, if finite and affine (last
+// row 0 0 0 1).
+[[nodiscard]] inline std::optional<Mat4> AffineView(const std::array<float, 16>& columnMajor) noexcept {
+    Mat4 view{};
+    for (size_t row = 0; row < 4U; ++row)
+        for (size_t column = 0; column < 4U; ++column) view[row * 4U + column] = columnMajor[column * 4U + row];
+    if (!Finite(view) || std::abs(view[12]) > 1.0e-4F || std::abs(view[13]) > 1.0e-4F ||
+        std::abs(view[14]) > 1.0e-4F || std::abs(view[15] - 1.0F) > 1.0e-4F)
+        return std::nullopt;
+    return view;
 }
 } // namespace PlayerShadowDetail
 
@@ -186,21 +249,181 @@ inline constexpr size_t kPlayerShadowViewRow = 4U;
     using namespace PlayerShadowDetail;
     const size_t offset = kPicaPackedVertexFloatOffset + kPlayerShadowViewRow * kPicaPackedVec4Bytes;
     if (uniforms.size() < offset + 3U * kPicaPackedVec4Bytes) return false;
-    Mat4 view{};
-    for (size_t row = 0; row < 4U; ++row)
-        for (size_t column = 0; column < 4U; ++column)
-            view[row * 4U + column] = worldToViewColumnMajor[column * 4U + row];
-    if (!Finite(view) || std::abs(view[12]) > 1.0e-4F || std::abs(view[13]) > 1.0e-4F ||
-        std::abs(view[14]) > 1.0e-4F || std::abs(view[15] - 1.0F) > 1.0e-4F)
-        return false;
-    const auto inverse = InverseAffine(view);
+    const auto view = AffineView(worldToViewColumnMajor);
+    if (!view) return false;
+    const auto inverse = InverseAffine(*view);
     if (!inverse) return false;
     Mat4 rows{};
     std::memcpy(rows.data(), uniforms.data() + offset, 12U * sizeof(float));
     rows[15] = 1.0F;
-    const Mat4 patched = Multiply(Multiply(Multiply(view, projection), *inverse), rows);
+    const Mat4 patched = Multiply(Multiply(Multiply(*view, projection), *inverse), rows);
     if (!Finite(patched)) return false;
     std::memcpy(uniforms.data() + offset, patched.data(), 12U * sizeof(float));
+    return true;
+}
+
+// Methods Cover and Texture: the rectangle of the shadow plane that his
+// flattened body can cover, the box about his position (kPlayerShadowBodyRadius
+// around him, kPlayerShadowBodyAbove over it and kPlayerShadowBodyBelow under
+// it, hanging from a ledge, but not under the floor, which would only stretch
+// the region toward the light) projected along the light. A pose leaving the
+// box is cut at its edge.
+inline constexpr float kPlayerShadowBodyRadius = 60.0F;
+inline constexpr float kPlayerShadowBodyBelow = 60.0F;
+inline constexpr float kPlayerShadowBodyAbove = 110.0F;
+
+struct PlayerShadowRegion {
+    std::array<float, 3> Origin{}; // on the shadow plane: the floor point, lifted
+    std::array<float, 3> Along{};  // unit, in the plane: the way the shadow falls
+    std::array<float, 3> Across{}; // unit, in the plane
+    std::array<float, 2> AlongRange{}; // from Origin: first, last
+    std::array<float, 2> AcrossRange{};
+
+    // (first, first), (last, first), (first, last), (last, last) along and
+    // across: a triangle strip, whose silhouette coordinates are 0 and 1 in
+    // that order.
+    [[nodiscard]] std::array<std::array<float, 3>, 4> Corners() const noexcept {
+        std::array<std::array<float, 3>, 4> corners{};
+        for (size_t corner = 0; corner < 4U; ++corner) {
+            const float along = AlongRange[corner & 1U];
+            const float across = AcrossRange[(corner >> 1U) & 1U];
+            for (size_t axis = 0; axis < 3U; ++axis)
+                corners[corner][axis] = Origin[axis] + along * Along[axis] + across * Across[axis];
+        }
+        return corners;
+    }
+};
+
+[[nodiscard]] inline std::optional<PlayerShadowRegion> PlayerShadowFloorRegion(
+    const PlayerShadowFrame& frame, const std::array<float, 3>& towardLight) noexcept {
+    using namespace PlayerShadowDetail;
+    const Vec3 n = Normalized(frame.FloorNormal).value_or(Vec3{0.0F, 1.0F, 0.0F});
+    PlayerShadowRegion region;
+    for (size_t axis = 0; axis < 3U; ++axis)
+        region.Origin[axis] = frame.FloorPoint[axis] + n[axis] * kPlayerShadowLift;
+    // Away from the light, in the plane; under a light straight above, any
+    // direction of the plane.
+    const float rise = Dot(towardLight, n);
+    auto along = Normalized(
+        Vec3{rise * n[0] - towardLight[0], rise * n[1] - towardLight[1], rise * n[2] - towardLight[2]});
+    if (!along) {
+        const Vec3 axis = std::abs(n[0]) < 0.9F ? Vec3{1.0F, 0.0F, 0.0F} : Vec3{0.0F, 0.0F, 1.0F};
+        const float d = Dot(axis, n);
+        along = Normalized(Vec3{axis[0] - d * n[0], axis[1] - d * n[1], axis[2] - d * n[2]});
+        if (!along) return std::nullopt;
+    }
+    region.Along = *along;
+    region.Across = Cross(n, *along);
+    const Mat4 projection = PlayerShadowProjection(frame, towardLight);
+    const Vec3 position{frame.FloorPoint[0], frame.FloorPoint[1] + frame.Height, frame.FloorPoint[2]};
+    const float bottom = std::max(position[1] - kPlayerShadowBodyBelow, frame.FloorPoint[1]);
+    region.AlongRange = {std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
+    region.AcrossRange = region.AlongRange;
+    for (uint32_t corner = 0; corner < 8U; ++corner) {
+        const Vec3 point{position[0] + ((corner & 1U) != 0U ? kPlayerShadowBodyRadius : -kPlayerShadowBodyRadius),
+                         (corner & 2U) != 0U ? position[1] + kPlayerShadowBodyAbove : bottom,
+                         position[2] + ((corner & 4U) != 0U ? kPlayerShadowBodyRadius : -kPlayerShadowBodyRadius)};
+        const auto landed = Transform(projection, point);
+        const Vec3 offset{landed[0] - region.Origin[0], landed[1] - region.Origin[1], landed[2] - region.Origin[2]};
+        const float a = Dot(offset, region.Along);
+        const float b = Dot(offset, region.Across);
+        region.AlongRange = {std::min(region.AlongRange[0], a), std::max(region.AlongRange[1], a)};
+        region.AcrossRange = {std::min(region.AcrossRange[0], b), std::max(region.AcrossRange[1], b)};
+    }
+    if (!Finite(region.AlongRange) || !Finite(region.AcrossRange) ||
+        !(region.AlongRange[1] - region.AlongRange[0] >= 1.0F) ||
+        !(region.AcrossRange[1] - region.AcrossRange[0] >= 1.0F))
+        return std::nullopt;
+    return region;
+}
+
+// The world-to-clip of his draws (rows): their projection rows f[0..3] times
+// V (column-major, the draw's world-to-view), y negated where the block flips
+// the viewport, as their vertex programs end; z is still PICA's (-w..0).
+[[nodiscard]] inline std::optional<std::array<float, 16>> PlayerShadowWorldToClip(
+    std::span<const uint8_t> uniforms, const std::array<float, 16>& worldToViewColumnMajor) noexcept {
+    using namespace PlayerShadowDetail;
+    if (uniforms.size() < kPicaPackedVertexFloatOffset + 4U * kPicaPackedVec4Bytes) return std::nullopt;
+    const auto view = AffineView(worldToViewColumnMajor);
+    if (!view) return std::nullopt;
+    Mat4 projection{};
+    std::memcpy(projection.data(), uniforms.data() + kPicaPackedVertexFloatOffset, sizeof(projection));
+    Mat4 clip = Multiply(projection, *view);
+    int32_t flip = 0;
+    std::memcpy(&flip, uniforms.data() + kPicaPackedVertexFlipViewportOffset, sizeof(flip));
+    if (flip != 0)
+        for (size_t column = 0; column < 4U; ++column) clip[4U + column] = -clip[4U + column];
+    if (!Finite(clip)) return std::nullopt;
+    return clip;
+}
+
+// gl_Position of a world point through it, with the deko3d dialect's depth
+// (z' = -2z - w, TranslatePicaShaderToOpenGl43).
+[[nodiscard]] inline std::array<float, 4> PlayerShadowGlPosition(const std::array<float, 16>& worldToClip,
+                                                                 const std::array<float, 3>& world) noexcept {
+    const auto clip = PlayerShadowDetail::Transform(worldToClip, world);
+    return {clip[0], clip[1], -2.0F * clip[2] - clip[3], clip[3]};
+}
+
+// Method Cover: the target pixels (x, y, width, height) that the region spans
+// through his camera and viewport (x, y, width, height), with a pixel of
+// margin; `minusOneFirst`: NDC y = -1 is the viewport's first row (deko3d's
+// NegativeY swizzle). Nothing when a corner is not in front of the camera:
+// the caller covers his draws' whole scissor then.
+[[nodiscard]] inline std::optional<std::array<int32_t, 4>> PlayerShadowScreenRect(
+    const std::array<float, 16>& worldToClip, const PlayerShadowRegion& region, const std::array<float, 4>& viewport,
+    bool minusOneFirst) noexcept {
+    std::array<float, 2> columns{std::numeric_limits<float>::max(), std::numeric_limits<float>::lowest()};
+    std::array<float, 2> rows = columns;
+    for (const auto& corner : region.Corners()) {
+        const auto clip = PlayerShadowDetail::Transform(worldToClip, corner);
+        if (!(clip[3] > 1.0e-3F)) return std::nullopt;
+        const float column = viewport[0] + (clip[0] / clip[3] + 1.0F) * 0.5F * viewport[2];
+        const float y = clip[1] / clip[3];
+        const float row = viewport[1] + (minusOneFirst ? y + 1.0F : 1.0F - y) * 0.5F * viewport[3];
+        columns = {std::min(columns[0], column), std::max(columns[1], column)};
+        rows = {std::min(rows[0], row), std::max(rows[1], row)};
+    }
+    if (!PlayerShadowDetail::Finite(columns) || !PlayerShadowDetail::Finite(rows)) return std::nullopt;
+    // Far outside the target is as good as at its edge, and fits an int.
+    const auto bound = [](float value) { return std::clamp(value, -1.0e6F, 1.0e6F); };
+    const auto x0 = static_cast<int32_t>(std::floor(bound(columns[0]))) - 1;
+    const auto y0 = static_cast<int32_t>(std::floor(bound(rows[0]))) - 1;
+    const auto x1 = static_cast<int32_t>(std::ceil(bound(columns[1]))) + 1;
+    const auto y1 = static_cast<int32_t>(std::ceil(bound(rows[1]))) + 1;
+    return std::array<int32_t, 4>{x0, y0, x1 - x0, y1 - y0};
+}
+
+// Method Texture, after PatchPlayerShadowViewRows: projection rows f[0..3] of
+// T·V⁻¹, T taking the region to x, y = -1..1 (along, across), z = -w/2 (PICA
+// depth, halfway) and w = 1, and the viewport flip off: each flattened vertex
+// lands at its place in the silhouette. False (bytes untouched) when the
+// block is short or V is not an invertible affine.
+[[nodiscard]] inline bool PatchPlayerShadowSilhouetteRows(std::span<uint8_t> uniforms,
+                                                          const std::array<float, 16>& worldToViewColumnMajor,
+                                                          const PlayerShadowRegion& region) noexcept {
+    using namespace PlayerShadowDetail;
+    if (uniforms.size() < kPicaPackedVertexFloatOffset + 4U * kPicaPackedVec4Bytes) return false;
+    const auto view = AffineView(worldToViewColumnMajor);
+    if (!view) return false;
+    const auto inverse = InverseAffine(*view);
+    if (!inverse) return false;
+    const float alongScale = 2.0F / (region.AlongRange[1] - region.AlongRange[0]);
+    const float acrossScale = 2.0F / (region.AcrossRange[1] - region.AcrossRange[0]);
+    Mat4 toSilhouette{};
+    for (size_t axis = 0; axis < 3U; ++axis) {
+        toSilhouette[axis] = alongScale * region.Along[axis];
+        toSilhouette[4U + axis] = acrossScale * region.Across[axis];
+    }
+    toSilhouette[3] = -alongScale * (Dot(region.Along, region.Origin) + region.AlongRange[0]) - 1.0F;
+    toSilhouette[7] = -acrossScale * (Dot(region.Across, region.Origin) + region.AcrossRange[0]) - 1.0F;
+    toSilhouette[11] = -0.5F;
+    toSilhouette[15] = 1.0F;
+    const Mat4 rows = Multiply(toSilhouette, *inverse);
+    if (!Finite(rows)) return false;
+    std::memcpy(uniforms.data() + kPicaPackedVertexFloatOffset, rows.data(), sizeof(rows));
+    const int32_t noFlip = 0;
+    std::memcpy(uniforms.data() + kPicaPackedVertexFlipViewportOffset, &noFlip, sizeof(noFlip));
     return true;
 }
 
@@ -273,6 +496,10 @@ class PlayerShadowBridge final {
     // loaded): until then the game keeps Link's own foot shadows.
     void SetRendererReady(bool ready) noexcept { mRendererReady.store(ready, std::memory_order_relaxed); }
     [[nodiscard]] bool RendererReady() const noexcept { return mRendererReady.load(std::memory_order_relaxed); }
+    // config/simple_shadow_method: set by the Video panel, read by the
+    // renderer at each frame.
+    void SetMethod(PlayerShadowMethod method) noexcept { mMethod.store(method, std::memory_order_relaxed); }
+    [[nodiscard]] PlayerShadowMethod Method() const noexcept { return mMethod.load(std::memory_order_relaxed); }
 
   private:
     struct Entry {
@@ -283,6 +510,7 @@ class PlayerShadowBridge final {
     std::deque<Entry> mFrames;
     std::optional<PlayerShadowFrame> mSelected;
     std::atomic<bool> mRendererReady{false};
+    std::atomic<PlayerShadowMethod> mMethod{PlayerShadowMethod::TwoPass};
 };
 
 } // namespace Fast::Oot3d

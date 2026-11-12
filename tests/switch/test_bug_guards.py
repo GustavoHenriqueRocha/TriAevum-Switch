@@ -41,10 +41,11 @@ GUARDS = [
     Guard("the frame rate fell to 30 in a Temple of Time cutscene with the camera facing Link (0.2.3 candidate, "
           "logs34-36: governor estimate 15.3-16.8 ms without the body shadow, 16.2-17.9 with it, budget 16.7): "
           "the body shadow is skipped while Link is in a cutscene (stateFlags1 0x20000000), the foot shadows "
-          "draw there",
+          "draw there, unless L3+R3 > Video > Shadow in cutscenes (config/simple_shadow_cutscenes) is on",
           "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
           r'kSimpleShadowCutscene = 0x20000000U;.*?'
-          r'\(actor\.StateFlags1 & \(kSimpleShadowRiding \| kSimpleShadowCutscene\)\) != 0U',
+          r'const std::uint32_t skipped = kSimpleShadowRiding \| \(cutscenes \? 0U : kSimpleShadowCutscene\);\s+'
+          r'if \(actor\.Id != 0U \|\| \(actor\.StateFlags1 & skipped\) != 0U',
           "oot3d_simple_shadow_tests (TestDecision)"),
     Guard("a translation in mods/ptbr/romfs/ read 'romfs mods: no file applies, 0 ignored' with no reason "
           "(issue #12): a mod folder without files, and entries the console reads as neither a file nor a "
@@ -2354,10 +2355,13 @@ GUARDS = [
           r'for \(const auto &read : kMasterQuestMirrorReads\)\s+'
           r'hooks\.push_back\(\{read\.HookPc, "master_quest_mirror"\}\);',
           "oot3d_native_block_entry_hooks_tests, whole_aot_hook_gates_census"),
-    Guard("Simple shadow: on by default would change the game (off until config/simple_shadow)",
+    Guard("Simple shadow: on by default would change the game (off until config/simple_shadow; the body in "
+          "cutscenes off until config/simple_shadow_cutscenes)",
           "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
           r'SimpleShadowEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
-          r'return std::filesystem::exists\(config / kSimpleShadowConfigName, error\);',
+          r'SimpleShadowCutscenes\(\) noexcept \{\s+static std::atomic<bool> cutscenes\{false\};.*?'
+          r'inline bool ReadSimpleShadowFlag\(const std::filesystem::path &config, const char \*name\) \{\s+'
+          r'std::error_code error;\s+return std::filesystem::exists\(config / name, error\);',
           "oot3d_simple_shadow_tests (TestConfig)"),
     Guard("Simple shadow: the foot shadows run at alpha 0 (their floor bookkeeping kept, as in the mod) and "
           "return into the hook, which puts the alpha back",
@@ -2375,7 +2379,8 @@ GUARDS = [
           r'\(wholeAotExecutionActive \|\| runtime\.SimpleShadow->Pending\(\)\)\) \{.*?'
           r'SimpleShadowEnabled\(\)\.load\(std::memory_order_relaxed\) &&\s+'
           r'Fast::Oot3d::PlayerShadowBridge::Instance\(\)\.RendererReady\(\);.*?'
-          r'Execute\(state, memory, simpleShadow, wholeAotExecutionActive\)\) \{.*?'
+          r'Execute\(\s+state, memory, simpleShadow, wholeAotExecutionActive,\s+'
+          r'Oot3dNativeGame::SimpleShadowCutscenes\(\)\.load\(std::memory_order_relaxed\)\)\) \{.*?'
           r'Oot3dWholeAotExitAt\(\*exitPc, state\);',
           "oot3d_simple_shadow_tests (TestHook)"),
     Guard("Simple shadow: deko3d says it can draw the body only once its program is loaded",
@@ -2406,25 +2411,53 @@ GUARDS = [
           r'const bool rasterDepth = !draw\.WBuffering && draw\.DepthRange == -1\.0F && draw\.NearPlane == 0\.0F;\s+'
           r'if \(!draw\.DepthTestEnabled \|\| !draw\.DepthWriteEnabled \|\| !rasterDepth \|\|',
           "oot3d_player_shadow_tests (TestPatch)"),
-    Guard("Simple shadow: overlapping limbs darken a pixel once, and the borrowed stencil bit goes back to zero "
-          "(a second pass over the same meshes; a whole-target clear only once the game or a savestate may have "
-          "set it, since clearing one stencil bit rewrites the whole depth and stencil image)",
+    Guard("Simple shadow, two passes: overlapping limbs darken a pixel once, and the borrowed stencil bit goes "
+          "back to zero (a second pass over the same meshes; a whole-target clear only once the game or a "
+          "savestate may have set it, since clearing one stencil bit rewrites the whole depth and stencil image)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
           r'if \(stencil && shadow\.StencilShared && shadow\.StencilClean\.insert\(&target\)\.second\) \{.*?'
           r'dkCmdBufClearDepthStencil\(cmd, false, 0\.0F, kPlayerShadowStencilBit, 0U\);.*?'
+          r'dkColorWriteStateSetMask\(&noColor, 0, 0\);.*?'
           r'depthStencil\.stencilFrontPassOp = depthStencil\.stencilBackPassOp = pass;\s+'
           r'depthStencil\.stencilFrontCompareOp = depthStencil\.stencilBackCompareOp = compare;.*?'
-          r'drawMeshes\(DkStencilOp_Replace, DkCompareOp_NotEqual\);\s+if \(stencil\) \{.*?'
-          r'dkColorWriteStateSetMask\(&noColor, 0, 0\);.*?drawMeshes\(DkStencilOp_Zero, DkCompareOp_Always\);',
+          r'case Method::TwoPass:.*?'
+          r'drawMeshes\(true, DkStencilOp_Replace, DkCompareOp_NotEqual, std::nullopt\);.*?'
+          r'dkCmdBufBindColorWriteState\(cmd, &noColor\);\s+'
+          r'drawMeshes\(true, DkStencilOp_Zero, DkCompareOp_Always, std::nullopt\);',
           "", forbid=r'depthWriteEnable = 1'),
-    Guard("Simple shadow: a frame whose draws use the top stencil bit keeps it (the body drawn without it, "
-          "not dropped: the foot shadows are hidden already)",
+    Guard("Simple shadow, cover: the meshes set the stencil bit only inside the rectangle the cover then draws "
+          "over, so every bit they set goes back to zero (a bit left set would darken a later frame's cover or "
+          "block the two-pass shadow there)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'const DkScissor scissor = clip \? Intersect\(draw\.Scissor, \*clip\) : draw\.Scissor;.*?'
+          r'case Method::Cover: \{.*?'
+          r'const DkScissor marked = clip \? Intersect\(draw\.Scissor, \*clip\) : draw\.Scissor;\s+'
+          r'if \(marked\.width != 0U && marked\.height != 0U\) cover = cover \? Union\(\*cover, marked\) : marked;.*?'
+          r'drawMeshes\(true, DkStencilOp_Replace, DkCompareOp_Always, clip\);.*?'
+          r'bindDepthStencil\(false, DkCompareOp_Always, true, DkStencilOp_Zero, DkCompareOp_Equal\);.*?'
+          r'ApplyDkViewport\(cmd, static_cast<float>\(cover->x\), static_cast<float>\(cover->y\),\s+'
+          r'static_cast<float>\(cover->width\), static_cast<float>\(cover->height\)\);\s+'
+          r'dkCmdBufSetScissors\(cmd, 0, &\*cover, 1\);',
+          "oot3d_player_shadow_tests (TestScreenRect)"),
+    Guard("Simple shadow, texture: the floor quad samples the silhouette only once it is drawn (a fragment "
+          "barrier, the image cache dropped), a second target's silhouette waits for the first quad's reads, and "
+          "the scene target is bound again after it",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'if \(shadow\.SilhouetteFrame == mDevice\.Frame\(\)\) dkCmdBufBarrier\(cmd, DkBarrier_Fragments, 0\);.*?'
+          r'dkCmdBufBindRenderTargets\(cmd, colors, 1, nullptr\);\s+mBoundTarget = nullptr;.*?'
+          r'dkCmdBufBarrier\(cmd, DkBarrier_Fragments, DkInvalidateFlags_Image\);.*?'
+          r'if \(method == Method::Texture\) DrawPlayerShadowSilhouette\(draws\);\s+BindPicaTarget\(target\);',
+          "oot3d_player_shadow_tests (TestSilhouette)"),
+    Guard("Simple shadow: a frame whose draws use the top stencil bit keeps it (two passes and cover draw in one "
+          "pass then, not dropped: the foot shadows are hidden already)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
           r'if \(draw\.Stencil\.Enabled && \(\(draw\.Stencil\.WriteMask \| draw\.Stencil\.CompareMask\) & '
           r'kPlayerShadowStencilBit\) != 0U\) \{\s+shadow\.StencilTaken = shadow\.StencilShared = true;\s+'
           r'shadow\.StencilClean\.clear\(\);.*?'
-          r'const bool stencil = !shadow\.StencilTaken;.*?'
-          r'depthStencil\.stencilTestEnable = stencil \? 1 : 0;',
+          r'if \(shadow\.StencilTaken && \(method == Method::TwoPass \|\| method == Method::Cover\)\) \{.*?'
+          r'method = Method::OnePass;\s+\}\s+'
+          r'const bool stencil = method == Method::TwoPass \|\| method == Method::Cover;.*?'
+          r'case Method::OnePass:\s+drawMeshes\(false, DkStencilOp_Keep, DkCompareOp_Always, std::nullopt\);',
           ""),
     Guard("Simple shadow: drawn at the grass's points (after the opaque world, before translucent draws, "
           "overlays and the display transfer)",

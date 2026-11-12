@@ -426,11 +426,14 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
 
     // config/simple_shadow (gfx_deko3d_player_shadow.cpp): Link's opaque draws
     // of the frame, drawn again flattened onto the floor at the frame's first
-    // draw point after them (the grass's points).
+    // draw point after them (the grass's points), the way
+    // config/simple_shadow_method says.
     struct PlayerShadowDraw {
         const Deko3d::PicaTarget* Target = nullptr; // the frame's draws may go to several
         const DkShader* Vertex = nullptr;
         DkGpuAddr Uniforms = DK_GPU_ADDR_INVALID; // his uniforms with the flattening view rows
+        // Method texture: the same with the silhouette's projection rows.
+        DkGpuAddr SilhouetteUniforms = DK_GPU_ADDR_INVALID;
         uint32_t UniformBytes = 0;
         std::array<DkVtxAttribState, Deko3d::kPicaVertexAttributeCount> Attributes{};
         std::array<DkVtxBufferState, Deko3d::kPicaVertexAttributeCount> Buffers{};
@@ -447,13 +450,19 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         uint8_t DepthCompare = 0;
     };
     struct PlayerShadowState {
-        uint64_t Frame = ~uint64_t{0}; // of Selected, Projection, Draws and StencilTaken
+        // Of Selected, Method, Projection, Region, WorldToClip, Draws and StencilTaken.
+        uint64_t Frame = ~uint64_t{0};
         std::optional<Oot3d::PlayerShadowFrame> Selected;
+        // The bridge's, at the frame's first draw.
+        Oot3d::PlayerShadowMethod Method = Oot3d::PlayerShadowMethod::TwoPass;
         // One light and floor for all of the frame's meshes (taken at its first).
         std::optional<std::array<float, 16>> Projection;
+        // Methods cover and texture: the floor region and the camera of his first draw.
+        std::optional<Oot3d::PlayerShadowRegion> Region;
+        std::optional<std::array<float, 16>> WorldToClip;
         std::vector<PlayerShadowDraw> Draws;
-        // A draw of the frame tests or writes the top stencil bit, which the
-        // shadow borrows: no shadow that frame.
+        // A draw of the frame tests or writes the top stencil bit, which two
+        // passes and cover borrow: that frame they draw in one pass.
         bool StencilTaken = false;
         // Whether that bit can be set outside the shadow. Targets start with
         // it zero and the shadow's second pass leaves it so; once a game draw
@@ -463,13 +472,24 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         std::unordered_set<const Deko3d::PicaTarget*> StencilClean; // since the last share
         uint64_t FullClears = 0;
         const DkShader* Fragment = nullptr;
+        const DkShader* CoverVertex = nullptr; // method cover
+        const DkShader* FloorVertex = nullptr; // method texture
+        const DkShader* FloorFragment = nullptr;
+        // Method texture: the silhouette, drawn and then sampled at each draw point.
+        DkMemBlock SilhouetteMemory = nullptr;
+        DkImage SilhouetteImage{};
+        DkImageView SilhouetteView{};
+        uint32_t SilhouetteSlot = 0;
+        uint64_t SilhouetteFrame = ~uint64_t{0}; // the last frame that drew it
         uint64_t Frames = 0;
         uint64_t Meshes = 0;
         uint64_t Skipped = 0;
         uint64_t StencilFrames = 0;
+        std::array<uint64_t, Oot3d::kPlayerShadowMethodCount> MethodFrames{}; // drawn with each method
     };
     PlayerShadowState mPlayerShadow;
-    // InitPica: the fragment program, and the bridge told whether it loaded.
+    // InitPica: the programs and the silhouette, and the bridge told whether
+    // the shadow can be drawn.
     void InitPlayerShadow();
     // Every PICA draw, after EnsureFrame: the frame's shadow and stencil use.
     void ObservePlayerShadowDraw(const GfxNativePicaDrawView& draw);
@@ -478,6 +498,11 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
                                  const Deko3d::PicaTarget& target, const PlayerShadowDraw& bound);
     // At a draw point into `target`: the captured draws, once per frame.
     void DrawPlayerShadow(Deko3d::PicaTarget& target);
+    // Method texture, at a draw point: the draws flat into the silhouette,
+    // whose target stays bound (the caller binds the scene target again).
+    void DrawPlayerShadowSilhouette(const std::vector<PlayerShadowDraw>& draws);
+    // A captured draw's vertex input and draw call.
+    static void DrawPlayerShadowMesh(DkCmdBuf cmd, const PlayerShadowDraw& draw);
     // SubmitPicaDisplayTransfer of a raw TextureCopy (TextureCopyBytes != 0).
     bool SubmitPicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer, std::string* error);
     // The copy's destination bytes, or why it has none.

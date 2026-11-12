@@ -5,6 +5,7 @@
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "fast/backends/gfx_deko3d_log_line.h"
+#include "fast/oot3d/player_shadow.h"
 
 #include <switch.h>
 
@@ -163,6 +164,11 @@ std::atomic<uint64_t> gPerfSamplesPassed{0};
 std::atomic<uint64_t> gPerfCountedFrames{0};
 std::atomic<uint64_t> gPerfOpaqueNs{0};
 std::atomic<uint64_t> gPerfOpaqueFrames{0};
+// shadow_<method>_ms: the frame's first Simple shadow draw point (MarkShadowStart
+// to MarkShadowEnd), by the method that drew it, over the frames that had one.
+std::array<std::atomic<uint64_t>, Oot3d::kPlayerShadowMethodCount> gPerfShadowNs{};
+std::array<std::atomic<uint64_t>, Oot3d::kPlayerShadowMethodCount> gPerfShadowMaxNs{};
+std::array<std::atomic<uint64_t>, Oot3d::kPlayerShadowMethodCount> gPerfShadowFrames{};
 // config/deko3d_clear_draw: on, and the depth resets by what they became.
 std::atomic<bool> gPerfClearDraw{false};
 std::atomic<uint64_t> gPerfResets{0};
@@ -176,8 +182,9 @@ constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
 constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
 // Per slot: frame top, scene end (before the acquire), after the acquire, frame end,
 // then the ZCULL counters (config/deko3d_zcull, four words), the fragment
-// shader invocations and samples passed at frame top and at scene end, and the
-// timestamp at the first translucent world draw.
+// shader invocations and samples passed at frame top and at scene end, the
+// timestamp at the first translucent world draw and the two around the first
+// Simple shadow draw point.
 // The acquire makes the GPU wait for the display to release the image; that wait
 // is not GPU work, so busy = scene + tail.
 constexpr uint32_t kZcullStatsOffset = 4U * kTimestampBytes;
@@ -186,7 +193,9 @@ constexpr uint32_t kFsSceneOffset = 6U * kTimestampBytes;
 constexpr uint32_t kPassedTopOffset = 7U * kTimestampBytes;
 constexpr uint32_t kPassedSceneOffset = 8U * kTimestampBytes;
 constexpr uint32_t kOpaqueOffset = 9U * kTimestampBytes;
-constexpr uint32_t kTimestampSlotBytes = 10U * kTimestampBytes;
+constexpr uint32_t kShadowStartOffset = 10U * kTimestampBytes;
+constexpr uint32_t kShadowEndOffset = 11U * kTimestampBytes;
+constexpr uint32_t kTimestampSlotBytes = 12U * kTimestampBytes;
 static_assert(kFramesInFlight * kTimestampSlotBytes <= DK_MEMBLOCK_ALIGNMENT, "timestamps fit one block");
 
 uint64_t NowNanoseconds() {
@@ -559,6 +568,8 @@ void Device::BeginFrame() {
         }
     }
     mOpaqueMarked = false;
+    mShadowMarked = false;
+    mShadowOpen = false;
     mWindowSlot = -1;
     mRecorded = false;
     mFrameOpen = true;
@@ -1024,6 +1035,27 @@ void Device::MarkOpaqueEnd() {
     mSlots[mSlot].OpaqueTimed = true;
 }
 
+void Device::MarkShadowStart() {
+    if (!mFrameOpen || mShadowMarked || mTimestamps == nullptr || mWindowSlot >= 0) {
+        return;
+    }
+    mShadowMarked = true;
+    mShadowOpen = true;
+    dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kShadowStartOffset);
+}
+
+void Device::MarkShadowEnd(uint32_t method) {
+    if (!mShadowOpen) {
+        return;
+    }
+    mShadowOpen = false;
+    dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kShadowEndOffset);
+    mSlots[mSlot].ShadowTimed = true;
+    mSlots[mSlot].ShadowMethod = method;
+}
+
 // After the slot's fence: its frame's timestamps are written.
 void Device::CollectTimestamps(uint32_t slotIndex) {
     FrameSlot& slot = mSlots[slotIndex];
@@ -1067,6 +1099,17 @@ void Device::CollectTimestamps(uint32_t slotIndex) {
         if (opaque > top) {
             gPerfOpaqueNs.fetch_add(GpuTicksToNs(opaque - top), std::memory_order_relaxed);
             gPerfOpaqueFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (slot.ShadowTimed) {
+        slot.ShadowTimed = false;
+        const uint64_t start = value(kShadowStartOffset, 1U);
+        const uint64_t end = value(kShadowEndOffset, 1U);
+        if (end >= start && slot.ShadowMethod < gPerfShadowNs.size()) {
+            const uint64_t ns = GpuTicksToNs(end - start);
+            gPerfShadowNs[slot.ShadowMethod].fetch_add(ns, std::memory_order_relaxed);
+            StoreMax(gPerfShadowMaxNs[slot.ShadowMethod], ns);
+            gPerfShadowFrames[slot.ShadowMethod].fetch_add(1, std::memory_order_relaxed);
         }
     }
     if (!slot.Timed) {
@@ -1214,6 +1257,22 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         out << " fs_px=" << static_cast<double>(fs) * perPixel << " passed_px=" << static_cast<double>(passed) * perPixel
             << " opaque_ms="
             << (opaqueFrames != 0U ? static_cast<double>(opaqueNs) / static_cast<double>(opaqueFrames) / 1.0e6 : 0.0);
+        // Simple shadow: its first draw point's GPU time per frame, by the
+        // method that drew it (only the methods seen in the window).
+        for (size_t method = 0; method < gPerfShadowNs.size(); ++method) {
+            const uint64_t shadowFrames = gPerfShadowFrames[method].exchange(0, std::memory_order_relaxed);
+            const uint64_t shadowNs = gPerfShadowNs[method].exchange(0, std::memory_order_relaxed);
+            const uint64_t shadowMaxNs = gPerfShadowMaxNs[method].exchange(0, std::memory_order_relaxed);
+            if (shadowFrames == 0U) {
+                continue;
+            }
+            const std::string_view word =
+                Oot3d::PlayerShadowMethodWord(static_cast<Oot3d::PlayerShadowMethod>(method));
+            out << " shadow_" << word << "_ms="
+                << static_cast<double>(shadowNs) / static_cast<double>(shadowFrames) / 1.0e6 << " shadow_" << word
+                << "_max_ms=" << static_cast<double>(shadowMaxNs) / 1.0e6 << " shadow_" << word
+                << "_frames=" << shadowFrames;
+        }
         // config/deko3d_clear_draw: on/off, then per frame the depth resets
         // seen and those turned into a depth clear (full_clears: the colour
         // cleared too and the draw skipped), whether on or not.

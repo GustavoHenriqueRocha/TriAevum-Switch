@@ -1,6 +1,8 @@
 // Simple shadow, renderer side (fast/oot3d/player_shadow.h): the mod's opacity
 // and light direction, the projection onto the floor, the view-row patch of a
-// PICA vertex uniform block and the frame bridge.
+// PICA vertex uniform block, the floor region with its screen rectangle
+// (method cover) and silhouette rows (method texture), his camera, and the
+// frame bridge.
 #include "fast/oot3d/player_shadow.h"
 
 #include <cmath>
@@ -155,6 +157,166 @@ void TestPatch() {
   Require(!PatchPlayerShadowViewRows(untouched, projective, projection) && untouched == copy, "a projective view");
 }
 
+Mat4 ProjectionRowsOf(const std::vector<uint8_t> &block) {
+  Mat4 rows{};
+  std::memcpy(rows.data(), block.data() + kPicaPackedVertexFloatOffset, sizeof(rows));
+  return rows;
+}
+
+void SetFlip(std::vector<uint8_t> &block, int32_t flip) {
+  std::memcpy(block.data() + kPicaPackedVertexFlipViewportOffset, &flip, sizeof(flip));
+}
+
+int32_t FlipOf(const std::vector<uint8_t> &block) {
+  int32_t flip = 0;
+  std::memcpy(&flip, block.data() + kPicaPackedVertexFlipViewportOffset, sizeof(flip));
+  return flip;
+}
+
+// What the title's vertex program puts out (before its flip) for a vertex
+// the bones place at `world`: the projection rows times the view rows.
+std::array<float, 4> ClipOf(const std::vector<uint8_t> &block, const Vec3 &world) {
+  const Vec3 view = Apply(ViewRowsOf(block), world);
+  const Mat4 projection = ProjectionRowsOf(block);
+  std::array<float, 4> clip{};
+  for (size_t row = 0; row < 4U; ++row)
+    clip[row] = projection[row * 4U] * view[0] + projection[row * 4U + 1U] * view[1] +
+                projection[row * 4U + 2U] * view[2] + projection[row * 4U + 3U];
+  return clip;
+}
+
+// Where a flattened point lands in the region (along, across).
+std::array<float, 2> RegionPlace(const PlayerShadowRegion &region, const Vec3 &landed) {
+  const Vec3 offset{landed[0] - region.Origin[0], landed[1] - region.Origin[1], landed[2] - region.Origin[2]};
+  return {offset[0] * region.Along[0] + offset[1] * region.Along[1] + offset[2] * region.Along[2],
+          offset[0] * region.Across[0] + offset[1] * region.Across[1] + offset[2] * region.Across[2]};
+}
+
+void TestRegion() {
+  PlayerShadowFrame frame;
+  frame.FloorPoint = {10.0F, 0.0F, -5.0F};
+  const auto overhead = PlayerShadowFloorRegion(frame, {0.0F, 1.0F, 0.0F});
+  Require(overhead && Near(overhead->AlongRange[0], -kPlayerShadowBodyRadius) &&
+              Near(overhead->AlongRange[1], kPlayerShadowBodyRadius) &&
+              Near(overhead->AcrossRange[0], -kPlayerShadowBodyRadius) &&
+              Near(overhead->AcrossRange[1], kPlayerShadowBodyRadius) &&
+              Near(overhead->Origin, {10.0F, kPlayerShadowLift, -5.0F}),
+          "under a light straight above: the box's footprint");
+
+  const float s = std::sqrt(0.5F);
+  const Vec3 light{s, s, 0.0F};
+  // Every flattened point of his box, from `lowest` up, inside the region.
+  const auto covers = [&](const PlayerShadowFrame &at, float lowest) {
+    const auto region = PlayerShadowFloorRegion(at, light);
+    if (!region) return false;
+    const Mat4 projection = PlayerShadowProjection(at, light);
+    const Vec3 position{at.FloorPoint[0], at.FloorPoint[1] + at.Height, at.FloorPoint[2]};
+    bool inside = true;
+    for (const float x : {-kPlayerShadowBodyRadius, 0.0F, kPlayerShadowBodyRadius})
+      for (const float y : {lowest, position[1], position[1] + kPlayerShadowBodyAbove})
+        for (const float z : {-kPlayerShadowBodyRadius, 0.0F, kPlayerShadowBodyRadius}) {
+          const auto place = RegionPlace(*region, Apply(projection, {position[0] + x, y, position[2] + z}));
+          inside = inside && place[0] >= region->AlongRange[0] - 1.0e-3F &&
+                   place[0] <= region->AlongRange[1] + 1.0e-3F && place[1] >= region->AcrossRange[0] - 1.0e-3F &&
+                   place[1] <= region->AcrossRange[1] + 1.0e-3F;
+        }
+    return inside;
+  };
+  Require(covers(frame, frame.FloorPoint[1]), "standing: his body from the floor up inside the region");
+  PlayerShadowFrame hanging = frame;
+  hanging.Height = 100.0F;
+  Require(covers(hanging, hanging.FloorPoint[1] + hanging.Height - kPlayerShadowBodyBelow),
+          "hanging from a ledge: his body under his position inside it too");
+  const auto slanted = PlayerShadowFloorRegion(frame, light);
+  Require(slanted && slanted->Along[0] < -0.99F, "the shadow falls away from the light");
+  Require(slanted->AlongRange[1] - slanted->AlongRange[0] > slanted->AcrossRange[1] - slanted->AcrossRange[0],
+          "longer along the shadow");
+  Require(slanted->AlongRange[0] > -kPlayerShadowBodyRadius - 1.0F,
+          "nothing under the floor stretches it toward the light");
+}
+
+void TestScreenRect() {
+  PlayerShadowFrame frame;
+  frame.FloorPoint = {0.0F, 0.0F, 32.0F};
+  const auto region = PlayerShadowFloorRegion(frame, {0.0F, 1.0F, 0.0F});
+  Require(region.has_value(), "a region");
+  // Seen from above: x and z over 128 units to NDC x and y, w = 1. The
+  // region's x -60..60 makes columns 116.25..303.75, its z -28..92 NDC y
+  // -0.21875..0.71875.
+  Mat4 topDown{};
+  topDown[0] = 1.0F / 128.0F;
+  topDown[6] = 1.0F / 128.0F;
+  topDown[15] = 1.0F;
+  const std::array<float, 4> viewport{10.0F, 20.0F, 400.0F, 240.0F};
+  const auto firstRow = PlayerShadowScreenRect(topDown, *region, viewport, true);
+  Require(firstRow && *firstRow == std::array<int32_t, 4>{115, 112, 190, 116},
+          "NDC -1 on the viewport's first row, a pixel of margin");
+  const auto lastRow = PlayerShadowScreenRect(topDown, *region, viewport, false);
+  Require(lastRow && *lastRow == std::array<int32_t, 4>{115, 52, 190, 116}, "NDC -1 on its last row");
+  Mat4 perspective = topDown;
+  perspective[14] = -1.0F; // w = -z: the region crosses the camera's plane
+  perspective[15] = 0.0F;
+  Require(!PlayerShadowScreenRect(perspective, *region, viewport, true).has_value(),
+          "a corner behind the camera: no rectangle");
+}
+
+void TestSilhouette() {
+  const Mat4 viewColumns = ViewColumnMajor();
+  const Mat4 view = RowsOf(viewColumns);
+  PlayerShadowFrame frame;
+  frame.FloorPoint = {3.0F, 2.0F, -8.0F};
+  frame.Height = 20.0F;
+  const float s = std::sqrt(0.5F);
+  const Vec3 light{s, s, 0.0F};
+  const Mat4 projection = PlayerShadowProjection(frame, light);
+  const auto region = PlayerShadowFloorRegion(frame, light);
+  Require(region.has_value(), "a region");
+  auto block = Block(view);
+  SetFlip(block, 1);
+  Require(PatchPlayerShadowViewRows(block, viewColumns, projection) &&
+              PatchPlayerShadowSilhouetteRows(block, viewColumns, *region),
+          "both patches");
+  Require(FlipOf(block) == 0, "the silhouette is drawn unflipped");
+  const auto corners = region->Corners();
+  bool atCorners = true;
+  for (size_t corner = 0; corner < corners.size(); ++corner) {
+    const auto clip = ClipOf(block, corners[corner]);
+    atCorners = atCorners && Near(clip[0], (corner & 1U) != 0U ? 1.0F : -1.0F, 1.0e-3F) &&
+                Near(clip[1], (corner & 2U) != 0U ? 1.0F : -1.0F, 1.0e-3F) && Near(clip[2], -0.5F) &&
+                Near(clip[3], 1.0F);
+  }
+  Require(atCorners, "each corner of the region on the silhouette's corner the floor quad gives it");
+  const Vec3 hand{frame.FloorPoint[0] + 25.0F, frame.FloorPoint[1] + frame.Height + 40.0F, frame.FloorPoint[2] - 10.0F};
+  const auto atHand = ClipOf(block, hand);
+  const auto atImage = ClipOf(block, Apply(projection, hand));
+  Require(Near(atHand[0], atImage[0], 1.0e-3F) && Near(atHand[1], atImage[1], 1.0e-3F) &&
+              std::abs(atHand[0]) < 1.0F && std::abs(atHand[1]) < 1.0F,
+          "his body lands where its shadow is, inside the silhouette");
+  std::vector<uint8_t> shortBlock(kPicaPackedVertexFloatOffset + 3U * kPicaPackedVec4Bytes, 7U);
+  const auto before = shortBlock;
+  Require(!PatchPlayerShadowSilhouetteRows(shortBlock, viewColumns, *region) && shortBlock == before, "a short block");
+}
+
+void TestWorldToClip() {
+  const Mat4 viewColumns = ViewColumnMajor();
+  auto block = Block(RowsOf(viewColumns));
+  const Mat4 projectionRows{1.5F, 0.0F, 0.2F, 0.0F, 0.0F, 2.0F, 0.1F, 0.0F,
+                            0.0F, 0.0F, -0.5F, -3.0F, 0.0F, 0.0F, -1.0F, 0.0F};
+  std::memcpy(block.data() + kPicaPackedVertexFloatOffset, projectionRows.data(), sizeof(projectionRows));
+  const Vec3 world{3.0F, 20.0F, -8.0F};
+  const auto expected = ClipOf(block, world);
+  const auto clip = PlayerShadowWorldToClip(block, viewColumns);
+  Require(clip.has_value(), "his camera");
+  const auto gl = PlayerShadowGlPosition(*clip, world);
+  Require(Near(gl[0], expected[0], 1.0e-3F) && Near(gl[1], expected[1], 1.0e-3F) &&
+              Near(gl[2], -2.0F * expected[2] - expected[3], 1.0e-3F) && Near(gl[3], expected[3], 1.0e-3F),
+          "gl_Position as the deko3d dialect's epilogue writes it");
+  SetFlip(block, 1);
+  const auto flipped = PlayerShadowWorldToClip(block, viewColumns);
+  Require(flipped && Near(PlayerShadowGlPosition(*flipped, world)[1], -expected[1], 1.0e-3F),
+          "y negated for a flipped framebuffer");
+}
+
 void TestBridge() {
   PlayerShadowBridge bridge;
   Require(!bridge.RendererReady(), "no renderer draws it until one says so");
@@ -214,6 +376,10 @@ int main() {
   TestLightDirection();
   TestProjection();
   TestPatch();
+  TestRegion();
+  TestScreenRect();
+  TestSilhouette();
+  TestWorldToClip();
   TestBridge();
   std::puts("oot3d_player_shadow_tests: ok");
   return 0;

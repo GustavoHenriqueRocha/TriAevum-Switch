@@ -76,7 +76,10 @@ public:
     mGrassLod = Fast::Oot3d::ReadGrassSwitchLod(mConfig);
     mGrassFill = Fast::Oot3d::ReadGrassSwitchFill(mConfig);
 #if defined(__SWITCH__)
-    SimpleShadowEnabled().store(ReadSimpleShadowEnabled(mConfig), std::memory_order_relaxed);
+    SimpleShadowEnabled().store(ReadSimpleShadowFlag(mConfig, kSimpleShadowConfigName), std::memory_order_relaxed);
+    SimpleShadowCutscenes().store(ReadSimpleShadowFlag(mConfig, kSimpleShadowCutscenesConfigName),
+                                  std::memory_order_relaxed);
+    Fast::Oot3d::PlayerShadowBridge::Instance().SetMethod(ReadSimpleShadowMethod(mConfig));
 #endif
     // config/cpu_performance, gpu_performance and memory_performance apply at
     // start (the panel is created once, at window setup); all Standard opens
@@ -310,20 +313,47 @@ private:
 
   // config/simple_shadow (oot3d_simple_shadow.h): present = on, applied at
   // once. Only the deko3d backend draws the body, so only the Switch has it.
+  // config/simple_shadow_method and config/simple_shadow_cutscenes (a 0.2.3
+  // test): how it is drawn and whether cutscenes keep it, applied at once.
   void DrawSimpleShadow() {
 #if defined(__SWITCH__)
     ImGui::Separator();
     bool simpleShadow = SimpleShadowEnabled().load(std::memory_order_relaxed);
     if (ImGui::Checkbox("Simple shadow", &simpleShadow)) {
       SimpleShadowEnabled().store(simpleShadow, std::memory_order_relaxed);
-      Write(kSimpleShadowConfigName,
-            [config = mConfig, simpleShadow] { return SaveSimpleShadowEnabled(config, simpleShadow); });
+      Write(kSimpleShadowConfigName, [config = mConfig, simpleShadow] {
+        return SaveSimpleShadowFlag(config, kSimpleShadowConfigName, simpleShadow);
+      });
     }
-    if (Writer().Failed(kSimpleShadowConfigName))
-      ImGui::TextWrapped("Could not write config/%s.", kSimpleShadowConfigName);
+    auto &bridge = Fast::Oot3d::PlayerShadowBridge::Instance();
+    const char *const methods[] = {"Two passes (default)", "One pass (overlaps darker)", "Mark, then cover",
+                                   "Texture (soft edges)"};
+    static_assert(std::size(methods) == Fast::Oot3d::kPlayerShadowMethodCount);
+    int method = static_cast<int>(bridge.Method());
+    if (ImGui::Combo("Shadow method", &method, methods, static_cast<int>(std::size(methods)))) {
+      const auto chosen = static_cast<Fast::Oot3d::PlayerShadowMethod>(method);
+      bridge.SetMethod(chosen);
+      Write(kSimpleShadowMethodConfigName,
+            [config = mConfig, chosen] { return SaveSimpleShadowMethod(config, chosen); });
+    }
+    bool cutscenes = SimpleShadowCutscenes().load(std::memory_order_relaxed);
+    if (ImGui::Checkbox("Shadow in cutscenes", &cutscenes)) {
+      SimpleShadowCutscenes().store(cutscenes, std::memory_order_relaxed);
+      Write(kSimpleShadowCutscenesConfigName, [config = mConfig, cutscenes] {
+        return SaveSimpleShadowFlag(config, kSimpleShadowCutscenesConfigName, cutscenes);
+      });
+    }
+    for (const char *name :
+         {kSimpleShadowConfigName, kSimpleShadowMethodConfigName, kSimpleShadowCutscenesConfigName})
+      if (Writer().Failed(name)) ImGui::TextWrapped("Could not write config/%s.", name);
     ImGui::TextDisabled("Applies at once. Link's whole body casts his shadow along the scene's light, "
                         "instead of the two spots under his feet (Single Screen Experience's Simple "
                         "shadows). deko3d renderer only; drawing Link twice costs some GPU time.");
+    ImGui::TextDisabled("Shadow method: the same shadow drawn four ways, to compare what each costs (the "
+                        "log's dkperf lines, shadow_<method>_ms). One pass darkens overlapping limbs twice; "
+                        "Mark, then cover and Texture should cost less up close; Texture has soft edges, as "
+                        "in Single Screen Experience. Cutscenes keep the game's foot shadows unless Shadow "
+                        "in cutscenes is on.");
 #endif
   }
 

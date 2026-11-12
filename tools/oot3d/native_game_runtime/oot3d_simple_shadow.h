@@ -1,7 +1,9 @@
 #pragma once
 
-// L3+R3 > Game > Gameplay > "Simple shadow" (config/simple_shadow, present =
-// on; off by default; deko3d only).
+// L3+R3 > Video > "Simple shadow" (config/simple_shadow, present = on; off by
+// default; deko3d only), with "Shadow method" (config/simple_shadow_method,
+// how the renderer draws it) and "Shadow in cutscenes"
+// (config/simple_shadow_cutscenes, present = on).
 //
 // Link's shadow is Player_DrawFeetShadow (EUR 0x00297E04), called by
 // Actor_Draw through shape.shadowDraw (0x002D6498, back at 0x002D649C): unless
@@ -28,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <string>
 #include <system_error>
 #include <utility>
 
@@ -44,8 +47,8 @@ inline constexpr std::uint32_t kSimpleShadowStateFlags1Offset = 0x1710U;
 inline constexpr std::uint32_t kSimpleShadowStateFlags2Offset = 0x1714U;
 inline constexpr std::uint32_t kSimpleShadowRiding = 0x00800000U;  // stateFlags1: on Epona
 inline constexpr std::uint32_t kSimpleShadowHidden = 0x20000000U;  // stateFlags2: the mod skips him
-// stateFlags1: Link is in a cutscene. The port skips the body shadow there (close cutscene cameras made it cost
-// the 60 FPS frame, logs34-36); the game's foot shadows draw instead.
+// stateFlags1: Link is in a cutscene. The port skips the body shadow there unless config/simple_shadow_cutscenes
+// (close cutscene cameras made it cost the 60 FPS frame, logs34-36); the game's foot shadows draw instead.
 inline constexpr std::uint32_t kSimpleShadowCutscene = 0x20000000U;
 // CollisionPoly normal (s16 x, y, z, 1/32767 units).
 inline constexpr std::uint32_t kSimpleShadowPolyNormalOffset = 0x000AU;
@@ -59,23 +62,49 @@ inline std::atomic<bool> &SimpleShadowEnabled() noexcept {
   static std::atomic<bool> enabled{false};
   return enabled;
 }
+inline std::atomic<bool> &SimpleShadowCutscenes() noexcept {
+  static std::atomic<bool> cutscenes{false};
+  return cutscenes;
+}
 
 inline constexpr const char *kSimpleShadowConfigName = "simple_shadow";
+inline constexpr const char *kSimpleShadowCutscenesConfigName = "simple_shadow_cutscenes";
+// The method's word (Fast::Oot3d::PlayerShadowMethodWord); no file: two passes.
+inline constexpr const char *kSimpleShadowMethodConfigName = "simple_shadow_method";
 
-inline bool ReadSimpleShadowEnabled(const std::filesystem::path &config) {
+// config/simple_shadow and config/simple_shadow_cutscenes: present = on.
+inline bool ReadSimpleShadowFlag(const std::filesystem::path &config, const char *name) {
   std::error_code error;
-  return std::filesystem::exists(config / kSimpleShadowConfigName, error);
+  return std::filesystem::exists(config / name, error);
 }
 
 // Creates (on) or removes (off) the file; false if that failed.
-inline bool SaveSimpleShadowEnabled(const std::filesystem::path &config, bool enabled) {
+inline bool SaveSimpleShadowFlag(const std::filesystem::path &config, const char *name, bool on) {
   std::error_code error;
-  if (!enabled) {
-    std::filesystem::remove(config / kSimpleShadowConfigName, error);
+  if (!on) {
+    std::filesystem::remove(config / name, error);
     return !error;
   }
   std::filesystem::create_directories(config, error);
-  std::ofstream file(config / kSimpleShadowConfigName, std::ios::trunc);
+  std::ofstream file(config / name, std::ios::trunc);
+  return static_cast<bool>(file);
+}
+
+inline Fast::Oot3d::PlayerShadowMethod ReadSimpleShadowMethod(const std::filesystem::path &config) {
+  std::ifstream file(config / kSimpleShadowMethodConfigName);
+  std::string text;
+  if (!file || !std::getline(file, text)) return Fast::Oot3d::PlayerShadowMethod::TwoPass;
+  return Fast::Oot3d::ParsePlayerShadowMethod(text);
+}
+
+// Writes the method's word, or removes the file for two passes; false if that failed.
+inline bool SaveSimpleShadowMethod(const std::filesystem::path &config, Fast::Oot3d::PlayerShadowMethod method) {
+  if (method == Fast::Oot3d::PlayerShadowMethod::TwoPass)
+    return SaveSimpleShadowFlag(config, kSimpleShadowMethodConfigName, false);
+  std::error_code error;
+  std::filesystem::create_directories(config, error);
+  std::ofstream file(config / kSimpleShadowMethodConfigName, std::ios::trunc);
+  file << Fast::Oot3d::PlayerShadowMethodWord(method) << '\n';
   return static_cast<bool>(file);
 }
 
@@ -92,9 +121,12 @@ struct SimpleShadowActor final {
   std::array<std::int16_t, 3> FloorNormal{};
 };
 
-// The mod's conditions, and none in cutscenes (kSimpleShadowCutscene); the shadow of this frame when they hold.
-inline std::optional<Fast::Oot3d::PlayerShadowFrame> DecideSimpleShadow(const SimpleShadowActor &actor) noexcept {
-  if (actor.Id != 0U || (actor.StateFlags1 & (kSimpleShadowRiding | kSimpleShadowCutscene)) != 0U ||
+// The mod's conditions, and none in cutscenes (kSimpleShadowCutscene) unless `cutscenes`
+// (config/simple_shadow_cutscenes); the shadow of this frame when they hold.
+inline std::optional<Fast::Oot3d::PlayerShadowFrame> DecideSimpleShadow(const SimpleShadowActor &actor,
+                                                                        bool cutscenes) noexcept {
+  const std::uint32_t skipped = kSimpleShadowRiding | (cutscenes ? 0U : kSimpleShadowCutscene);
+  if (actor.Id != 0U || (actor.StateFlags1 & skipped) != 0U ||
       (actor.StateFlags2 & kSimpleShadowHidden) != 0U || actor.FloorPoly == 0U || actor.ShadowAlpha == 0U)
     return std::nullopt;
   const float height = actor.Position[1] - actor.FloorHeight;
@@ -151,10 +183,10 @@ class SimpleShadowRuntime final {
 public:
   // The pc to leave the compiled graph at, or nothing to run the block as is.
   // `compiled`: called from whole-AOT code, the only place a sequence starts
-  // and the graph can be left.
+  // and the graph can be left. `cutscenes`: the body shadow in cutscenes too.
   template <typename Memory>
   std::optional<std::uint32_t> Execute(oot3d::recomp::a32::GuestState &state, Memory &memory, bool enabled,
-                                       bool compiled) {
+                                       bool compiled, bool cutscenes) {
     if (mFeetPending) {
       // The actor's alpha back. ActorShadow_DrawFeet's own calls leave r14
       // inside it: then this is its return, and the caller is next. A new call
@@ -174,7 +206,7 @@ public:
     if (!enabled || !compiled) return std::nullopt;
     const auto actor = ReadSimpleShadowActor(memory, state.r[0]);
     if (!actor) return std::nullopt;
-    const auto frame = DecideSimpleShadow(*actor);
+    const auto frame = DecideSimpleShadow(*actor, cutscenes);
     if (!frame || !memory.Write8(actor->Address + kSimpleShadowAlphaOffset, 0U)) return std::nullopt;
     mFrame = frame;
     mActor = actor->Address;

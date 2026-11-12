@@ -86,7 +86,7 @@ void PutLink(FakeMemory &memory, const SimpleShadowActor &actor) {
 }
 
 void TestDecision() {
-  const auto frame = DecideSimpleShadow(Standing());
+  const auto frame = DecideSimpleShadow(Standing(), false);
   Require(frame.has_value(), "standing on a flat floor");
   Require(frame->Actor == kLink && frame->Height == 0.0F && frame->FloorPoint[0] == 100.0F &&
               frame->FloorPoint[1] == 20.0F && frame->FloorPoint[2] == -50.0F && frame->FloorNormal[1] == 1.0F,
@@ -95,7 +95,7 @@ void TestDecision() {
   const auto reject = [](auto change, const char *message) {
     auto actor = Standing();
     change(actor);
-    Require(!DecideSimpleShadow(actor).has_value(), message);
+    Require(!DecideSimpleShadow(actor, false).has_value(), message);
   };
   reject([](SimpleShadowActor &a) { a.Id = 1U; }, "not the player");
   reject([](SimpleShadowActor &a) { a.StateFlags1 = kSimpleShadowRiding; }, "on Epona: the game draws none");
@@ -106,12 +106,17 @@ void TestDecision() {
   reject([](SimpleShadowActor &a) { a.Position[1] = a.FloorHeight - 60.0F; }, "50 units under the floor");
   reject([](SimpleShadowActor &a) { a.Position[1] = a.FloorHeight + 1500.0F; }, "1500 units over it");
   reject([](SimpleShadowActor &a) { a.FloorNormal = {30000, 6000, 0}; }, "a floor steeper than 0.3");
+  auto inCutscene = Standing();
+  inCutscene.StateFlags1 = kSimpleShadowCutscene;
+  Require(DecideSimpleShadow(inCutscene, true).has_value(), "in a cutscene with Shadow in cutscenes on");
+  inCutscene.StateFlags1 |= kSimpleShadowRiding;
+  Require(!DecideSimpleShadow(inCutscene, true).has_value(), "on Epona in a cutscene: still none");
   auto high = Standing();
   high.Position[1] += 400.0F;
-  Require(DecideSimpleShadow(high).has_value(), "high up, the mod still draws it");
+  Require(DecideSimpleShadow(high, false).has_value(), "high up, the mod still draws it");
   auto sloped = Standing();
   sloped.FloorNormal = {0, 26214, 19660};
-  const auto onSlope = DecideSimpleShadow(sloped);
+  const auto onSlope = DecideSimpleShadow(sloped, false);
   Require(onSlope && std::abs(onSlope->FloorNormal[1] * onSlope->FloorNormal[1] +
                               onSlope->FloorNormal[2] * onSlope->FloorNormal[2] - 1.0F) < 1.0e-4F,
           "a sloped floor's unit normal");
@@ -141,19 +146,19 @@ void TestHook() {
   oot3d::recomp::a32::GuestState state;
   state.r[0] = kLink;
   state.r[14] = kCaller;
-  Require(!runtime.Execute(state, memory, false, true).has_value() && memory.Writes == 0 && !runtime.Pending() &&
-              !runtime.TakeFrame().has_value(),
+  Require(!runtime.Execute(state, memory, false, true, false).has_value() && memory.Writes == 0 &&
+              !runtime.Pending() && !runtime.TakeFrame().has_value(),
           "off: the block runs as is");
-  Require(!runtime.Execute(state, memory, true, false).has_value() && memory.Writes == 0 && !runtime.Pending(),
+  Require(!runtime.Execute(state, memory, true, false, false).has_value() && memory.Writes == 0 && !runtime.Pending(),
           "outside compiled code: no sequence starts");
 
-  Require(!runtime.Execute(state, memory, true, true).has_value(), "on: the block runs on");
+  Require(!runtime.Execute(state, memory, true, true, false).has_value(), "on: the block runs on");
   std::uint8_t alpha = 0xFFU;
   Require(memory.Read8(kLink + kSimpleShadowAlphaOffset, &alpha) && alpha == 0U, "the foot shadows at alpha 0");
   Require(state.r[14] == kSimpleShadowHookPc && runtime.Pending(), "ActorShadow_DrawFeet returns into the hook");
   state.r[0] = 0x1234U; // clobbered by the foot shadows
   state.r[14] = 0x001D0818U;
-  const auto exit = runtime.Execute(state, memory, true, true);
+  const auto exit = runtime.Execute(state, memory, true, true, false);
   Require(exit == kCaller && state.r[14] == kCaller && !runtime.Pending(), "back to Actor_Draw");
   Require(memory.Read8(kLink + kSimpleShadowAlphaOffset, &alpha) && alpha == 255U, "the alpha back");
   const auto frame = runtime.TakeFrame();
@@ -164,16 +169,16 @@ void TestHook() {
   state.r[1] = 0x08500000U; // lights
   state.r[2] = 0x08001000U; // play
   state.r[14] = kCaller;
-  (void)runtime.Execute(state, memory, true, true);
-  Require(runtime.Execute(state, memory, false, true) == kCaller, "turned off between the two: still finished");
+  (void)runtime.Execute(state, memory, true, true, false);
+  Require(runtime.Execute(state, memory, false, true, false) == kCaller, "turned off between the two: still finished");
 
   state.r[0] = kLink;
   state.r[14] = kCaller;
-  (void)runtime.Execute(state, memory, true, true);
+  (void)runtime.Execute(state, memory, true, true, false);
   state.r[0] = 0x1234U;
   state.r[1] = state.r[2] = 0U;
   state.r[14] = 0x001D0818U;
-  Require(!runtime.Execute(state, memory, true, false).has_value() && !runtime.Pending(),
+  Require(!runtime.Execute(state, memory, true, false, false).has_value() && !runtime.Pending(),
           "a return outside compiled code: the block runs again");
   Require(state.r[0] == kLink && state.r[1] == 0x08500000U && state.r[2] == 0x08001000U && state.r[14] == kCaller,
           "with the call's arguments, back to the caller");
@@ -185,33 +190,71 @@ void TestHook() {
   PutLink(onEpona, riding);
   state.r[0] = kLink;
   state.r[14] = kCaller;
-  Require(!runtime.Execute(state, onEpona, true, true).has_value() && onEpona.Writes == 0 && !runtime.Pending(),
+  Require(!runtime.Execute(state, onEpona, true, true, false).has_value() && onEpona.Writes == 0 &&
+              !runtime.Pending(),
           "on Epona: the game's own (no) shadow");
 
+  auto cutscene = Standing();
+  cutscene.StateFlags1 = kSimpleShadowCutscene;
+  FakeMemory inCutscene;
+  PutLink(inCutscene, cutscene);
+  state.r[0] = kLink;
   state.r[14] = kCaller;
-  (void)runtime.Execute(state, memory, true, true);
+  Require(!runtime.Execute(state, inCutscene, true, true, false).has_value() && inCutscene.Writes == 0 &&
+              !runtime.Pending(),
+          "in a cutscene: the foot shadows");
+  Require(!runtime.Execute(state, inCutscene, true, true, true).has_value() && runtime.Pending(),
+          "in a cutscene with Shadow in cutscenes on: the body");
+  state.r[14] = 0x001D0818U;
+  Require(runtime.Execute(state, inCutscene, true, true, true) == kCaller && runtime.TakeFrame().has_value(),
+          "and its frame");
+
+  state.r[14] = kCaller;
+  (void)runtime.Execute(state, memory, true, true, false);
   state.r[14] = kCaller; // a new call before the foot shadows came back
-  Require(!runtime.Execute(state, memory, true, true).has_value() && runtime.Pending() &&
+  Require(!runtime.Execute(state, memory, true, true, false).has_value() && runtime.Pending() &&
               state.r[14] == kSimpleShadowHookPc,
           "a new call: the alpha back, then a new sequence");
   state.r[14] = 0x001D0818U;
-  Require(runtime.Execute(state, memory, true, true) == kCaller, "which returns as usual");
+  Require(runtime.Execute(state, memory, true, true, false) == kCaller, "which returns as usual");
   Require(memory.Read8(kLink + kSimpleShadowAlphaOffset, &alpha) && alpha == 255U, "the alpha kept");
 
   state.r[14] = kCaller;
-  (void)runtime.Execute(state, memory, true, true);
+  (void)runtime.Execute(state, memory, true, true, false);
   runtime.Reset();
   Require(!runtime.Pending() && !runtime.TakeFrame().has_value(), "a state load resets it");
 }
 
 void TestConfig() {
-  Require(!SimpleShadowEnabled().load(), "off by default");
+  Require(!SimpleShadowEnabled().load() && !SimpleShadowCutscenes().load(), "off by default");
   const auto config = std::filesystem::temp_directory_path() / "oot3d_simple_shadow_tests";
   std::error_code ignored;
   std::filesystem::remove_all(config, ignored);
-  Require(!ReadSimpleShadowEnabled(config), "no file: off");
-  Require(SaveSimpleShadowEnabled(config, true) && ReadSimpleShadowEnabled(config), "on writes the file");
-  Require(SaveSimpleShadowEnabled(config, false) && !ReadSimpleShadowEnabled(config), "off removes it");
+  Require(!ReadSimpleShadowFlag(config, kSimpleShadowConfigName), "no file: off");
+  Require(SaveSimpleShadowFlag(config, kSimpleShadowConfigName, true) &&
+              ReadSimpleShadowFlag(config, kSimpleShadowConfigName),
+          "on writes the file");
+  Require(SaveSimpleShadowFlag(config, kSimpleShadowConfigName, false) &&
+              !ReadSimpleShadowFlag(config, kSimpleShadowConfigName),
+          "off removes it");
+
+  using Fast::Oot3d::PlayerShadowMethod;
+  Require(ReadSimpleShadowMethod(config) == PlayerShadowMethod::TwoPass, "no method file: two passes");
+  for (const auto method : {PlayerShadowMethod::OnePass, PlayerShadowMethod::Cover, PlayerShadowMethod::Texture})
+    Require(SaveSimpleShadowMethod(config, method) && ReadSimpleShadowMethod(config) == method,
+            "each method reads back");
+  Require(SaveSimpleShadowMethod(config, PlayerShadowMethod::TwoPass) &&
+              !std::filesystem::exists(config / kSimpleShadowMethodConfigName) &&
+              ReadSimpleShadowMethod(config) == PlayerShadowMethod::TwoPass,
+          "two passes removes the file");
+  const auto write = [&](const char *text) {
+    std::ofstream file(config / kSimpleShadowMethodConfigName, std::ios::trunc);
+    file << text;
+  };
+  write("  cover\r\n");
+  Require(ReadSimpleShadowMethod(config) == PlayerShadowMethod::Cover, "a word saved on Windows (CRLF, spaces)");
+  write("stencil\n");
+  Require(ReadSimpleShadowMethod(config) == PlayerShadowMethod::TwoPass, "an unknown word: two passes");
   std::filesystem::remove_all(config, ignored);
 }
 

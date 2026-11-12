@@ -147,6 +147,11 @@ class Device {
     // dkperf opaque_ms: a timestamp at the frame's first translucent world
     // draw (once per frame; the frame top to it).
     void MarkOpaqueEnd();
+    // dkperf shadow_<method>_ms (config/simple_shadow_method): timestamps
+    // around the frame's first Simple shadow draw point, by the method that
+    // drew it (Oot3d::PlayerShadowMethod); End without Start writes nothing.
+    void MarkShadowStart();
+    void MarkShadowEnd(uint32_t method);
 
     // Hands the commands recorded so far to the GPU.
     void Submit();
@@ -198,6 +203,8 @@ class Device {
         bool ZcullTimed = false; // config/deko3d_zcull: its ZCULL stats were reported
         bool Counted = false;    // fragment shader / samples passed at frame top and scene end
         bool OpaqueTimed = false; // the timestamp at the first translucent world draw
+        bool ShadowTimed = false; // the two around the frame's first shadow draw point
+        uint32_t ShadowMethod = 0; // the method that drew it
         FrameTag Tag; // Deko3dTagFrame of the frame
     };
     void CollectTimestamps(uint32_t slot);
@@ -241,6 +248,8 @@ class Device {
     bool mFrameOpen = false;
     bool mRecorded = false;
     bool mOpaqueMarked = false; // MarkOpaqueEnd ran this frame
+    bool mShadowMarked = false; // MarkShadowStart ran this frame
+    bool mShadowOpen = false;   // and MarkShadowEnd not yet
     bool mSyncCheck = false;
     bool mSyncFailed = false;
     bool mSyncFailurePending = false;

@@ -602,8 +602,9 @@ void ApplyNativeWidescreenProjectionPolicy(
       (wholeAotExecutionActive || runtime.SimpleShadow->Pending())) {
     const bool simpleShadow = Oot3dNativeGame::SimpleShadowEnabled().load(std::memory_order_relaxed) &&
                               Fast::Oot3d::PlayerShadowBridge::Instance().RendererReady();
-    if (const auto exitPc =
-            runtime.SimpleShadow->Execute(state, memory, simpleShadow, wholeAotExecutionActive)) {
+    if (const auto exitPc = runtime.SimpleShadow->Execute(
+            state, memory, simpleShadow, wholeAotExecutionActive,
+            Oot3dNativeGame::SimpleShadowCutscenes().load(std::memory_order_relaxed))) {
 #if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
       Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(*exitPc, state);
 #else

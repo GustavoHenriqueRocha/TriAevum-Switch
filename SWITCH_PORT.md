@@ -4203,7 +4203,9 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   - "Simple shadow" (`config/simple_shadow`, present = on; **Switch only**: the deko3d backend draws it):
     Link's whole body flattened onto the floor along the scene's light, instead of his two foot spots.
     Since 11/11 it is in L3+R3 > Video, after Grass, with the other renderer options (same file, still off
-    by default until it has been seen on a console and its GPU cost measured).
+    by default until it has been seen on a console and its GPU cost measured). Since 11/12 two options
+    follow it there: "Shadow method" (`config/simple_shadow_method`, below) and "Shadow in cutscenes"
+    (`config/simple_shadow_cutscenes`, present = on, off by default).
 - **Damage (EUR code.bin):** every change of Link's health goes through `Health_ChangeBy` (`0x00352DBC`,
   r1 = the change, a sign-extended s16, negative for damage; health in sixteenths of a heart at save context
   +0x44). After its entry the game doubles damage in Master Quest (flag read at `0x00352DCC`) and halves it
@@ -4257,11 +4259,13 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   whole-AOT code regenerated with both files:** the window refuses a hook its title module does not gate
   (`Oot3dWholeAotHookGatesError`), and product builds refuse a title module that does not start a block at
   every one of these PCs (`Oot3dGameplayOptionBlockPcs`, `oot3d_native_a32_window_setup.cpp`).
-- **Log:** game log line `gameplay: quick_put_away=.. damage=.. master_quest_unmirrored=.. simple_shadow=..`
-  at start and on each change, beside the Landing roll / Roll dash line (`oot3d_gameplay_options_log.h`);
-  "(applies at the next file load or pause menu close)" while the Master Quest setting waits for the game's
-  read. `logs/deko3d.txt`: `shadow: frame .. N meshes opacity .. height .. | frames, meshes, skipped, frames
-  without the stencil bit` at the first shadow frame and every 1800 after.
+- **Log:** game log line `gameplay: quick_put_away=.. damage=.. master_quest_unmirrored=.. simple_shadow=..
+  shadow_method=.. shadow_cutscenes=..` at start and on each change, beside the Landing roll / Roll dash line
+  (`oot3d_gameplay_options_log.h`); "(applies at the next file load or pause menu close)" while the Master
+  Quest setting waits for the game's read. `logs/deko3d.txt`: `shadow: frame .. <method>, N meshes opacity ..
+  height .. | frames (per method), meshes, skipped, frames without the stencil bit, full stencil clears` at the
+  first shadow frame and every 1800 after. `perf.txt` (dkperf): `shadow_<method>_ms`, `_max_ms` and `_frames`
+  for each method that drew in the window ("Shadow method", below).
 - **Check [not done on the console; needs the regenerated title module]:** Damage taken 2x, then one hit:
   an enemy's hit costs twice its usual damage, then any hit is fatal; a recovery heart still heals a heart.
   Quick put away: swing the sword, A offers Put Away at once instead of a second later. Unmirrored Master
@@ -4301,11 +4305,14 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   stops on the same bit). Seen in logs34-36: a Temple of Time cutscene that faces Link as he plays the ocarina
   ran at 30 FPS with the body shadow and 60 without (Full resolution at scale 3, per-pixel lighting). The governor
   estimated 15.3-16.8 ms per frame without it and 16.2-17.9 ms with it, against 16.7, and dropped the in-between
-  frames. Test: `oot3d_simple_shadow_tests` (TestDecision).
+  frames. Test: `oot3d_simple_shadow_tests` (TestDecision). Since 11/12, L3+R3 > Video > "Shadow in cutscenes"
+  (`config/simple_shadow_cutscenes`) draws the body shadow there too, to measure the shadow methods in that
+  cutscene; off by default.
 - **Simple shadow, the renderer's side (deko3d, `gfx_deko3d_player_shadow.cpp`, `fast/oot3d/player_shadow.h`):**
-  the mod renders his silhouette into a small texture laid on the floor (soft edges); here his meshes are
-  projected (sharp edges). Each opaque scene draw of his actor (NativeActorIdentity) that leaves depth to the
-  rasterizer is captured with the state it bound and the target it went to (a frame can draw him into two:
+  the mod renders his silhouette into a small texture laid on the floor (soft edges); by default his meshes
+  are projected here (sharp edges), and "Shadow method" (below) draws them three more ways. Each opaque scene
+  draw of his actor (NativeActorIdentity) that leaves depth to the rasterizer is captured with the state it
+  bound and the target it went to (a frame can draw him into two:
   the native-dependency replay and the presented one); at each target's first grass draw point after them
   (before a translucent world draw, an overlay or the display transfer) they are drawn again with his own PICA vertex
   program, its view rows f[4..6] replaced by V·S·V⁻¹·f[4..6] (V the draw's world-to-view, S the projection
@@ -4326,18 +4333,52 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   ledge it hangs at the floor's height; in first person and wherever the game does not draw Link, there is
   no body to project and the foot shadows stay hidden. The PC renderers do not draw it, so the menu has it
   only on the Switch.
+- **Shadow method (11/12, a 0.2.3 test; `config/simple_shadow_method`, L3+R3 > Video > "Shadow method"):** the
+  same projected meshes drawn four ways, to choose one by its GPU time (with two passes, the logs34-36
+  cutscene lost the 60 FPS frame):
+  - **Two passes** (the default, no file): as above.
+  - **One pass** (`one_pass`): the meshes darken without the stencil, so overlapping limbs darken twice or more.
+  - **Mark, then cover** (`cover`): the meshes, without colour, set the stencil bit; one triangle over a
+    screen rectangle then darkens where the bit is set and zeroes it (stencil equal, op zero), instead of the
+    second pass over all the meshes. The rectangle is the screen box of the floor region
+    (`PlayerShadowFloorRegion`): the rectangle of the shadow plane that a box about Link covers once projected
+    along the light (60 units around him, 110 over his position, 60 under it but never under the floor), its
+    long side along the shadow. The meshes mark only inside that rectangle (their scissor cut to it), so the
+    cover zeroes every bit they set; a pose leaving the box is cut at its edge. When a corner of the region is
+    behind the camera, the rectangle is the draws' scissor.
+  - **Texture** (`texture`, the mod's way): the meshes, with their projection rows f[0..3] replaced too (T·V⁻¹,
+    T taking the floor region to x, y = -1..1 and z = -w/2) and the viewport flip off, go flat into a 256x256
+    RGBA8 silhouette (white on clear; a texel of border stays clear for the clamping sampler). After a
+    fragment barrier, one quad over the floor region (its corners through the draw's projection rows and V,
+    with the dialect's depth) samples it with four bilinear taps (soft edges) and darkens the floor with his
+    depth test. A second target in the same frame waits for the first quad's reads before the silhouette is
+    drawn again. Programs: `player_shadow_cover_vsh.glsl`, `player_shadow_floor_vsh.glsl` and
+    `player_shadow_floor_fsh.glsl`; `tools/oot3d/deko3d_shadow/gen.py` compiles all four into
+    `gfx_deko3d_player_shadow_dksh.h`.
+  - Cover and texture fall back to two passes when the region or his camera is unknown, or a program or the
+    silhouette did not load. In a frame whose own draws use the stencil bit, two passes and cover draw in one
+    pass (above).
+  - **GPU time:** timestamps around the frame's first shadow draw point, by the method that drew it: dkperf
+    `shadow_<method>_ms` (mean), `shadow_<method>_max_ms` and `shadow_<method>_frames`, only for the methods
+    seen in the window. The `gameplay:` line logs each change of method.
+  - **Check [not done on the console]:** in the logs34-36 Temple of Time cutscene, with Shadow in cutscenes
+    on, each method in turn for 20-30 s: the shadow on the floor in all four (one pass darker where limbs
+    overlap, texture with soft edges), no dark rectangle or marks left behind with cover, and each method's
+    `shadow_<method>_ms`; then the same in normal play (Hyrule Field by day).
 - Tests: `oot3d_damage_multiplier_tests` (normal, 2x, 10x and above, healing, one hit, the clamp; with the
   game's Master Quest doubling and double defence; the config file), `oot3d_quick_put_away_tests` (the
   default, the config file), `oot3d_master_quest_mirror_tests` (the table sorted, found by its hook and not
   by the read, `Health_ChangeBy`'s doubling not in it; the setting before and after the game's read; the
-  config file),   `oot3d_simple_shadow_tests` (the mod's conditions, the actor and floor reads, the foot
-  shadows at alpha 0 and their return, a change of option between the two, nothing started outside compiled
-  code, a return outside it, a new call before the return, a reset, the config file),
-  `oot3d_player_shadow_tests` (the opacity at known heights, the light direction, the projection onto flat
-  and sloped floors, the view-row patch with the camera in the rows or in the bones, the frame bridge),
-  `oot3d_gameplay_options_log_tests`, `oot3d_native_block_entry_hooks_tests` (the hooks in every
-  configuration), the census check. Guards "Damage taken", "Quick put away", "Unmirrored Master Quest",
-  "Simple shadow", "Gameplay options" and the observed-sites check of the 33 mirror hooks.
+  config file),   `oot3d_simple_shadow_tests` (the mod's conditions, in cutscenes with the option on or off,
+  the actor and floor reads, the foot shadows at alpha 0 and their return, a change of option between the
+  two, nothing started outside compiled code, a return outside it, a new call before the return, a reset, the
+  config files and the method's word), `oot3d_player_shadow_tests` (the opacity at known heights, the light
+  direction, the projection onto flat and sloped floors, the view-row patch with the camera in the rows or in
+  the bones, the floor region standing and hanging, its screen rectangle, the silhouette rows, his camera's
+  gl_Position, the frame bridge), `oot3d_gameplay_options_log_tests`, `oot3d_native_block_entry_hooks_tests`
+  (the hooks in every configuration), the census check. Guards "Damage taken", "Quick put away", "Unmirrored
+  Master Quest", "Simple shadow" (two passes, cover and texture among them), "Gameplay options" and the
+  observed-sites check of the 33 mirror hooks.
 
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
