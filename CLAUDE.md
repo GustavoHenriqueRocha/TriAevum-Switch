@@ -102,6 +102,13 @@ Relatório de agente/workflow também vai para lá, depois de verificado.
 
 Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos commits citados.
 
+- **Limpar `.claude/worktrees` em massa leva junto o deko3d** → os worktrees vivos (`deko3d`, `mk7`,
+  `ctr-discover`) ficam na mesma pasta que os `agent-*`, e muitos worktrees velhos estavam em HEAD solta
+  com commit que não existia em nenhum branch. → Limpe só `agent-*`; antes, `git branch -a --contains`
+  em cada HEAD solta e crie `resgate/<nome>` para o que não estiver em branch. Em 12/11 saíram os 51
+  e foram recriados `deko3d`/`mk7`/`ctr-discover` e 14 `resgate/*` (backup do que estava fora do git em
+  ~/Documentos/backup-triaevum-worktrees-2026-11-12.tar.gz).
+
 - **Crash com "Function not implemented" (p6x)** → `std::thread::detach()` lança
   `std::system_error`: a newlib do devkitA64 não tem `pthread_detach` (ENOSYS). → Nunca `detach()`
   no Switch; guarde a thread num objeto que nunca é destruído (p6y).
