@@ -204,7 +204,7 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   if (interpolationPacingConfigured && rateHz == interpolationPacingRateHz &&
       interpolationPacingOptions.DynamicResolutionSixty == dynamicResolutionSixtyMode) {
     // A backend reset (InitNativePica) forgets the namespace scale.
-    if (interpolationPacing.ReducedAvailable() &&
+    if (interpolationPacing.ReducedAvailable() && !reducedViaDynamicScale &&
         api.PicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace) !=
             interpolationPacing.Config().ReducedScale) {
       (void)api.SetPicaNamespaceResolutionScale(
@@ -241,8 +241,6 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
       config.ReducedScale > 0.0F &&
       api.SetPicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace,
                                           config.ReducedScale);
-  const bool reducedAvailable = pacing.ReducedAvailable;
-  const float baseScale = pacing.BaseScale;
   // Dynamic resolution (config/dynamic_resolution, off by default): between
   // the backend's scale and the configured lowest one, on the same pair
   // budget (oot3d_native_dynamic_resolution.h). Back at the top scale.
@@ -261,6 +259,23 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
 #endif
   if (drsDeko3dTiming)
     Oot3dNativeGame::UseDeko3dDynamicResolutionTiming(pacing.Resolution);
+  // deko3d has no namespace scales: a reduced in-between frame is one
+  // dynamic-resolution step for that frame alone (DynamicStepReducedScale),
+  // by default where the scene is held at the full scale at 60 FPS.
+  reducedViaDynamicScale = false;
+  reducedStepScale.reset();
+  if (drsDeko3dTiming && backendScale.Supported) {
+    const bool heldAtFullScale =
+        !dynamicResolutionActive ||
+        options.DynamicResolutionSixty == Oot3dNativeGame::DynamicResolutionSixtyMode::Full;
+    pacing.BaseScale = backendScale.MaxScale;
+    config.ReducedScale = Oot3dNativeGame::DynamicStepReducedScale(
+        options.ReducedScaleText, backendScale.MaxScale, heldAtFullScale);
+    pacing.ReducedAvailable = config.ReducedScale > 0.0F;
+    reducedViaDynamicScale = pacing.ReducedAvailable;
+  }
+  const bool reducedAvailable = pacing.ReducedAvailable;
+  const float baseScale = pacing.BaseScale;
   pacing.ResolutionSixty = options.DynamicResolutionSixty;
   dynamicResolutionSixtyMode = options.DynamicResolutionSixty;
   pacing.ResolutionStartScale = dynamicResolutionMemory.StartScale(
@@ -329,13 +344,16 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
         !options.ForceNativeReplay && !api.PicaNativeNamespaceObservable();
     std::fprintf(stderr,
                  "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
-                 "reduced_available=%d mode=%s base_scale=%.2f "
+                 "reduced_available=%d reduced_route=%s mode=%s base_scale=%.2f "
                  "native_replay=%d fps60_mode=%s cpu_count_wait=%d "
                  "flush_before_pacing=%d margin_ms=%.2f entry_recover=%d "
                  "entry_probe_interval=%u entry_decisions=%u "
                  "max_probe_interval=%u\n",
                  config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
                  reducedAvailable ? 1 : 0,
+                 reducedViaDynamicScale ? "dynamic_step"
+                 : reducedAvailable     ? "namespace"
+                                        : "none",
                  options.ReducedAlways ? "always" : "auto", baseScale,
                  skipNativeReplay ? 0 : 1,
                  Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data(),
@@ -4214,6 +4232,7 @@ void NativeA32WindowSession::PresentVisualFrame(
             // tour19: the scale applies at this frame's colour clear or, if
             // none comes, at its first draw into the target.
             ++Fast::PicaGlDynamicScale::gState.FrameSerial;
+            reducedStepScale.reset();
             auto &sample = visualFrameSampleScratch;
             // Keep the canonical target complete independently of the
             // delayed visual target. Raw-copy prefixes have already
@@ -4503,13 +4522,32 @@ void NativeA32WindowSession::PresentVisualFrame(
                   sample, &visualInterpolationTiming)) {
             uint64_t sampleNamespace = kVisualInterpolationRenderTargetNamespace;
             if (level == Oot3dNativeGame::InterpolatedSampleLevel::Reduced) {
-              if (Oot3dNativeGame::SampleSuitsReducedReplay(
-                      sample, reducedReplayScratch)) {
+              if (reducedViaDynamicScale) {
+                // deko3d: one dynamic-resolution step for this frame alone;
+                // the top-screen target moves to it at the frame's first
+                // draw and back with the next step frame (or a full
+                // in-between frame before it).
+                auto &backendScale = Fast::PicaGlDynamicScale::gState;
+                if (!reducedStepScale) reducedStepScale = backendScale.Requested;
+                const float stepScale =
+                    *reducedStepScale > 0.0F ? *reducedStepScale : backendScale.MaxScale;
+                backendScale.Requested =
+                    std::min(interpolationPacing.Config().ReducedScale, stepScale);
+                ++backendScale.FrameSerial;
+              } else if (Oot3dNativeGame::SampleSuitsReducedReplay(
+                             sample, reducedReplayScratch)) {
                 sampleNamespace = kReducedVisualRenderTargetNamespace;
               } else {
                 level = Oot3dNativeGame::InterpolatedSampleLevel::Full;
                 ++reducedRefusedThisFrame;
               }
+            } else if (reducedStepScale) {
+              // A full in-between frame after a reduced one, no step frame
+              // between them: the step frame's scale again.
+              auto &backendScale = Fast::PicaGlDynamicScale::gState;
+              backendScale.Requested = *reducedStepScale;
+              ++backendScale.FrameSerial;
+              reducedStepScale.reset();
             }
             const auto temporalSample =
                 Fast::Oot3d::BuildNativeFrameTemporalSample(

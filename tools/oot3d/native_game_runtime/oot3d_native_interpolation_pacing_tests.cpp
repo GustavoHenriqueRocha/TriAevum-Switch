@@ -807,6 +807,22 @@ void TestParseReducedScale() {
   CHECK(ParseInterpolationReducedScale("1.5", 1.0F) == 0.0F);
 }
 
+// deko3d: a reduced in-between frame is a dynamic-resolution step of its
+// own; without config/interp_scale, only a scene held at the full scale at
+// 60 FPS gets one, one 0.25 step lower.
+void TestDynamicStepReducedScale() {
+  using Oot3dNativeGame::DynamicStepReducedScale;
+  CHECK(DynamicStepReducedScale("", 3.0F, true) == 2.75F);
+  CHECK(DynamicStepReducedScale("", 2.5F, true) == 2.25F);
+  CHECK(DynamicStepReducedScale("", 2.6F, true) == 2.5F);
+  CHECK(DynamicStepReducedScale("", 1.0F, true) == 0.0F);
+  CHECK(DynamicStepReducedScale("", 3.0F, false) == 0.0F);
+  CHECK(DynamicStepReducedScale("2.5", 3.0F, false) == 2.5F);
+  CHECK(DynamicStepReducedScale("off", 3.0F, true) == 0.0F);
+  CHECK(DynamicStepReducedScale("0", 3.0F, true) == 0.0F);
+  CHECK(DynamicStepReducedScale("3", 3.0F, true) == 0.0F);
+}
+
 } // namespace
 
 // tour15 (pgo5j, margin 0): a measured pair of 29-30 ms "fit" 33.3 and the
@@ -850,6 +866,7 @@ int main() {
   TestMarginDropsPairsNearTheBudget();
   TestNoMeasurementsKeepsPreferredLevel();
   TestLightLoadDrawsEveryInBetweenFrame();
+  TestDynamicStepReducedScale();
   TestHeavyLoadDropsWithoutReducedLevel();
   TestHeavyLoadReducesWhenTheReducedFrameFits();
   TestEvenReducedTooSlowDrops();

@@ -236,6 +236,26 @@ ParseInterpolationMarginMs(std::string_view text) noexcept {
   return static_cast<float>(scale);
 }
 
+// deko3d has no namespace scales: there a reduced in-between frame is one
+// dynamic-resolution step for that frame alone (gl_pica_dynamic_scale.h;
+// the step frame after it sets its own scale again). config/interp_scale as
+// above when it has text ("0" or "off": none). Without it, a scene held at
+// the full scale at 60 FPS (Resolution at 60 FPS: Full, or no dynamic
+// resolution) draws an in-between frame that does not fit 0.25 lower
+// instead of dropping it (logs37: the Temple of Time cutscene at the
+// Standard GPU clock jumped between 30 and 60 FPS with a 16.1-17.0 ms
+// frame). 0: no reduced level.
+[[nodiscard]] inline float DynamicStepReducedScale(std::string_view text, float maxScale,
+                                                   bool heldAtFullScale) noexcept {
+  if (!text.empty())
+    return ParseInterpolationReducedScale(text, maxScale);
+  if (!heldAtFullScale)
+    return 0.0F;
+  // The multiple of 0.25 below the scale (2.75 at 3, 2.5 at 2.6).
+  const float reduced = std::ceil(maxScale * 4.0F - 1.0e-3F) / 4.0F - 0.25F;
+  return reduced >= 1.0F ? reduced : 0.0F;
+}
+
 struct InterpolationPacingStats {
   uint64_t StepFrames = 0;
   uint64_t FullFrames = 0;

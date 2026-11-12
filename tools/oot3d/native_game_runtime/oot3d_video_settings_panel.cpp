@@ -151,8 +151,10 @@ public:
     ImGui::TextDisabled("FPS applies at once; the game keeps 30 steps a second either way.");
     ImGui::TextDisabled("Resolution at 60 FPS applies at once. Dynamic lowers the resolution in busy "
                         "rooms to keep 60 FPS. Full keeps the full resolution (handheld 3x, docked "
-                        "the docked setting) and can drop the real frame rate in busy rooms at the "
-                        "Standard GPU clock; GPU clock High helps.");
+                        "the docked setting); where a frame between two game steps would not fit, it "
+                        "is drawn one step lower (0.25) instead of being skipped. The real frame rate "
+                        "can still drop where even that is too slow at the Standard GPU clock; GPU "
+                        "clock High helps.");
     // Applies at once (RunFrame reads the flag every frame); the file keeps
     // it for the next start.
     ImGui::Separator();
@@ -326,7 +328,7 @@ private:
       });
     }
     auto &bridge = Fast::Oot3d::PlayerShadowBridge::Instance();
-    const char *const methods[] = {"Two passes (default)", "One pass (overlaps darker)", "Mark, then cover",
+    const char *const methods[] = {"Two passes", "One pass (overlaps darker)", "Mark, then cover (default)",
                                    "Texture (soft edges)"};
     static_assert(std::size(methods) == Fast::Oot3d::kPlayerShadowMethodCount);
     int method = static_cast<int>(bridge.Method());
@@ -349,11 +351,11 @@ private:
     ImGui::TextDisabled("Applies at once. Link's whole body casts his shadow along the scene's light, "
                         "instead of the two spots under his feet (Single Screen Experience's Simple "
                         "shadows). deko3d renderer only; drawing Link twice costs some GPU time.");
-    ImGui::TextDisabled("Shadow method: the same shadow drawn four ways, to compare what each costs (the "
-                        "log's dkperf lines, shadow_<method>_ms). One pass darkens overlapping limbs twice; "
-                        "Mark, then cover and Texture should cost less up close; Texture has soft edges, as "
-                        "in Single Screen Experience. Cutscenes keep the game's foot shadows unless Shadow "
-                        "in cutscenes is on.");
+    ImGui::TextDisabled("Shadow method: the same shadow drawn four ways. Mark, then cover looks like Two "
+                        "passes at about half the GPU time; One pass is as cheap but darkens overlapping "
+                        "limbs twice; Texture has soft edges, as in Single Screen Experience (the log's "
+                        "dkperf lines: shadow_<method>_ms). Cutscenes keep the game's foot shadows unless "
+                        "Shadow in cutscenes is on.");
 #endif
   }
 

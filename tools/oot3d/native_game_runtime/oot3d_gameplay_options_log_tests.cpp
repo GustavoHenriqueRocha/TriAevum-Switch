@@ -26,7 +26,7 @@ void TestLine() {
   GameplayOptionsLog log;
   const auto start = log.Take();
   Require(Contains(start, "gameplay: quick_put_away=off damage=normal master_quest_unmirrored=off ") &&
-              Contains(start, " simple_shadow=off shadow_method=two_pass shadow_cutscenes=off "),
+              Contains(start, " simple_shadow=off shadow_method=cover shadow_cutscenes=off "),
           "the defaults at start");
   Require(!Contains(start, "applies at the next"), "nothing pending at start");
   Require(!log.Take().has_value(), "an unchanged setting is not logged again");

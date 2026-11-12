@@ -69,7 +69,8 @@ inline std::atomic<bool> &SimpleShadowCutscenes() noexcept {
 
 inline constexpr const char *kSimpleShadowConfigName = "simple_shadow";
 inline constexpr const char *kSimpleShadowCutscenesConfigName = "simple_shadow_cutscenes";
-// The method's word (Fast::Oot3d::PlayerShadowMethodWord); no file: two passes.
+// The method's word (Fast::Oot3d::PlayerShadowMethodWord); no file: the
+// default (Fast::Oot3d::kPlayerShadowDefaultMethod, mark then cover).
 inline constexpr const char *kSimpleShadowMethodConfigName = "simple_shadow_method";
 
 // config/simple_shadow and config/simple_shadow_cutscenes: present = on.
@@ -93,13 +94,13 @@ inline bool SaveSimpleShadowFlag(const std::filesystem::path &config, const char
 inline Fast::Oot3d::PlayerShadowMethod ReadSimpleShadowMethod(const std::filesystem::path &config) {
   std::ifstream file(config / kSimpleShadowMethodConfigName);
   std::string text;
-  if (!file || !std::getline(file, text)) return Fast::Oot3d::PlayerShadowMethod::TwoPass;
+  if (!file || !std::getline(file, text)) return Fast::Oot3d::kPlayerShadowDefaultMethod;
   return Fast::Oot3d::ParsePlayerShadowMethod(text);
 }
 
-// Writes the method's word, or removes the file for two passes; false if that failed.
+// Writes the method's word, or removes the file for the default; false if that failed.
 inline bool SaveSimpleShadowMethod(const std::filesystem::path &config, Fast::Oot3d::PlayerShadowMethod method) {
-  if (method == Fast::Oot3d::PlayerShadowMethod::TwoPass)
+  if (method == Fast::Oot3d::kPlayerShadowDefaultMethod)
     return SaveSimpleShadowFlag(config, kSimpleShadowMethodConfigName, false);
   std::error_code error;
   std::filesystem::create_directories(config, error);

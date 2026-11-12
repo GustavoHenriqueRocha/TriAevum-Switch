@@ -690,6 +690,13 @@ private:
   // Dynamic resolution of the top-screen scene (render thread).
   Oot3dNativeGame::DynamicResolutionController dynamicResolution;
   bool dynamicResolutionActive = false;
+  // deko3d: a reduced in-between frame is a dynamic-resolution step for
+  // that frame alone (DynamicStepReducedScale), not a namespace of its own.
+  // reducedStepScale: the scale the step frame asked for, while an
+  // in-between frame drew lower; a full in-between frame after it asks for
+  // it again.
+  bool reducedViaDynamicScale = false;
+  std::optional<float> reducedStepScale;
   // The Resolution at 60 FPS mode the pacing was configured with, and the
   // last LiveDynamicResolutionSixty revision applied.
   Oot3dNativeGame::DynamicResolutionSixtyMode dynamicResolutionSixtyMode =

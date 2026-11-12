@@ -4394,10 +4394,10 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   ledge it hangs at the floor's height; in first person and wherever the game does not draw Link, there is
   no body to project and the foot shadows stay hidden. The PC renderers do not draw it, so the menu has it
   only on the Switch.
-- **Shadow method (11/12, a 0.2.3 test; `config/simple_shadow_method`, L3+R3 > Video > "Shadow method"):** the
-  same projected meshes drawn four ways, to choose one by its GPU time (with two passes, the logs34-36
-  cutscene lost the 60 FPS frame):
-  - **Two passes** (the default, no file): as above.
+- **Shadow method (11/12; `config/simple_shadow_method`, L3+R3 > Video > "Shadow method"):** the same
+  projected meshes drawn four ways, to choose one by its GPU time (with two passes, the logs34-36 cutscene
+  lost the 60 FPS frame). Default since 11/12: Mark, then cover (`kPlayerShadowDefaultMethod`; no file).
+  - **Two passes** (`two_pass`): as above.
   - **One pass** (`one_pass`): the meshes darken without the stencil, so overlapping limbs darken twice or more.
   - **Mark, then cover** (`cover`): the meshes, without colour, set the stencil bit; one triangle over a
     screen rectangle then darkens where the bit is set and zeroes it (stencil equal, op zero), instead of the
@@ -4422,10 +4422,12 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   - **GPU time:** timestamps around the frame's first shadow draw point, by the method that drew it: dkperf
     `shadow_<method>_ms` (mean), `shadow_<method>_max_ms` and `shadow_<method>_frames`, only for the methods
     seen in the window. The `gameplay:` line logs each change of method.
-  - **Check [not done on the console]:** in the logs34-36 Temple of Time cutscene, with Shadow in cutscenes
-    on, each method in turn for 20-30 s: the shadow on the floor in all four (one pass darker where limbs
-    overlap, texture with soft edges), no dark rectangle or marks left behind with cover, and each method's
-    `shadow_<method>_ms`; then the same in normal play (Hyrule Field by day).
+  - **Measured (logs37, build 34, Switch Lite handheld, Temple of Time facing Link, Full 3x, Per-pixel):**
+    per frame at 307 MHz two passes 0.96-1.02 ms (max 1.67), texture 0.63-0.89 (max 1.57), cover 0.52-0.58
+    (max 1.53), one pass 0.50-0.51; at 460.8 MHz (GPU clock High) 0.67, 0.44-0.49, 0.39 and 0.33-0.34.
+    That cutscene still went between 30 and 60 FPS at 307 MHz with every method and also without the
+    shadow (`est_full_ms` 15.9-17.6): the scene itself sits on the budget (see "Full, in-between frames
+    one step lower").
 - Tests: `oot3d_damage_multiplier_tests` (normal, 2x, 10x and above, healing, one hit, the clamp; with the
   game's Master Quest doubling and double defence; the config file), `oot3d_quick_put_away_tests` (the
   default, the config file), `oot3d_master_quest_mirror_tests` (the table sorted, found by its hook and not
@@ -5832,6 +5834,29 @@ Guest replacements for the hottest loops of the game's CPU renderer, in the exis
   `ConfigureRatePacing`), so it holds the boot's full scale (handheld 3.0, docked the docked setting)
   and never steps down. 30 FPS is unchanged. The cadence governor still drops in-between frames
   whose pair does not fit; `new_fps` in `perf.txt` (and the overlay) then shows the real rate.
+- **Full, in-between frames one step lower (11/12, logs37):** at the Standard GPU clock (307 MHz,
+  handheld, Full, Per-pixel), the Temple of Time cutscene that faces Link cost 16.1-17.0 ms a frame
+  with or without the body shadow (`est_full_ms` 15.9-18.4, `level=dropped` in most windows): the pair
+  sat on the 33.3 ms budget and the governor alternated draw and drop, so the real rate jumped between
+  30 and 60. deko3d has no namespace scales (`SetPicaNamespaceResolutionScale` is GL's), so its
+  reduced in-between frame (`InterpolatedSampleLevel::Reduced`) is now one dynamic-resolution step
+  for that frame alone: `EnsureInterpolationPacing` picks the scale (`DynamicStepReducedScale`,
+  `oot3d_native_interpolation_pacing.h`), and the in-between path sets `PicaGlDynamicScale::gState.Requested`
+  to it with a new `FrameSerial`; the top-screen target moves to it at the frame's first draw
+  (`ApplyDynamicScale`, which clears the colour) and back with the next step frame, or with a full
+  in-between frame before it (`reducedStepScale`). The same namespace's targets are used, so no
+  target only some frames draw (`SampleSuitsReducedReplay`'s concern) is involved. Default without
+  `config/interp_scale`: where the scene is held at the full scale at 60 FPS (Full, or no
+  `config/dynamic_resolution`), the scale 0.25 below the full one (handheld 2.75, docked 2.25): about
+  84% of the pixels, an in-between frame of about 14 ms there, a pair of about 30.5 ms. Dynamic keeps
+  none (its controller steps the whole scene down). `config/interp_scale` with a number sets the
+  scale; `0` or `off` turns the level off. `TRIAEVUM_INTERP_PACING ... reduced_route=dynamic_step` at
+  start; `perf.txt` `interp_scale=`, `interp_reduced=`, `gpu_ms_reduced=`, and `drs_scale_avg` below
+  3 when in-between frames were drawn lower. Test: `oot3d_native_interpolation_pacing_tests`
+  (`TestDynamicStepReducedScale`; the governor's choice of the reduced level is
+  `TestHeavyLoadReducesWhenTheReducedFrameFits`). **Console check:** the same cutscene, Full,
+  Standard clock: `interp_reduced` instead of `interp_dropped` in its windows, `new_fps` near 60; look
+  for flicker between sharper and softer frames on Link and the floor.
 - **Persistence and live switch:** `config/drs_60` = `full` (absent = Dynamic), written by the panel
   through `VideoSettings` like `fps60`; read at start (`TRIAEVUM_DRS_60` on the PC). The panel
   publishes `LiveDynamicResolutionSixty()`; `EnsureInterpolationPacing` sees the new revision at the

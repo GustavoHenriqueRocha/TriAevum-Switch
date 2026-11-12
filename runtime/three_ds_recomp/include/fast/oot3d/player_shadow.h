@@ -49,7 +49,7 @@ struct PlayerShadowFrame {
 [[nodiscard]] constexpr uint64_t PlayerShadowActorIdentity(uint32_t actor) noexcept { return actor; }
 
 // How the deko3d backend draws it (config/simple_shadow_method, L3+R3 > Video
-// > Shadow method; a 0.2.3 test, each method's GPU time in the dkperf lines'
+// > Shadow method; each method's GPU time in the dkperf lines'
 // shadow_<word>_ms):
 // - TwoPass: the meshes darken where the top stencil bit is clear and set it,
 //   then the same meshes without colour zero it (0.2.3 build 33);
@@ -61,6 +61,10 @@ struct PlayerShadowFrame {
 //   which one quad on the floor samples (the mod's way: soft edges).
 enum class PlayerShadowMethod : uint8_t { TwoPass, OnePass, Cover, Texture };
 inline constexpr size_t kPlayerShadowMethodCount = 4U;
+// logs37 (Switch Lite, 307 MHz, the Temple of Time facing Link): per frame
+// two passes 0.96-1.02 ms, texture 0.63-0.89, cover 0.52-0.58, one pass
+// 0.50-0.51. Cover looks like two passes at about half the cost.
+inline constexpr PlayerShadowMethod kPlayerShadowDefaultMethod = PlayerShadowMethod::Cover;
 
 // Its word in config/simple_shadow_method and in the dkperf keys.
 [[nodiscard]] constexpr std::string_view PlayerShadowMethodWord(PlayerShadowMethod method) noexcept {
@@ -73,18 +77,18 @@ inline constexpr size_t kPlayerShadowMethodCount = 4U;
     return "two_pass";
 }
 
-// The file's first word; anything else (no file included) is TwoPass.
+// The file's first word; anything else (no file included) is the default.
 [[nodiscard]] constexpr PlayerShadowMethod ParsePlayerShadowMethod(std::string_view text) noexcept {
     constexpr std::string_view blank = " \t\r\n";
     const size_t first = text.find_first_not_of(blank);
-    if (first == std::string_view::npos) return PlayerShadowMethod::TwoPass;
+    if (first == std::string_view::npos) return kPlayerShadowDefaultMethod;
     text.remove_prefix(first);
     text = text.substr(0, text.find_first_of(blank));
     for (size_t index = 0; index < kPlayerShadowMethodCount; ++index) {
         const auto method = static_cast<PlayerShadowMethod>(index);
         if (text == PlayerShadowMethodWord(method)) return method;
     }
-    return PlayerShadowMethod::TwoPass;
+    return kPlayerShadowDefaultMethod;
 }
 
 // The mod's rules (EUR 3.2.2 payload 0x005FDA54): lights weaker than 0.02 do not
@@ -510,7 +514,7 @@ class PlayerShadowBridge final {
     std::deque<Entry> mFrames;
     std::optional<PlayerShadowFrame> mSelected;
     std::atomic<bool> mRendererReady{false};
-    std::atomic<PlayerShadowMethod> mMethod{PlayerShadowMethod::TwoPass};
+    std::atomic<PlayerShadowMethod> mMethod{kPlayerShadowDefaultMethod};
 };
 
 } // namespace Fast::Oot3d

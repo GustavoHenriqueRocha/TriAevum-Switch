@@ -2193,6 +2193,22 @@ GUARDS = [
     Guard("the game thread hands each scene entry to the pacer, the render thread its entry work",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'renderStream\.Submit\(\[this\] \{ interpolationPacing\.NoteEntry\(\); \}\);'),
+    Guard("logs37: at Full and the Standard GPU clock the Temple of Time cutscene went between 30 and 60 FPS "
+          "(a 16.1-17 ms frame on a 33.3 ms pair): on deko3d a reduced in-between frame is one dynamic-"
+          "resolution step for that frame alone, and the step frame (or a full in-between frame before it) "
+          "asks for its own scale again, so no later frame stays lower",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(drsDeko3dTiming && backendScale\.Supported\) \{.*?'
+          r'config\.ReducedScale = Oot3dNativeGame::DynamicStepReducedScale\(.*?'
+          r'reducedViaDynamicScale = pacing\.ReducedAvailable;.*?'
+          r'\+\+Fast::PicaGlDynamicScale::gState\.FrameSerial;\s+reducedStepScale\.reset\(\);.*?'
+          r'if \(reducedViaDynamicScale\) \{.*?'
+          r'if \(!reducedStepScale\) reducedStepScale = backendScale\.Requested;.*?'
+          r'std::min\(interpolationPacing\.Config\(\)\.ReducedScale, stepScale\);\s+'
+          r'\+\+backendScale\.FrameSerial;.*?'
+          r'\} else if \(reducedStepScale\) \{.*?backendScale\.Requested = \*reducedStepScale;\s+'
+          r'\+\+backendScale\.FrameSerial;\s+reducedStepScale\.reset\(\);',
+          "oot3d_native_interpolation_pacing_tests (TestDynamicStepReducedScale)"),
     Guard("render-thread holds (texture pack, grass) are not frame work for the pacer",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'Fast::Deko3dTakeRenderHoldMicros\(\).*?interpolationPacing\.SetEntryWork\(entryWork\);'
