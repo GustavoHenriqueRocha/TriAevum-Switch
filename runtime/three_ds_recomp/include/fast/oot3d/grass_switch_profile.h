@@ -119,16 +119,28 @@ inline constexpr size_t kGrassPlacementCacheEntries = 96U;
 // kGrassSceneHoldDefaultMs; "0"/"off": never; at most kGrassSceneHoldLimitMs.
 [[nodiscard]] uint32_t ParseGrassSceneHoldMs(std::optional<std::string_view> fileText) noexcept;
 [[nodiscard]] uint32_t ReadGrassSceneHoldMs(const std::filesystem::path& configDirectory);
+// config/grass_density (read at start): tufts per square metre, for the PC's
+// blade size (A/B within one build). Absent or unreadable:
+// kGrassDensityDefault; clamped to [kGrassDensityMin, kGrassDensityMax].
+inline constexpr float kGrassDensityDefault = 80.0F;
+inline constexpr float kGrassDensityMin = 40.0F;
+inline constexpr float kGrassDensityMax = 200.0F;
+[[nodiscard]] float ParseGrassSwitchDensity(std::optional<std::string_view> fileText) noexcept;
+[[nodiscard]] float ReadGrassSwitchDensity(const std::filesystem::path& configDirectory);
 
 struct GrassSwitchProfile {
     // Placement: one anchor is one tuft.
     float TuftsPerSquareMeter = 40.0F;
     float MinimumSpacing = 6.0F;
-    float TuftHeightMin = 14.0F;
-    float TuftHeightMax = 30.0F;
+    // The PC preset's blade (graphics_settings_persistence.cpp, "Grass"
+    // "Generation"; its HeightScale 1.15 applies on top as on the PC). The
+    // tufts were 14-30 x 2-3.5 to cover with fewer of them: tall and sparse
+    // next to the PC's (12/11); config/grass_density gives more tufts instead.
+    float TuftHeightMin = 7.68F;
+    float TuftHeightMax = 12.51F;
     // Width of one blade of the tuft (the tuft is BladesPerTuft blades wide).
-    float BladeWidthMin = 2.0F;
-    float BladeWidthMax = 3.5F;
+    float BladeWidthMin = 1.8F;
+    float BladeWidthMax = 1.94F;
     uint8_t BladesPerTuft = 5U;
     // How much of the blade colour comes from the ground texture under the
     // tuft (the rest from the preset's root and tip colours).
@@ -181,6 +193,10 @@ inline constexpr float kGrassWholeAreaDistance = 100000.0F;
 // The profile's generation and distances on top of the product preset (its
 // source rules and appearance stay). Quality becomes Custom.
 void ApplyGrassSwitchProfile(const GrassSwitchProfile& profile, InteractiveGrassSettings& settings) noexcept;
+// config/grass_density on a selected profile: that many tufts per square
+// metre, the spacing shrinking as 1 / sqrt(density) and the visible cap
+// growing with it (at most kGrassWholeAreaInstances); retained memory stays.
+void ApplyGrassSwitchDensity(GrassSwitchProfile& profile, float tuftsPerSquareMeter) noexcept;
 
 // Retained bytes of one anchor: GrassWorldAnchor + GrassWorldCullingAnchor.
 [[nodiscard]] size_t GrassRetainedBytesPerAnchor() noexcept;

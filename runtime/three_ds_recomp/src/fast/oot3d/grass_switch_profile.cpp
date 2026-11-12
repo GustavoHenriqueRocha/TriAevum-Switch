@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <fstream>
 #include <charconv>
 #include <string>
@@ -209,6 +210,31 @@ uint32_t ReadGrassSceneHoldMs(const std::filesystem::path& configDirectory) {
     std::string text;
     std::getline(file, text);
     return ParseGrassSceneHoldMs(std::string_view(text));
+}
+
+float ParseGrassSwitchDensity(std::optional<std::string_view> fileText) noexcept {
+    if (!fileText.has_value()) return kGrassDensityDefault;
+    const std::string_view word = FirstWord(*fileText);
+    uint32_t value = 0U;
+    const auto [end, error] = std::from_chars(word.data(), word.data() + word.size(), value);
+    if (word.empty() || error != std::errc{} || end != word.data() + word.size()) return kGrassDensityDefault;
+    return std::clamp(static_cast<float>(value), kGrassDensityMin, kGrassDensityMax);
+}
+
+float ReadGrassSwitchDensity(const std::filesystem::path& configDirectory) {
+    std::ifstream file(configDirectory / "grass_density");
+    if (!file) return kGrassDensityDefault;
+    std::string text;
+    std::getline(file, text);
+    return ParseGrassSwitchDensity(std::string_view(text));
+}
+
+void ApplyGrassSwitchDensity(GrassSwitchProfile& profile, float tuftsPerSquareMeter) noexcept {
+    const float ratio = tuftsPerSquareMeter / profile.TuftsPerSquareMeter;
+    profile.TuftsPerSquareMeter = tuftsPerSquareMeter;
+    profile.MinimumSpacing /= std::sqrt(ratio);
+    profile.MaxVisibleInstances = static_cast<uint32_t>(std::min(
+        static_cast<float>(kGrassWholeAreaInstances), std::round(static_cast<float>(profile.MaxVisibleInstances) * ratio)));
 }
 
 bool SaveGrassSwitchFill(const std::filesystem::path& configDirectory, bool fixed) {

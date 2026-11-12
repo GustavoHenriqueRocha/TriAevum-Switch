@@ -5377,6 +5377,20 @@ temple entry had `no shared placement 2` too.
 - Tests: `test_grass_lod.py` (`test_a_tuft_blade_is_the_pc_curve_on_its_card`, far segments, index
   exact for 45/27/9 vertices per tuft), `oot3d_grass_switch_tests`.
 
+### Grass on deko3d: the PC's blade size, `config/grass_density` (12/11)
+- **Report:** the grass felt too tall in the castle and Kakariko, not organic; "something closer to
+  BotW"; then "merge the two and keep it closer to the original".
+- **Measured:** the Switch's tufts were 14-30 tall with blades 2-3.5 wide (x the preset's
+  HeightScale 1.15: 16-34.5), against the PC preset's 7.68-12.51 x 1.8-1.94 (8.8-14.4 tall) at
+  1048.8 single blades/m2; the Switch had 40 tufts x 5 blades/m2 and made up with size.
+- **Now:** the profile's blade is the PC preset's; `config/grass_density` gives the tufts per m2
+  (default 80, 40-200, read at start), the minimum spacing shrinking as 1/sqrt and the visible cap
+  growing with it (at most `kGrassWholeAreaInstances`); retained memory stays 12 MiB (the process
+  was at 3185 of 3189 MB in the "mascara" tour), so more placements get rebuilt on return. All
+  stored placements are rebuilt once (the generation changed). The PC's full density (26x the
+  anchors) does not fit the 65536-tuft stream.
+- Test: `oot3d_grass_switch_tests` (`TheBladeIsThePcPresetsAndTheDensityComesFromItsFile`).
+
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism
 (`guest_overrides.json`, `apply_guest_overrides.py`, `oot3d_native_guest_overrides.cpp`), all with

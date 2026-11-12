@@ -230,6 +230,35 @@ TEST(Oot3dGrassSwitchProfile, RetainedMemoryHoldsHyruleFieldAtTheProfileDensity)
               static_cast<double>(profile.RetainedBytes) + 1.0);
 }
 
+// The Switch's tufts were 14-30 tall and 2-3.5 wide per blade, about twice
+// the PC's blade: tall, sparse grass in the castle and Kakariko (12/11). Now
+// the PC preset's blade, and more tufts by config/grass_density.
+TEST(Oot3dGrassSwitchProfile, TheBladeIsThePcPresetsAndTheDensityComesFromItsFile) {
+    const auto profile = SelectGrassSwitchProfile(true, GrassSwitchDistance::Near);
+    EXPECT_FLOAT_EQ(profile.TuftHeightMin, 7.68F);
+    EXPECT_FLOAT_EQ(profile.TuftHeightMax, 12.51F);
+    EXPECT_FLOAT_EQ(profile.BladeWidthMin, 1.8F);
+    EXPECT_FLOAT_EQ(profile.BladeWidthMax, 1.94F);
+    EXPECT_EQ(ParseGrassSwitchDensity(std::nullopt), kGrassDensityDefault);
+    EXPECT_EQ(ParseGrassSwitchDensity("120\n"), 120.0F);
+    EXPECT_EQ(ParseGrassSwitchDensity("lots"), kGrassDensityDefault);
+    EXPECT_EQ(ParseGrassSwitchDensity("1000"), kGrassDensityMax);
+    EXPECT_EQ(ParseGrassSwitchDensity("10"), kGrassDensityMin);
+    auto dense = profile;
+    ApplyGrassSwitchDensity(dense, 160.0F);
+    EXPECT_EQ(dense.TuftsPerSquareMeter, 160.0F);
+    EXPECT_FLOAT_EQ(dense.MinimumSpacing, profile.MinimumSpacing * 0.5F);
+    EXPECT_EQ(dense.MaxVisibleInstances, profile.MaxVisibleInstances * 4U);
+    EXPECT_EQ(dense.RetainedBytes, profile.RetainedBytes);
+    auto area = SelectGrassSwitchProfile(true, GrassSwitchDistance::Area);
+    ApplyGrassSwitchDensity(area, 200.0F);
+    EXPECT_EQ(area.MaxVisibleInstances, kGrassWholeAreaInstances);
+    auto same = profile;
+    ApplyGrassSwitchDensity(same, profile.TuftsPerSquareMeter);
+    EXPECT_EQ(same.MaxVisibleInstances, profile.MaxVisibleInstances);
+    EXPECT_FLOAT_EQ(same.MinimumSpacing, profile.MinimumSpacing);
+}
+
 TEST(Oot3dGrassSwitchProfile, AppliesOnTopOfThePresetRules) {
     InteractiveGrassSettings settings;
     settings.Rules.push_back(FullRule());
@@ -622,10 +651,16 @@ uint32_t Mix(uint32_t value) {
 float Unit(uint32_t value) { return static_cast<float>(Mix(value) >> 8U) / static_cast<float>(1U << 24U); }
 
 // A flat field like Hyrule Field's ground placement after its cap: one tuft
-// per `spacing` x `spacing` (jittered), the profile's tuft sizes, clusters of
-// ClusterSize cells sorted by stable visibility as BuildGrassPlacementSet does.
+// per `spacing` x `spacing` (jittered), test.9's tuft sizes (14-30 tall,
+// blades 2-3.5 wide: the counts pinned below are of that field, whatever the
+// profile's blade is now), clusters of ClusterSize cells sorted by stable
+// visibility as BuildGrassPlacementSet does.
 std::shared_ptr<GrassWorldPlacement> FieldPlacement(float spacing) {
-    const auto profile = SelectGrassSwitchProfile(true, GrassSwitchDistance::Near);
+    auto profile = SelectGrassSwitchProfile(true, GrassSwitchDistance::Near);
+    profile.TuftHeightMin = 14.0F;
+    profile.TuftHeightMax = 30.0F;
+    profile.BladeWidthMin = 2.0F;
+    profile.BladeWidthMax = 3.5F;
     struct Cell {
         std::vector<GrassWorldAnchor> Anchors;
     };

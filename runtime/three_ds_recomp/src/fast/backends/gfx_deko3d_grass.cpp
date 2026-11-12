@@ -263,6 +263,8 @@ struct GrassState {
     // fill tufts (nothing grows near Link) or test.9's growing ones; the
     // next cull job takes it.
     bool Fill = true;
+    // config/grass_density (read at start): tufts per square metre.
+    float Density = Oot3d::kGrassDensityDefault;
     // Reset on an area change (its memo and geometry registry are not movable).
     std::unique_ptr<Oot3d::PicaGrassSourceState> Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
     std::unique_ptr<Oot3d::PicaGrassPlacements> Placements;
@@ -486,6 +488,7 @@ void ApplyProfile(GrassState& state, bool fps60, Oot3d::GrassSwitchDistance dist
     state.Fps60 = fps60;
     state.Distance = distance;
     state.Profile = Oot3d::SelectGrassSwitchProfile(fps60, distance);
+    Oot3d::ApplyGrassSwitchDensity(state.Profile, state.Density);
     state.Stream = Oot3d::GrassStreamSettingsFromProfile(state.Profile);
     state.Stream.Lod = state.Lod;
     state.Stream.FillFixed = state.Fill;
@@ -580,6 +583,7 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 kept, Oot3d::GrassKnownTwins().size());
     state->Lod = Oot3d::ReadGrassSwitchLod(config);
     state->Fill = Oot3d::ReadGrassSwitchFill(config);
+    state->Density = Oot3d::ReadGrassSwitchDensity(config);
     bool retiredFar = false;
     ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config, &retiredFar));
     if (retiredFar)
@@ -607,10 +611,11 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 reuse ? "on" : "off", static_cast<double>(Oot3d::kGrassPlacementReuseRotation),
                 static_cast<double>(Oot3d::kGrassPlacementReuseTranslation),
                 static_cast<unsigned long long>(state->Hold.BudgetMicros() / 1000U));
-    Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
-                "%.1f MiB retained",
+    Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 (config/grass_density) of %u blades "
+                "%.2f-%.2f tall, at most %u per placement, %.1f MiB retained",
                 mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements", state->Settings.Rules.size(),
                 static_cast<double>(state->Profile.TuftsPerSquareMeter), state->Profile.BladesPerTuft,
+                static_cast<double>(state->Profile.TuftHeightMin), static_cast<double>(state->Profile.TuftHeightMax),
                 state->Profile.MaxAnchorsPerPlacement,
                 static_cast<double>(state->Profile.RetainedBytes) / (1024.0 * 1024.0));
     LogProfile(*state);
