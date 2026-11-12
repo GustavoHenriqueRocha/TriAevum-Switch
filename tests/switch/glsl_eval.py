@@ -12,7 +12,7 @@ built-ins those texts use. For the grass level-of-detail text
 (tools/oot3d/deko3d_grass/grass_lod_common.glsl, see test_grass_lod.py) also:
 uint scalars that stay unsigned (logical >>, 32-bit wrap), hex literals, the
 bitwise compound assignments, uniform blocks without an instance name,
-floatBitsToUint and uintBitsToFloat.
+floatBitsToUint and uintBitsToFloat; sin and cos (the near blade's curve).
 
     program = Program(text)
     program.globals["pica_view"] = Vec([0.0, 0.0, -1.0])
@@ -940,6 +940,12 @@ class _Interpreter:
 
     def _b_sqrt(self, x):
         return self._map(_sqrt, x)
+
+    def _b_sin(self, x):
+        return self._map(lambda v: f32(math.sin(v)), x)
+
+    def _b_cos(self, x):
+        return self._map(lambda v: f32(math.cos(v)), x)
 
     def _b_length(self, x):
         return _sqrt(self._b_dot(x, x)) if isinstance(x, Vec) else abs(x)

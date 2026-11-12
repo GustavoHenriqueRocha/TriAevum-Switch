@@ -217,6 +217,12 @@ struct GrassLodParameters {
 // Blades per tuft of a draw (5, 3, 1) and the blades it turns into.
 [[nodiscard]] uint32_t GrassLodBlades(GrassStreamKind kind) noexcept;
 [[nodiscard]] uint32_t GrassLodTargetBlades(GrassStreamKind kind) noexcept;
+// The near draw's single blades are curved, in this many segments
+// (GRASS_NEAR_SEGMENTS of grass_lod_common.glsl); far blades are one triangle.
+inline constexpr uint32_t kGrassNearBladeSegments = 3U;
+// Vertices of one blade of a draw: 6 x segments - 3 for the near draw (a quad
+// per segment, a triangle to the tip), 3 for the far ones.
+[[nodiscard]] uint32_t GrassLodVerticesPerBlade(GrassStreamKind kind) noexcept;
 
 // Owns its scratch, so a frame allocates nothing once the sizes settled.
 class GrassInstanceStreamBuilder {

@@ -34,7 +34,7 @@ layout(std140, binding = 2) uniform GrassLod {
     vec4 grass_lod_scale; // focal length in pixels of a 1200x720 target, level 0 to, 1 / ramp length, unused
     vec4 grass_lod_px;    // 5 -> 3 blades from x to y pixels of a blade slot, 3 -> 1 from z to w
     vec4 grass_lod_draw;  // 1 / blades drawn, blades it turns into, 1 / that, level of its first layout
-    uvec4 grass_lod_index;// float bits of 1 / (3 x blades drawn), 3 x blades drawn, unused
+    uvec4 grass_lod_index;// float bits of 1 / (vertices per tuft), vertices per tuft, unused
 };
 
 // One tuft's per-frame work, written by grass_tuft_vsh.glsl (64 bytes, all
@@ -116,6 +116,79 @@ void grass_lod_blade(float blade, float from, float target, float to, float morp
     centre = slot * (kept ? scale : from);
     halfBase = 0.42 * scale;
     tip = centre + (random.y - 0.5) * 0.6 * scale;
+}
+
+// The near draw's single blades (GRASS_LOD_NEAR) are the PC's curved blade
+// (grass_blade_shape.h) in GRASS_NEAR_SEGMENTS segments, with the PC preset's
+// shape (graphics_settings_persistence.cpp, "Grass" "Appearance"): curvature,
+// droop, variation, twist in radians (141 degrees). kGrassNearBladeSegments
+// in grass_instance_stream.h is the same count (test_grass_lod.py).
+const uint GRASS_NEAR_SEGMENTS = 3u;
+const vec4 GRASS_NEAR_SHAPE = vec4(0.64, 0.35, 0.38, 2.4609142);
+
+// Vertex k (0 .. 6 x segments - 4) of a segmented blade: its height along the
+// blade (0..1) and its side (-1, 1; 0 at the tip). Every segment but the last
+// is two triangles (row r left, r right, r+1 left; r+1 left, r right, r+1
+// right), the last one a triangle to the tip.
+vec2 grass_near_row_side(uint k) {
+    uint quads = GRASS_NEAR_SEGMENTS - 1u;
+    float segments = float(GRASS_NEAR_SEGMENTS);
+    if (k >= 6u * quads) {
+        uint c = k - 6u * quads;
+        if (c == 2u) return vec2(1.0, 0.0);
+        return vec2(float(quads) / segments, c == 0u ? -1.0 : 1.0);
+    }
+    uint quad = k / 6u;
+    uint q = k - quad * 6u;
+    float up = (q == 2u || q == 3u || q == 5u) ? 1.0 : 0.0;
+    float side = (q == 0u || q == 2u || q == 3u) ? -1.0 : 1.0;
+    return vec2((float(quad) + up) / segments, side);
+}
+
+// grass_blade_shape of grass_blade_shape.h without its sin hash: the blade's
+// own random in [-1, 1] comes in. The offset of the point at height t from
+// the root, in blade heights.
+vec3 grass_near_blade_shape(float t, float phase, float signedRandom, vec2 rootAxis) {
+    vec4 shape = GRASS_NEAR_SHAPE;
+    float angle = signedRandom * shape.z * 3.14159265;
+    float c = cos(angle);
+    float s = sin(angle);
+    vec2 direction = vec2(c * rootAxis.x - s * rootAxis.y, s * rootAxis.x + c * rootAxis.y);
+    vec2 side = vec2(-direction.y, direction.x);
+    float curve = shape.x * (1.0 + signedRandom * shape.z);
+    vec2 offset = direction * (curve * t * t);
+    offset += side * (0.35 * shape.z * sin(3.14159265 * t + phase) * t * t);
+    return vec3(offset.x, t - shape.y * t * t * t, offset.y);
+}
+
+// grass_blade_shape's twist: how far the blade's width axis turns at height t.
+float grass_near_twist(float t, float signedRandom) {
+    return GRASS_NEAR_SHAPE.w * signedRandom * t * t;
+}
+
+// A single blade's point at height t and side: test.9's blade (root corners
+// at -+1.32 half widths along its facing, the tip leaning by `lean` and lower
+// by 0.3 |lean|^2) bent along the PC curve, its width narrowing as the PC's
+// (1 - 0.75 t, none at the tip) and turning by the twist.
+vec3 grass_near_blade_point(vec3 root, vec2 facing, float halfWidth, float height, vec2 lean,
+                            float phase, float signedRandom, float t, float side) {
+    vec3 position = root + grass_near_blade_shape(t, phase, signedRandom, facing) * height;
+    position.xz += lean * (height * t * (0.65 + 0.35 * t));
+    position.y -= dot(lean, lean) * height * 0.3 * t * t;
+    float twist = grass_near_twist(t, signedRandom);
+    float c = cos(twist);
+    float s = sin(twist);
+    vec2 across = vec2(c * facing.x - s * facing.y, s * facing.x + c * facing.y);
+    float widthFactor = t >= 1.0 ? 0.0 : 1.0 - 0.75 * t;
+    position.xz += across * (1.32 * halfWidth * widthFactor * side);
+    return position;
+}
+
+// A tuft's blade in the near draw's rows: grass_lod_blade's triangle (base
+// centre -+ half base, tip at tipY of the height), cut at height t. Card x
+// (0..1) and height y.
+vec2 grass_near_tuft_xy(float centre, float halfBase, float tip, float tipY, float t, float side) {
+    return vec2(mix(centre + side * halfBase, tip, t), t * tipY);
 }
 
 // The PICA depth and fog of the native fragment program, per vertex (as grass_vsh.glsl).

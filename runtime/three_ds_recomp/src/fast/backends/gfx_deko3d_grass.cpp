@@ -1240,7 +1240,8 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
                                                                       : 0.0F;
         u.Draw = {1.0F / static_cast<float>(blades), static_cast<float>(target), 1.0F / static_cast<float>(target),
                   level};
-        u.Index = {std::bit_cast<uint32_t>(1.0F / static_cast<float>(3U * blades)), 3U * blades, 0U, 0U};
+        const uint32_t perTuft = Oot3d::GrassLodVerticesPerBlade(kind) * blades;
+        u.Index = {std::bit_cast<uint32_t>(1.0F / static_cast<float>(perTuft)), perTuft, 0U, 0U};
         const StreamSpan span = mDevice.Stream(sizeof(u), DK_UNIFORM_BUF_ALIGNMENT);
         if (span.Cpu == nullptr) return false;
         std::memcpy(span.Cpu, &u, sizeof(u));
@@ -1393,7 +1394,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
                     dkCmdBufBindStorageBuffer(
                         cmd, DkStage_Vertex, 1, instances + uint64_t{range.First} * sizeof(Oot3d::GrassStreamInstance),
                         range.Count * static_cast<uint32_t>(sizeof(Oot3d::GrassStreamInstance)));
-                vertices = 3U * Oot3d::GrassLodBlades(range.Kind) * range.Count;
+                vertices = Oot3d::GrassLodVerticesPerBlade(range.Kind) * Oot3d::GrassLodBlades(range.Kind) * range.Count;
                 // No instancing: the vertices of several tufts share a warp (grass_lod_vsh.glsl).
                 dkCmdBufDraw(cmd, DkPrimitive_Triangles, vertices, 1, 0, 0);
             } else {

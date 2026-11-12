@@ -10,13 +10,18 @@ grass_lod_common.glsl runs on the CPU (glsl_eval.py, binary32) and these tests c
     same sample values as oot3d_grass_switch_tests) and is 0 near the camera;
   - the integer hash is lowbias32 (as MixGrassBits), the blade randoms are in [0, 1);
   - grass_lod_vsh.glsl's float division finds tuft and corner of every vertex of every
-    draw (exhaustive: 65536 tufts of 5, 3 and 1 blades);
+    draw (exhaustive: 65536 tufts of 5, 3 and 1 blades, and of the near draw's segmented blades);
+  - the near draw's single blades are the PC's curved blade (grass_blade_shape.h with the PC
+    preset of graphics_settings_persistence.cpp) in GRASS_NEAR_SEGMENTS segments: their vertices
+    cover each segment once, root and tip are where test.9's blade had them (plus the curve), and
+    a tuft drawn by the near program keeps test.9's triangle corners;
   - the tuft pass's lit root and tip colours, interpolated by the height, give
     grass_vsh.glsl's per-vertex colour (its lines run as they are in the file).
 
     python3 tests/switch/test_grass_lod.py
 """
 import array
+import math
 import random
 import re
 import sys
@@ -202,19 +207,167 @@ class GrassLodHash(unittest.TestCase):
             self.assertAlmostEqual(total / count, 0.5, delta=0.03)
 
 
+def near_segments():
+    """GRASS_NEAR_SEGMENTS of grass_lod_common.glsl and kGrassNearBladeSegments of the C++."""
+    shader = int(re.search(r"const uint GRASS_NEAR_SEGMENTS = (\d+)u;",
+                           (GRASS / "grass_lod_common.glsl").read_text()).group(1))
+    header = (REPO / "runtime/three_ds_recomp/include/fast/oot3d/grass_instance_stream.h").read_text()
+    cpp = int(re.search(r"kGrassNearBladeSegments = (\d+)U;", header).group(1))
+    return shader, cpp
+
+
 class GrassLodVertexIndex(unittest.TestCase):
+    def test_the_shader_and_the_draw_agree_on_the_near_segments(self):
+        shader, cpp = near_segments()
+        self.assertEqual(shader, cpp)
+        self.assertGreaterEqual(shader, 2)
+
     def test_every_vertex_finds_its_tuft_and_corner(self):
-        # grass_lod_vsh.glsl: index = uint((float(v) + 0.5) * (1 / (3 n))) in binary32; float(v)
-        # and + 0.5 are exact (v < 2^23), the product of two binary32 values is exact in a
-        # double, so one rounding to binary32 (array('f')) is the GPU's FMUL.
-        for blades in (5, 3, 1):
-            per = 3 * blades
+        # grass_lod_vsh.glsl: index = uint((float(v) + 0.5) * (1 / (vertices per tuft))) in
+        # binary32; float(v) and + 0.5 are exact (v < 2^23), the product of two binary32 values
+        # is exact in a double, so one rounding to binary32 (array('f')) is the GPU's FMUL.
+        # Far draws: 3 vertices per blade; the near draw: 6 x segments - 3 for each of 5 blades.
+        near = 5 * (6 * near_segments()[0] - 3)
+        for per in (15, 9, 3, near):
             inverse = array.array("f", [1.0 / per])[0]
             vertices = 65536 * per
             products = array.array("f", ((v + 0.5) * inverse for v in range(vertices)))
             for v, product in enumerate(products):
                 if int(product) != v // per:
-                    self.fail(f"vertex {v} of {blades}-blade tufts: {int(product)} != {v // per}")
+                    self.fail(f"vertex {v} of {per}-vertex tufts: {int(product)} != {v // per}")
+
+
+# The PC preset's blade (graphics_settings_persistence.cpp, default "Grass" "Appearance").
+def pc_preset_shape():
+    text = (REPO / "runtime/three_ds_recomp/src/fast/oot3d/graphics_settings_persistence.cpp").read_text()
+    grass = text[text.index('"Grass": {\n    "Appearance"'):]
+    value = lambda name: float(re.search(rf'"{name}": ([-0-9.]+)', grass).group(1))
+    return (value("BladeCurvature"), value("BladeDroop"), value("ShapeVariation"),
+            value("BladeTwistDegrees") * math.pi / 180.0)
+
+
+def pc_blade_shape(t, phase, signed_random, axis, shape):
+    """grass_blade_shape of grass_blade_shape.h (the PC blade) with its random given."""
+    angle = signed_random * shape[2] * math.pi
+    c, s = math.cos(angle), math.sin(angle)
+    direction = (c * axis[0] - s * axis[1], s * axis[0] + c * axis[1])
+    side = (-direction[1], direction[0])
+    curve = shape[0] * (1.0 + signed_random * shape[2])
+    sway = 0.35 * shape[2] * math.sin(math.pi * t + phase) * t * t
+    offset = [direction[i] * curve * t * t + side[i] * sway for i in range(2)]
+    return (offset[0], t - shape[1] * t * t * t, offset[1]), shape[3] * signed_random * t * t
+
+
+class GrassNearBlade(unittest.TestCase):
+    """The near draw's single blades (GRASS_LOD_NEAR in grass_lod_vsh.glsl)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.program = common()
+        cls.segments = near_segments()[0]
+
+    def row_side(self, k):
+        return tuple(self.program.call("grass_near_row_side", k).c)
+
+    def test_the_vertices_cover_every_segment_once(self):
+        per = 6 * self.segments - 3
+        rows = [r / self.segments for r in range(self.segments + 1)]
+        triangles = []
+        for first in range(0, per, 3):
+            corners = [self.row_side(first + c) for c in range(3)]
+            for t, side in corners:
+                self.assertIn(min(rows, key=lambda r: abs(r - t)), rows)
+                self.assertAlmostEqual(t, min(rows, key=lambda r: abs(r - t)), delta=1.0e-6)
+                self.assertIn(side, (-1.0, 0.0, 1.0))
+            # Twice the signed area in (side, t): not degenerate, all the same winding.
+            (t0, s0), (t1, s1), (t2, s2) = corners
+            area = (s1 - s0) * (t2 - t0) - (s2 - s0) * (t1 - t0)
+            self.assertGreater(abs(area), 1.0e-6)
+            triangles.append((corners, area))
+        windings = {area > 0 for _, area in triangles}
+        self.assertEqual(len(windings), 1, "mixed winding")
+        # Each segment's area (side from -1 to 1, so width 2 x its height) is covered once:
+        # a quad for every segment but the last, a triangle to the tip for the last.
+        covered = [0.0] * self.segments
+        for corners, area in triangles:
+            low = min(t for t, _ in corners)
+            covered[round(low * self.segments)] += abs(area) / 2.0
+        height = 1.0 / self.segments
+        for index, value in enumerate(covered):
+            want = 2.0 * height if index < self.segments - 1 else height
+            self.assertAlmostEqual(value, want, delta=1.0e-6, msg=index)
+        # The tip is one point: side 0 at t = 1, and nothing else reaches t = 1.
+        tips = [c for corners, _ in triangles for c in corners if c[0] == 1.0]
+        self.assertTrue(tips)
+        self.assertTrue(all(side == 0.0 for _, side in tips))
+
+    def test_the_shape_is_the_pc_preset(self):
+        source = (GRASS / "grass_lod_common.glsl").read_text()
+        got = [float(v) for v in re.search(r"const vec4 GRASS_NEAR_SHAPE = vec4\(([^)]*)\);", source)
+               .group(1).split(",")]
+        for a, b in zip(got, pc_preset_shape()):
+            self.assertAlmostEqual(a, b, delta=1.0e-5)
+
+    def test_the_curve_is_the_pc_blades(self):
+        shape = pc_preset_shape()
+        rng = random.Random(14)
+        for _ in range(300):
+            t = f32(rng.choice([0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, rng.random()]))
+            phase = f32(rng.uniform(0.0, 6.2831853))
+            signed_random = f32(rng.uniform(-1.0, 1.0))
+            angle = rng.uniform(0.0, 2.0 * math.pi)
+            axis = (f32(math.cos(angle)), f32(math.sin(angle)))
+            want, want_twist = pc_blade_shape(t, phase, signed_random, axis, shape)
+            got = self.program.call("grass_near_blade_shape", t, phase, signed_random, Vec(list(axis))).c
+            for a, b in zip(got, want):
+                self.assertAlmostEqual(a, b, delta=2.0e-5)
+            self.assertAlmostEqual(self.program.call("grass_near_twist", t, signed_random), want_twist, delta=2.0e-5)
+
+    def test_root_and_tip_are_test9s_blade_ends(self):
+        # grass_lod_vsh.glsl before the segments: the root corners at root -+ 1.32 x half width
+        # along the facing, the tip at root + (lean.x h, h (1 - 0.3 |lean|^2), lean.y h).
+        # Now the root is the same, and the tip the same plus the PC curve at t = 1.
+        shape = pc_preset_shape()
+        rng = random.Random(15)
+        for _ in range(200):
+            root = Vec([f32(rng.uniform(-500, 500)), f32(rng.uniform(-50, 50)), f32(rng.uniform(-500, 500))])
+            angle = rng.uniform(0.0, 2.0 * math.pi)
+            facing = (f32(math.cos(angle)), f32(math.sin(angle)))
+            half_width, height = f32(rng.uniform(1.0, 2.0)), f32(rng.uniform(10.0, 30.0))
+            lean = (f32(rng.uniform(-0.4, 0.4)), f32(rng.uniform(-0.4, 0.4)))
+            phase, signed_random = f32(rng.uniform(0.0, 6.28)), f32(rng.uniform(-1.0, 1.0))
+            args = (root, Vec(list(facing)), half_width, height, Vec(list(lean)), phase, signed_random)
+            for side in (-1.0, 1.0):
+                got = self.program.call("grass_near_blade_point", *args, 0.0, side).c
+                want = [root.c[0] + facing[0] * side * 1.32 * half_width, root.c[1],
+                        root.c[2] + facing[1] * side * 1.32 * half_width]
+                for a, b in zip(got, want):
+                    self.assertAlmostEqual(a, b, delta=1.0e-3)
+            curve, _ = pc_blade_shape(1.0, phase, signed_random, facing, shape)
+            got = self.program.call("grass_near_blade_point", *args, 1.0, 0.0).c
+            want = [root.c[0] + (lean[0] + curve[0]) * height,
+                    root.c[1] + height * (1.0 - 0.3 * (lean[0] ** 2 + lean[1] ** 2)) - shape[1] * height,
+                    root.c[2] + (lean[1] + curve[2]) * height]
+            for a, b in zip(got, want):
+                self.assertAlmostEqual(a, b, delta=1.0e-3)
+            # Both sides meet at the tip.
+            left = self.program.call("grass_near_blade_point", *args, 1.0, -1.0).c
+            right = self.program.call("grass_near_blade_point", *args, 1.0, 1.0).c
+            for a, b in zip(left, right):
+                self.assertAlmostEqual(a, b, delta=1.0e-4)
+
+    def test_a_tuft_keeps_test9s_triangle(self):
+        # The near program draws the tufts of its ring with the same rows: at t = 0 and 1 the
+        # corners of grass_lod_blade's triangle (centre -+ half base at the root, the tip).
+        rng = random.Random(16)
+        for _ in range(100):
+            centre, half_base, tip = f32(rng.random()), f32(rng.uniform(0.0, 0.1)), f32(rng.random())
+            tip_y = f32(rng.uniform(0.7, 1.0))
+            for t, side, want in ((0.0, -1.0, (centre - half_base, 0.0)), (0.0, 1.0, (centre + half_base, 0.0)),
+                                  (1.0, 0.0, (tip, tip_y))):
+                got = self.program.call("grass_near_tuft_xy", centre, half_base, tip, tip_y, t, side).c
+                self.assertAlmostEqual(got[0], want[0], delta=1.0e-6)
+                self.assertAlmostEqual(got[1], want[1], delta=1.0e-6)
 
 
 class GrassLodColour(unittest.TestCase):
