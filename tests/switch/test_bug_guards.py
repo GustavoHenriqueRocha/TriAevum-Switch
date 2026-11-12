@@ -1027,7 +1027,7 @@ GUARDS = [
           r'"launching it from the game loop froze the game, issue #11\).*?'
           r'Oot3dNativeGame::WriteGameLog\(text\);.*?'
           r'#if defined\(__SWITCH__\)\s+LogSkippedControllerApplets\(\);'),
-    Guard("gyro aiming stopped working on a Switch Lite (0.2.3 candidate) and no log said why: the input "
+    Guard("gyro aiming was reported not working on a 0.2.3 test build and no log said why: the input "
           "poll writes the motion line (sensor picked and started, samples, physical aim, the game's gyro)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
           r'switchMotion = PollSwitchMotion\(motionWanted, guestRefreshWillConsume \|\| hostGuiVisible\);.*?'

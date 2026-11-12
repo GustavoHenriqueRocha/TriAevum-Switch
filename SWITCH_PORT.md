@@ -120,7 +120,7 @@ Performance and usability:
   focus and restarted on return (HOME, sleep) or when its data stalls.
   Stick, touch and gyro add up in the same aim; turning with the stick or a touch drag never
   changes how the gyro maps afterwards (it used to invert pitch after ~180° of stick/touch turn).
-  The game log's `motion:` line says what happened (below, "Gyro on a Switch Lite").
+  The game log's `motion:` line says what happened (below, "Gyro not working (a 0.2.3 test build report)").
 - **TopScreen 3.x**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0, 3.2.1 and
   3.2.2 packages, and the Switch build downloads 3.2.2 and builds the pack itself (below).
 - **USA ROM** accepted in the build (the project's own canonical USA→EUR adapter).
@@ -833,16 +833,20 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   has one `controllers:` line per change.
 - **Guards:** "reconnecting or removing a Joy-Con ..." in `tests/switch/test_bug_guards.py`.
 
-### Gyro on a Switch Lite (0.2.3 candidate report, 11/12)
-- **Seen:** "gyro seems to no longer work on the latest build" on a Switch Lite; the logs had no
-  motion lines.
+### Gyro not working (a 0.2.3 test build report, 11/12)
+- **Seen:** a player, the same one who reported the Joy-Con removal freeze (so not on a Switch Lite):
+  "gyro seems to no longer work on the latest build". No log with motion lines from them yet.
+- **Switch Lite, handheld, build 35 (logs38, 11/12):** the gyro works end to end: `sensor=handheld`,
+  `start_rc=0x0`, about 200 samples a second, `physical_aim` on every poll, `guest_gyro=on`, and up to
+  4933 of 5956 gyro samples a minute reaching the game's ring with non-zero rates.
 - **Checked:** the host's motion path (`oot3d_switch_motion.cpp`, `oot3d_native_a32_window_input.cpp`,
   `tools/three_ds/input`, `oot3d_native_a32_ctr_host_hid.cpp`, the control config) is unchanged
   since 0.1.0 except the config file replace (11/08). The 0.2.3 title module differs from 0.2.2's
   only by the 33 Master Quest mirror block starts; the split at `0x00416370` (after `ldrb r0,
   [fp, #0x0E]` at `0x0041636C`, before the flag store at `[r8, #0xA0]` and the call to `0x00417648`)
   translates the same instructions, and its hook does nothing while Unmirrored Master Quest is off.
-  No cause in the code; the next log decides.
+  No cause in the code; handheld works (logs38), so a log from the reporter's own setup decides [INF: a
+  console with detachable Joy-Cons, so detached Joy-Cons or a Pro Controller are the untested sources].
 - **Log:** game log line `motion: reason=start|change|interval pad=<SDL pad> wanted=<0|1>
   available=<none|fullkey|joy-dual-left|joy-dual-right|handheld> sensor=<running sensor>
   start_rc=<hidStartSixAxisSensor result> window_s=.. polls=.. wanted_polls=.. samples=<new six-axis
@@ -3432,15 +3436,18 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   - *Perf overlay:* the FPS lines are drawn over the hearts in both images.
   - Upscaling and OC do not touch the HUD (the UI renderer draws at the output resolution).
 
-### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, off by default)
-- **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `toon` or `perpixel`; absent, empty or
-  anything else = off (native PICA lighting, as before). **The model lives in the graphics settings**
+### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, per-pixel by default since 0.2.3)
+- **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `native` (or `off`), `toon` or `perpixel`;
+  absent, empty or anything else = per-pixel (the default since 0.2.3, the user's call on 11/12: whatever
+  lags with per-pixel lags with native too; before 0.2.3 no file meant native, so players who had chosen
+  Native get per-pixel once and choose Native again, which now writes `native`; choosing Per-pixel
+  removes the file). **The model lives in the graphics settings**
   (one source of truth, the one Lighting > Scene lights reads): per-pixel *is* the Modern lighting model
   (`Effects.SurfaceLighting` PerPixel, validated to PerPixelPbr), toon is `Effects.Toon` PicaMaterial,
   off is Native (`Deko3d::WithLightingMode` / `LightingModeOf`). At start deko3d reports the
   `NativeSurfaceLighting` capability (available when `deko3d.pack` loaded) and applies the file to the
   settings; a mode moves an Authentic preset to Custom (the Switch starts from the Custom preset anyway:
-  no settings file, no F2 override). The Video tab's "Lighting" combo (Native, Toon bands, Per-pixel (Modern model)) applies the model and writes the file; the renderer reads the model and the
+  no settings file, no F2 override). The Video tab's "Lighting" combo (Native, Toon bands, Per-pixel (Modern model, default)) applies the model and writes the file; the renderer reads the model and the
   scene environment from `SnapshotForRendering()` each frame. Off: the variant code is not reached
   (`ResolvePicaProgram` checks the mode once per draw), the native shader keys and the pack's existing
   entries are unchanged, and nothing new runs on the game thread.

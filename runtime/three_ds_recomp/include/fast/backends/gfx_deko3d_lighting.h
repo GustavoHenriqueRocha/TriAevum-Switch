@@ -1,6 +1,6 @@
 #pragma once
 
-// Optional lighting of the deko3d backend (Switch), off by default
+// Lighting of the deko3d backend (Switch), per-pixel by default since 0.2.3
 // (config/lighting, L3+R3 > Video > "Lighting"):
 //
 // - Toon: upstream's Toon "PICA material" banding (pica_toon_shader.cpp,
@@ -54,9 +54,11 @@ enum class LightingMode : uint8_t {
     PerPixel = 2,
 };
 
-// sdmc:/switch/oot3dre/config/lighting: first word `toon` or `perpixel`;
-// absent, empty or anything else = off.
+// sdmc:/switch/oot3dre/config/lighting: first word `native` (or `off`),
+// `toon` or `perpixel`; absent, empty or anything else = per-pixel, the
+// default since 0.2.3 (before, no file meant native).
 inline constexpr const char* kLightingConfigName = "lighting";
+inline constexpr LightingMode kDefaultLightingMode = LightingMode::PerPixel;
 
 [[nodiscard]] inline LightingMode ParseLightingMode(std::string_view text) noexcept {
     const size_t end = text.find_first_of("\r\n");
@@ -68,9 +70,10 @@ inline constexpr const char* kLightingConfigName = "lighting";
     std::string word(text);
     std::transform(word.begin(), word.end(), word.begin(),
                    [](char c) { return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c); });
+    if (word == "native" || word == "off") return LightingMode::Off;
     if (word == "toon") return LightingMode::Toon;
     if (word == "perpixel" || word == "per-pixel" || word == "per_pixel") return LightingMode::PerPixel;
-    return LightingMode::Off;
+    return kDefaultLightingMode;
 }
 
 [[nodiscard]] constexpr const char* LightingModeName(LightingMode mode) noexcept {
@@ -84,23 +87,23 @@ inline constexpr const char* kLightingConfigName = "lighting";
 
 [[nodiscard]] inline LightingMode LoadLightingMode(const std::filesystem::path& config) {
     std::ifstream file(config / kLightingConfigName);
-    if (!file) return LightingMode::Off;
+    if (!file) return kDefaultLightingMode;
     std::string line;
     std::getline(file, line);
     return ParseLightingMode(line);
 }
 
-// The file exists only while a mode is on. Empty on success, otherwise the
-// file name that failed.
+// The file exists only while the mode is not the default: `native` or
+// `toon`. Empty on success, otherwise the file name that failed.
 [[nodiscard]] inline std::string SaveLightingMode(const std::filesystem::path& config, LightingMode mode) {
     std::error_code error;
-    if (mode == LightingMode::Off) {
+    if (mode == kDefaultLightingMode) {
         std::filesystem::remove(config / kLightingConfigName, error);
         return error ? kLightingConfigName : "";
     }
     std::filesystem::create_directories(config, error);
     std::ofstream file(config / kLightingConfigName, std::ios::trunc);
-    file << LightingModeName(mode) << '\n';
+    file << (mode == LightingMode::Off ? "native" : LightingModeName(mode)) << '\n';
     return file ? "" : kLightingConfigName;
 }
 

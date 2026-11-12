@@ -89,24 +89,27 @@ std::string Without(std::string text, std::string_view part) {
 
 void TestConfig() {
   using Fast::Deko3d::ParseLightingMode;
-  Require(ParseLightingMode("") == LightingMode::Off, "empty = off");
-  Require(ParseLightingMode("off") == LightingMode::Off, "off");
+  Require(ParseLightingMode("") == LightingMode::PerPixel, "empty = the default, per-pixel");
+  Require(ParseLightingMode("native") == LightingMode::Off, "native");
+  Require(ParseLightingMode(" NATIVE\r\n") == LightingMode::Off, "native, case and spaces");
+  Require(ParseLightingMode("off") == LightingMode::Off, "off, the older word");
   Require(ParseLightingMode("toon") == LightingMode::Toon, "toon");
   Require(ParseLightingMode(" TOON\r\n") == LightingMode::Toon, "toon, case and spaces");
-  Require(ParseLightingMode("perpixel") == LightingMode::PerPixel, "perpixel");
+  Require(ParseLightingMode("perpixel") == LightingMode::PerPixel, "perpixel (files saved before 0.2.3)");
   Require(ParseLightingMode("per-pixel\nsomething") == LightingMode::PerPixel, "first line only");
-  Require(ParseLightingMode("modern") == LightingMode::Off, "unknown = off");
-  Require(ParseLightingMode("\ntoon") == LightingMode::Off, "empty first line = off");
+  Require(ParseLightingMode("modern") == LightingMode::PerPixel, "unknown = the default");
+  Require(ParseLightingMode("\nnative") == LightingMode::PerPixel, "empty first line = the default");
 
   const auto dir = std::filesystem::temp_directory_path() / "oot3d_deko3d_lighting_tests";
   std::filesystem::remove_all(dir);
-  Require(Fast::Deko3d::LoadLightingMode(dir) == LightingMode::Off, "no file = off");
-  Require(Fast::Deko3d::SaveLightingMode(dir, LightingMode::PerPixel).empty(), "save perpixel");
-  Require(Fast::Deko3d::LoadLightingMode(dir) == LightingMode::PerPixel, "reload perpixel");
+  Require(Fast::Deko3d::LoadLightingMode(dir) == LightingMode::PerPixel, "no file = per-pixel");
+  Require(Fast::Deko3d::SaveLightingMode(dir, LightingMode::Off).empty(), "save native");
+  Require(Fast::Deko3d::LoadLightingMode(dir) == LightingMode::Off, "reload native");
   Require(Fast::Deko3d::SaveLightingMode(dir, LightingMode::Toon).empty(), "save toon");
   Require(Fast::Deko3d::LoadLightingMode(dir) == LightingMode::Toon, "reload toon");
-  Require(Fast::Deko3d::SaveLightingMode(dir, LightingMode::Off).empty(), "save off");
-  Require(!std::filesystem::exists(dir / Fast::Deko3d::kLightingConfigName), "off removes config/lighting");
+  Require(Fast::Deko3d::SaveLightingMode(dir, LightingMode::PerPixel).empty(), "save per-pixel");
+  Require(!std::filesystem::exists(dir / Fast::Deko3d::kLightingConfigName), "per-pixel removes config/lighting");
+  Require(Fast::Deko3d::LoadLightingMode(dir) == LightingMode::PerPixel, "reload per-pixel");
   std::filesystem::remove_all(dir);
 }
 

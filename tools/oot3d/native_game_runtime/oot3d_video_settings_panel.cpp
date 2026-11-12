@@ -438,7 +438,7 @@ private:
     const auto current = graphics.Snapshot();
     const bool modernAvailable =
         graphics.Capabilities().Get(Fast::Oot3d::GraphicsCapability::NativeSurfaceLighting).Available;
-    const char *const modes[] = {"Native (default)", "Toon bands", "Per-pixel (Modern model)"};
+    const char *const modes[] = {"Native", "Toon bands", "Per-pixel (Modern model, default)"};
     int mode = static_cast<int>(Fast::Deko3d::LightingModeOf(current));
     if (ImGui::Combo("Lighting", &mode, modes, 3)) {
       const auto chosen = static_cast<Fast::Deko3d::LightingMode>(mode);
@@ -454,9 +454,9 @@ private:
       ImGui::TextWrapped("Not applied: %s", mLightingIssue.c_str());
     else if (!modernAvailable)
       ImGui::TextWrapped("Per-pixel needs the deko3d renderer and its shadercache/deko3d.pack.");
-    ImGui::TextDisabled("deko3d renderer. Applies at once, at 30 or 60 FPS. Per-pixel is the Modern lighting "
-                        "model of Lighting > Scene lights; it costs about 1-2.5 ms of GPU per frame: at 60 FPS "
-                        "busy rooms may drop frames.");
+    ImGui::TextDisabled("deko3d renderer. Applies at once, at 30 or 60 FPS. Per-pixel, the default, is the Modern "
+                        "lighting model of Lighting > Scene lights; it costs about 1-2.5 ms of GPU per frame: at "
+                        "60 FPS busy rooms may drop frames. Native is the 3DS's own lighting and costs the least.");
   }
 
   static bool PackFolderExists(const std::string &folder) {

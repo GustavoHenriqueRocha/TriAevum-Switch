@@ -61,7 +61,7 @@ void GfxRenderingAPIDeko3d::Init() {
         throw std::runtime_error("deko3d: shader code memory");
     }
     // Per-pixel surface lighting (the Modern model) needs its variants from
-    // deko3d.pack; then config/lighting (off when absent) becomes the
+    // deko3d.pack; then config/lighting (per-pixel when absent) becomes the
     // graphics settings' model, which the menus and the renderer read.
     auto& graphics = Oot3d::GraphicsSettingsRuntime::Instance();
     const bool surfaceLighting = mShaders.Stats().PackEntries != 0U;
