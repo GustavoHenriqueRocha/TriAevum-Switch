@@ -5349,6 +5349,22 @@ temple entry had `no shared placement 2` too.
   should stay over the blades in every frame. In `deko3d.txt`, the Lost Woods window's third `grass:`
   line should have `before an overlay` close to its drawn frames, and `after an overlay 0`.
 
+### Grass on deko3d: covering overlays, no grass under paths and floors (12/11)
+- **Report:** grass on the castle's concrete and in Castle Town's planters (tour of the "curva" build).
+- **Cause:** the PC grows a ground's grass only where no later coplanar draw covers it (the
+  overlay masks: `GrassOverlayAlpha`, `GrassSceneBridge::OverlaysFor`, `GrassOverlaySurvival`);
+  deko3d never published those draws, so every placement had no overlays
+  (`docs/pesquisas/2026-11-12-grama-sobre-cimento.md`).
+- **Now:** `GrassObserveDraw` publishes each world draw (opaque or translucent) drawn after a ground
+  in its target this frame with `PublishPicaGrassSource(..., masksOnly = true)`. Grass is placed at
+  its draw point, before the later draws, so `GrassEndFrame` collects each ground's overlay set
+  (`PicaGrassPlacements::CollectOverlays` -> `GrassLateOverlays`) and the next frame requests its
+  placement with it; a ground never seen before waits that one frame (`waiting` in the log line).
+  The builder's cache key already has the set's `PlacementVersion`, so animated overlays that
+  remove nothing do not rebuild.
+- **Log:** `sources ... (N published, M overlays; waiting W, overlaid O)`.
+- Tests: `oot3d_grass_switch_tests` (`Oot3dGrassOverlays`); guards in `test_bug_guards.py`.
+
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism
 (`guest_overrides.json`, `apply_guest_overrides.py`, `oot3d_native_guest_overrides.cpp`), all with

@@ -2,6 +2,7 @@
 
 #include "fast/oot3d/directional_shadows.h"
 #include "fast/oot3d/grass_primitive_topology.h"
+#include "fast/oot3d/grass_overlay_mask.h"
 #include "fast/oot3d/grass_scene_bridge.h"
 #include "fast/oot3d/grass_shading_environment.h"
 #include "fast/oot3d/grass_stream_handoff.h"
@@ -11,6 +12,7 @@
 #include "fast/oot3d/grass_texture_source_cache.h"
 #include "fast/oot3d/grass_texture_twins.h"
 #include "fast/oot3d/pica_grass_texture_coordinates.h"
+#include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_native_state.h"
 #include "oot3d/renderer/pica_texture_decode.h"
 
@@ -121,11 +123,20 @@ Matrix Multiply(const Matrix& left, const Matrix& right) {
     return result;
 }
 
+// An identity of its own for a draw published as a covering overlay
+// (ResolveNativePicaGrassSurface's masksOnly identity).
+constexpr uint64_t kOverlayIdentity = 0x67726173736d6173ULL;
+
+// `masksOnly`: the draw as a covering overlay (a path or floor drawn over a
+// ground: GrassOverlaySurvival removes the grass under it), as the PC's
+// preparation pass publishes every world draw; else as a source.
 bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const InteractiveGrassSettings& settings,
-             PicaGrassSourceState& state, uint64_t sequenceId, uint64_t drawOrder, GrassSceneMesh& resolved,
-             bool& cacheable) {
+             PicaGrassSourceState& state, uint64_t sequenceId, uint64_t drawOrder, bool masksOnly,
+             GrassSceneMesh& resolved, bool& cacheable) {
     cacheable = true;
-    if (settings.Rules.empty()) {
+    if (settings.Rules.empty() ||
+        (masksOnly && (draw.Composition.NativeActorGeometry || draw.Composition.NativeProjectedShadow ||
+                       !draw.GeometryIdentityAvailable || draw.Stencil.Enabled))) {
         return false;
     }
     const auto texture = std::find_if(draw.Textures.begin(), draw.Textures.end(),
@@ -146,10 +157,16 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
         !Renderer3ds::PicaBlendReplacesDestination(draw.Blend),
         IsGrassPrimitiveTopologySupported(draw.Topology),
     };
-    if (!IsGrassSurfaceDrawEligible(eligibility) || texture == draw.Textures.end()) {
+    const bool eligible = IsGrassSurfaceDrawEligible(eligibility) && texture != draw.Textures.end();
+    const bool maskCandidate = masksOnly && eligibility.ColorOperation && eligibility.HasPosition &&
+                               eligibility.DepthTest && !eligibility.DepthCompareAlways &&
+                               draw.DepthCompare != decltype(draw.DepthCompare)::Never && perspective &&
+                               eligibility.WritesRgb && eligibility.SupportedTopology;
+    if (!eligible && !maskCandidate) {
         return false;
     }
-    const auto textureHash = BaseLevelContentHash(*texture);
+    const auto textureHash =
+        texture != draw.Textures.end() ? BaseLevelContentHash(*texture) : std::optional<uint64_t>(0);
     if (!textureHash.has_value()) {
         return false;
     }
@@ -158,7 +175,7 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     // signature: the placement samples these pixels (AcquireMaskShared), and
     // deko3d decodes textures nowhere else. Only rule textures' signatures
     // are kept (GrassTwinRules).
-    if (texture->NativeType == 0 && texture->CopyReferences.empty() && texture->Width >= 16 &&
+    if (eligible && texture->NativeType == 0 && texture->CopyReferences.empty() && texture->Width >= 16 &&
         texture->Height >= 16 && !sources.Contains(*textureHash)) {
         const auto size = EncodedMipSize(texture->NativeFormat, texture->Width, texture->Height);
         std::vector<uint8_t> rgba;
@@ -168,20 +185,64 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
             sources.ObserveDecoded(*textureHash, texture->Width, texture->Height, rgba);
         }
     }
-    const uint64_t observedHash = sources.ResolveObservedHash(*textureHash, texture->Width, texture->Height);
-    if (!GrassTwinRules::Instance().Configured(settings.Rules, observedHash, texture->Width, texture->Height, 0U)) {
+    const uint64_t observedHash = texture == draw.Textures.end()
+                                      ? 0U
+                                      : sources.ResolveObservedHash(*textureHash, texture->Width, texture->Height);
+    // Its own rule, or the rule of a texture it is the same image as.
+    const bool configuredSource =
+        texture != draw.Textures.end() &&
+        GrassTwinRules::Instance().Configured(settings.Rules, observedHash, texture->Width, texture->Height, 0U);
+    // A ground is never its own overlay.
+    if (masksOnly ? (!maskCandidate || (eligible && configuredSource)) : (!eligible || !configuredSource)) {
         return false;
     }
-    if (texture->NativeType != 0 || !texture->CopyReferences.empty()) {
+    // The overlay's alpha, as the PC reads it (gfx_vulkan_pica_draw.cpp).
+    std::shared_ptr<GrassOverlayAlpha> overlay;
+    GrassOverlayAlphaInputs alphaInputs;
+    if (masksOnly) {
+        overlay = std::make_shared<GrassOverlayAlpha>();
+        if (texture != draw.Textures.end()) {
+            if (const auto* rule = FindGrassMaskRule(settings.Masks, observedHash, texture->Width, texture->Height))
+                overlay->Rule = *rule;
+            overlay->Rule.Coverage.Target = {"", observedHash, texture->Width, texture->Height};
+        }
+        const auto& blend = draw.Blend;
+        overlay->Translucent = !Renderer3ds::PicaBlendReplacesDestination(blend);
+        if (overlay->Translucent && !(blend.EquationRgb == Renderer3ds::NativeBlendEquation::Add &&
+                                      blend.SourceRgb == Renderer3ds::NativeBlendFactor::SourceAlpha &&
+                                      blend.DestRgb == Renderer3ds::NativeBlendFactor::OneMinusSourceAlpha))
+            overlay->NativeSupported = false;
+        overlay->AlphaTest = draw.AlphaTestEnabled;
+        overlay->Compare = draw.AlphaCompare;
+        overlay->Reference = draw.AlphaReference;
+        if (overlay->Translucent || overlay->AlphaTest) {
+            if (draw.FragmentUniformBytes.size() < kPicaPackedFragmentTevProgramOffset + sizeof(overlay->Program)) {
+                overlay->NativeSupported = false;
+            } else {
+                std::memcpy(&overlay->Program, draw.FragmentUniformBytes.data() + kPicaPackedFragmentTevProgramOffset,
+                            sizeof(overlay->Program));
+                std::memcpy(overlay->Constants.data(), draw.FragmentUniformBytes.data(), sizeof(overlay->Constants));
+                std::memcpy(overlay->Buffer.data(),
+                            draw.FragmentUniformBytes.data() + kPicaPackedFragmentCombinerBufferOffset,
+                            sizeof(overlay->Buffer));
+                alphaInputs = GrassOverlayRequiredAlphaInputs(*overlay);
+                overlay->NativeSupported &= alphaInputs.Supported;
+            }
+        }
+    }
+    // Even constant-alpha overlays keep real UVs (custom rules address the same atlas).
+    const bool needsTexture = !masksOnly || texture != draw.Textures.end();
+    if (needsTexture &&
+        (texture == draw.Textures.end() || texture->NativeType != 0 || !texture->CopyReferences.empty())) {
         return false;
     }
-    const auto wrapS = DecodeWrap(texture->NativeWrapS);
-    const auto wrapT = DecodeWrap(texture->NativeWrapT);
+    const auto wrapS = needsTexture ? DecodeWrap(texture->NativeWrapS) : std::optional(GrassTextureWrap::Repeat);
+    const auto wrapT = needsTexture ? DecodeWrap(texture->NativeWrapT) : std::optional(GrassTextureWrap::Repeat);
     if (!wrapS || !wrapT) {
         return false;
     }
     const auto* position = FindAttribute(draw, draw.PositionAttributeLocation);
-    const auto* uv = FindAttribute(draw, draw.TexCoord0AttributeLocation);
+    const auto* uv = needsTexture ? FindAttribute(draw, draw.TexCoord0AttributeLocation) : position;
     if (!position || !uv || position->ComponentCount < 3 || uv->ComponentCount < 2) {
         return false;
     }
@@ -190,11 +251,48 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     if (!positionBinding || !uvBinding || positionBinding->PerInstance || uvBinding->PerInstance) {
         return false;
     }
-    const auto coordinates = DecodePicaGrassTextureCoordinateTransform(
-        draw.VertexShaderSource, draw.FragmentShaderSource, draw.VertexUniformBytes, draw.TexCoord0AttributeLocation,
-        &draw.TemporalVertexProgram.Hooks, &draw.FragmentShaderHooks);
+    auto coordinates = needsTexture ? DecodePicaGrassTextureCoordinateTransform(
+                                          draw.VertexShaderSource, draw.FragmentShaderSource, draw.VertexUniformBytes,
+                                          draw.TexCoord0AttributeLocation, &draw.TemporalVertexProgram.Hooks,
+                                          &draw.FragmentShaderHooks)
+                                    : PicaGrassTextureCoordinateTransform{};
+    if (!needsTexture) {
+        coordinates.RawToSample = {};
+        coordinates.Eligibility = PicaGrassTextureCoordinateEligibility::Applied;
+    }
     if (!coordinates.Applied()) {
         return false;
+    }
+    if (overlay) {
+        overlay->WrapS = *wrapS;
+        overlay->WrapT = *wrapT;
+        overlay->Linear = needsTexture && (texture->MinLinear || texture->MagLinear);
+        if (needsTexture) {
+            const auto size = EncodedMipSize(texture->NativeFormat, texture->Width, texture->Height);
+            if (!size || *size > texture->NativeBytes.size()) {
+                return false;
+            }
+            // Decoded only when a placement is built under it, never per frame.
+            const auto bytes = std::make_shared<const std::vector<uint8_t>>(texture->NativeBytes.begin(),
+                                                                            texture->NativeBytes.begin() + *size);
+            overlay->LoadTextures = [bytes, hash = *textureHash, format = texture->NativeFormat,
+                                     width = texture->Width, height = texture->Height,
+                                     alphaInputs](GrassOverlayAlpha& alpha) {
+                auto& cache = GrassTextureSourceCache::Instance();
+                if (!cache.Contains(hash)) {
+                    std::vector<uint8_t> rgba;
+                    if (::Oot3d::Renderer::DecodePicaTextureRgba8(format, width, height, *bytes, rgba, nullptr))
+                        cache.ObserveDecoded(hash, width, height, rgba);
+                }
+                for (size_t c = 0; c < 4; ++c)
+                    if ((alphaInputs.TextureChannels & (1U << c)) || c == 3) {
+                        alpha.Texture[c] = cache.AcquireMaskShared(hash, static_cast<GrassSampleChannel>(c));
+                        if (!alpha.Texture[c]) alpha.NativeSupported = false;
+                    }
+                if (alpha.Rule.Mode == GrassMaskMode::Custom)
+                    alpha.CustomMask = cache.AcquireMaskShared(hash, alpha.Rule.Coverage.Channel);
+            };
+        }
     }
 
     cacheable = false; // transient camera/transform failures are retried
@@ -252,7 +350,7 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     }
     cacheable = true;
 
-    const GrassGeometryRequest request{
+    GrassGeometryRequest request{
         draw.GeometryIdentity,
         draw.GeometryContentVersion,
         draw.GeometryIdentityAvailable,
@@ -268,6 +366,26 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
         draw.Topology,
         coordinates,
     };
+    if (overlay && alphaInputs.Primary) {
+        // The vertex colour's alpha, when the overlay's alpha reads it.
+        const auto primary = DecodeGrassOverlayPrimaryAlpha(draw.TemporalVertexProgram.Hooks, draw.VertexUniformBytes);
+        overlay->NativeSupported &= primary.Valid;
+        if (primary.Valid && primary.InputRegister != 0xff) {
+            const auto* color = FindAttribute(draw, primary.InputRegister);
+            const auto* binding = color ? FindBinding(draw, color->Binding) : nullptr;
+            if (!color || color->ComponentCount < 4 || !binding || binding->PerInstance) {
+                overlay->NativeSupported = false;
+            } else {
+                const uint16_t scalarSize = color->Format == decltype(color->Format)::Float         ? 4
+                                            : color->Format == decltype(color->Format)::SignedShort ? 2
+                                                                                                    : 1;
+                request.Alpha = {binding->Bytes, binding->ByteStride, color->Format, 1,
+                                 uint16_t(color->ByteOffset + 3 * scalarSize)};
+            }
+        }
+        if (primary.Valid) request.AlphaScale = primary.Scale;
+    }
+    if (overlay) overlay->Version = GrassOverlayAlphaVersion(*overlay, *textureHash);
     const auto geometry = state.Geometry.Resolve(request);
     if (geometry.Geometry == nullptr) {
         return false;
@@ -277,15 +395,18 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     mesh.SubmissionId = draw.SubmissionId;
     mesh.DrawOrder = drawOrder;
     mesh.SequenceId = sequenceId;
-    mesh.NativeTextureIdentity = texture->NativeContentHash;
-    const auto inherited =
-        GrassTwinRules::Instance().Inherited(settings.Rules, observedHash, texture->Width, texture->Height);
-    const auto rule = std::find_if(settings.Rules.begin(), settings.Rules.end(), [&](const auto& r) {
-        return inherited ? r.RuleId == inherited->RuleId : r.Target.Rgba8Hash == observedHash;
-    });
-    if (rule != settings.Rules.end()) {
-        mesh.ConfiguredRuleId = rule->RuleId;
-        mesh.ConfiguredRuleHash = rule->Target.Rgba8Hash;
+    mesh.Overlay = overlay;
+    mesh.NativeTextureIdentity = texture == draw.Textures.end() ? 0U : texture->NativeContentHash;
+    if (!masksOnly) {
+        const auto inherited =
+            GrassTwinRules::Instance().Inherited(settings.Rules, observedHash, texture->Width, texture->Height);
+        const auto rule = std::find_if(settings.Rules.begin(), settings.Rules.end(), [&](const auto& r) {
+            return inherited ? r.RuleId == inherited->RuleId : r.Target.Rgba8Hash == observedHash;
+        });
+        if (rule != settings.Rules.end()) {
+            mesh.ConfiguredRuleId = rule->RuleId;
+            mesh.ConfiguredRuleHash = rule->Target.Rgba8Hash;
+        }
     }
     mesh.CoordinateVersion = PicaGrassTextureCoordinateTransformVersion(coordinates);
     mesh.Alphas = geometry.Geometry->Alphas;
@@ -293,16 +414,18 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     mesh.AnchorVersion = geometry.Geometry->AnchorVersion;
     mesh.ContentVersion = geometry.Geometry->ContentVersion;
     mesh.TextureHash = *textureHash;
-    const uint64_t identity = mesh.GeometryId ^ (mesh.TextureHash + 0x9e3779b97f4a7c15ULL + (mesh.GeometryId << 6U) +
-                                                 (mesh.GeometryId >> 2U));
+    const uint64_t identity =
+        masksOnly ? mesh.GeometryId ^ kOverlayIdentity
+                  : mesh.GeometryId ^ (mesh.TextureHash + 0x9e3779b97f4a7c15ULL + (mesh.GeometryId << 6U) +
+                                       (mesh.GeometryId >> 2U));
     const uint32_t occurrence = state.Occurrences[OccurrenceKey(identity, draw.RenderTargetNamespace,
                                                                 draw.FramebufferColorPhysicalAddress)]++;
     mesh.InstanceId = MixInstance(identity, occurrence, draw, &mesh.WorldInstanceId);
     mesh.RenderTargetNamespace = draw.RenderTargetNamespace;
     mesh.FramebufferColorPhysicalAddress = draw.FramebufferColorPhysicalAddress;
     mesh.FrameId = frameId;
-    mesh.TextureWidth = texture->Width;
-    mesh.TextureHeight = texture->Height;
+    mesh.TextureWidth = texture == draw.Textures.end() ? 0U : texture->Width;
+    mesh.TextureHeight = texture == draw.Textures.end() ? 0U : texture->Height;
     mesh.MapperSlot = 0;
     mesh.MaterialWrapS = *wrapS;
     mesh.MaterialWrapT = *wrapT;
@@ -393,6 +516,15 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
             request.TransformBakedIntoVertices = mesh.TransformBakedIntoVertices;
             request.Vertices = mesh.Vertices;
             request.Indices = mesh.Indices;
+            // The overlays that cover it, as of the end of the last real frame.
+            const auto overlays = mLateOverlays.Find(mesh.InstanceId, frameId);
+            if (!overlays.Ready) {
+                ++mStats.Queued;
+                ++mStats.WaitingOverlays;
+                continue;
+            }
+            if (overlays.Set) ++mStats.Overlaid;
+            request.Overlays = overlays.Set;
             request.LazyMaskTexture = rule.Target.Rgba8Hash;
             request.LazyColorTexture = mesh.ObservedTextureHash;
             request.Rule = rule;
@@ -424,18 +556,33 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
     return mReady;
 }
 
+void PicaGrassPlacements::CollectOverlays(uint64_t frameId, const InteractiveGrassSettings& settings) {
+    const auto inherited = GrassTwinRules::Instance().AllInherited(settings.Rules);
+    std::vector<GrassPlacementRule> rules = settings.Rules;
+    rules.insert(rules.end(), inherited.begin(), inherited.end());
+    std::vector<GrassSceneMesh> sources;
+    for (const auto& rule : rules) {
+        if (!GrassTextureSourceCache::Instance().Contains(rule.Target.Rgba8Hash)) continue;
+        for (const auto& mesh : GrassSceneBridge::Instance().Match(rule.Target).ScopedMeshes)
+            if (mesh.Vertices != nullptr && mesh.Indices != nullptr && mesh.FrameId == frameId)
+                sources.push_back(mesh);
+    }
+    mLateOverlays.Collect(frameId, sources,
+                          [](const GrassSceneMesh& source) { return GrassSceneBridge::Instance().OverlaysFor(source); });
+}
+
 bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t frameId,
                             const InteractiveGrassSettings& settings, PicaGrassSourceState& state,
-                            uint64_t sequenceId, uint64_t drawOrder) {
+                            uint64_t sequenceId, uint64_t drawOrder, bool masksOnly) {
     if (state.Frame != frameId) {
         state.Frame = frameId;
         state.Occurrences.clear();
     }
-    GrassStageTimer total(GrassStage::Source);
+    GrassStageTimer total(masksOnly ? GrassStage::Overlay : GrassStage::Source);
     const bool perspective = UsesPicaPerspectiveProjection(draw.VertexUniformBytes);
     const auto key = BuildGrassDrawMemoKey(draw, state.Memo.Rules(settings, frameId),
                                            GrassTextureSourceCache::Instance().Generation(), true,
-                                           draw.FragmentShaderHooks.SamplesTexture(0), perspective, false);
+                                           draw.FragmentShaderHooks.SamplesTexture(0), perspective, masksOnly);
     if (auto* entry = key ? state.Memo.Find(*key, frameId) : nullptr) {
         if (!entry->Mesh) {
             return false;
@@ -449,8 +596,10 @@ bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t fram
         // the draw's own model-to-clip, which is exact for rigid geometry.
         if (RefreshGrassMemoDraw(mesh, draw, state.Memo.CameraInverse(draw)) || RefreshMemoClip(mesh, draw)) {
             entry->Mesh->PicaModelToClip = mesh.PicaModelToClip;
-            const uint64_t identity = mesh.GeometryId ^ (mesh.TextureHash + 0x9e3779b97f4a7c15ULL +
-                                                         (mesh.GeometryId << 6U) + (mesh.GeometryId >> 2U));
+            const uint64_t identity =
+                masksOnly ? mesh.GeometryId ^ kOverlayIdentity
+                          : mesh.GeometryId ^ (mesh.TextureHash + 0x9e3779b97f4a7c15ULL + (mesh.GeometryId << 6U) +
+                                               (mesh.GeometryId >> 2U));
             const uint32_t occurrence = state.Occurrences[OccurrenceKey(identity, draw.RenderTargetNamespace,
                                                                         draw.FramebufferColorPhysicalAddress)]++;
             mesh.InstanceId = MixInstance(identity, occurrence, draw, &mesh.WorldInstanceId);
@@ -464,7 +613,7 @@ bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t fram
     }
     GrassSceneMesh mesh;
     bool cacheable = false;
-    const bool resolved = Resolve(draw, frameId, settings, state, sequenceId, drawOrder, mesh, cacheable);
+    const bool resolved = Resolve(draw, frameId, settings, state, sequenceId, drawOrder, masksOnly, mesh, cacheable);
     if (key && cacheable) {
         state.Memo.Store(*key, resolved ? std::optional(mesh) : std::nullopt, frameId);
     }

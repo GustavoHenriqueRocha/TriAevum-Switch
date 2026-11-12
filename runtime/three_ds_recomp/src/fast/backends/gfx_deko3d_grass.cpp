@@ -322,6 +322,7 @@ struct GrassState {
     // Accumulated between logs.
     uint64_t Frames = 0;
     uint64_t Published = 0;
+    uint64_t OverlaysPublished = 0;
     double ObserveMs = 0.0, ObserveMaxMs = 0.0;
     double UpdateMs = 0.0, UpdateMaxMs = 0.0;
     double DrawMs = 0.0, DrawMaxMs = 0.0;
@@ -657,8 +658,9 @@ bool GrassWorkPending() {
 
 void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
     GrassState* state = gGrass.load(std::memory_order_acquire);
+    using Layer = decltype(draw.Composition.Layer);
     if (state == nullptr || draw.CompositionDomain != decltype(draw.CompositionDomain)::Scene ||
-        draw.Composition.Layer != decltype(draw.Composition.Layer)::OpaqueWorld) {
+        (draw.Composition.Layer != Layer::OpaqueWorld && draw.Composition.Layer != Layer::TransparentWorld)) {
         return;
     }
     if (state->DrawFrame != frame) {
@@ -678,7 +680,33 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
         state->SourceNamespace = draw.RenderTargetNamespace;
         state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
     };
+    // A draw over a ground of this frame in its target (a path, a floor, a
+    // decal): published as a covering overlay, so that ground's grass grows
+    // only where it is not covered (PC: PreparePicaSequenceDraw's masks).
+    // Its placements are requested with them the next frame
+    // (PicaGrassPlacements::CollectOverlays).
+    const auto overlay = [&] {
+        if (state->SourceFrame != frame || state->SourceNamespace != draw.RenderTargetNamespace ||
+            state->SourceColorAddress != draw.FramebufferColorPhysicalAddress) {
+            return;
+        }
+        try {
+            if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame,
+                                              state->DrawOrder++, true)) {
+                ++state->OverlaysPublished;
+            }
+        } catch (const std::exception& exception) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                Log("grass: overlay failed (%s)", exception.what());
+            }
+        }
+    };
     if (state->InBetweenFrame == frame) {
+        if (draw.Composition.Layer != Layer::OpaqueWorld) {
+            return;
+        }
         // fps60 in-between frame: no sources of its own. A draw that was a
         // source of the last real frame gives its target's camera.
         if (state->InBetween.InBetweenDraw(
@@ -688,16 +716,21 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
                 draw.FramebufferFlipped)) {
             sourceDrawn();
         }
+    } else if (draw.Composition.Layer != Layer::OpaqueWorld) {
+        overlay();
     } else {
         try {
             if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame,
-                                              state->DrawOrder++)) {
+                                              state->DrawOrder)) {
+                ++state->DrawOrder;
                 ++state->Published;
                 sourceDrawn();
                 if (const auto clip = Oot3d::GrassRigidModelToClip(draw.VertexUniformBytes, draw.FramebufferFlipped))
                     state->InBetween.RealSource(SourceDrawKey(draw.GeometryIdentity, draw.RenderTargetNamespace,
                                                               draw.FramebufferColorPhysicalAddress),
                                                 *clip);
+            } else {
+                overlay();
             }
         } catch (const std::exception& exception) {
             static bool reported = false;
@@ -923,6 +956,19 @@ void GrassEndFrame(uint64_t frame) {
         LogFill(*state);
     }
     UpdatePlacements(*state, frame);
+    if (state->InBetweenFrame != frame) {
+        // This frame's grounds with the overlays drawn over them (also after
+        // its grass): their placements are requested next frame.
+        try {
+            state->Placements->CollectOverlays(frame, state->Settings);
+        } catch (const std::exception& exception) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                Log("grass: overlays failed (%s)", exception.what());
+            }
+        }
+    }
     if (state->Mode == Oot3d::GrassSwitchMode::Draw && state->DrawReady) {
         // A frame without a draw point (no scene target this frame) still
         // keeps the cull following the camera.
@@ -955,7 +1001,7 @@ void GrassEndFrame(uint64_t frame) {
     // the builds were not loaded: no file, a file of another transform
     // (nearest offsets this session), another address (exact matching), damaged.
     Log("grass: frame %llu %s %s | rules_seen %u meshes %u placements %u queued %u tufts %llu (max %llu) "
-        "retained %.1f MiB | sources %.3f ms/frame (max %.2f, %llu published) placements %.3f ms/frame (max %.2f) | "
+        "retained %.1f MiB | sources %.3f ms/frame (max %.2f, %llu published, %llu overlays; waiting %u, overlaid %u) placements %.3f ms/frame (max %.2f) | "
         "built %llu in %.0f ms (longest %.0f ms this session), loaded %llu in %.0f ms (reused %llu of another "
         "transform, up to %g / %g; %llu of another address), written %llu | not loaded: no file %llu, other "
         "transform %llu (nearest %g / %g), other address %llu, damaged %llu",
@@ -963,7 +1009,8 @@ void GrassEndFrame(uint64_t frame) {
         state->Fps60 ? "fps60" : "fps30", stats.Rules, stats.Meshes, stats.Ready, stats.Queued,
         static_cast<unsigned long long>(stats.Anchors), static_cast<unsigned long long>(state->AnchorsMax),
         static_cast<double>(stats.ResidentBytes) / (1024.0 * 1024.0), state->ObserveMs / frames,
-        state->ObserveMaxMs, static_cast<unsigned long long>(state->Published), state->UpdateMs / frames,
+        state->ObserveMaxMs, static_cast<unsigned long long>(state->Published),
+        static_cast<unsigned long long>(state->OverlaysPublished), stats.WaitingOverlays, stats.Overlaid, state->UpdateMs / frames,
         state->UpdateMaxMs, static_cast<unsigned long long>(builds), buildMs, builder.BuildMaxMilliseconds,
         static_cast<unsigned long long>(loads), loadMs,
         static_cast<unsigned long long>(builder.DiskReusedTransform - base.DiskReusedTransform),
@@ -1045,6 +1092,7 @@ void GrassEndFrame(uint64_t frame) {
     }
     state->Frames = 0;
     state->Published = 0;
+    state->OverlaysPublished = 0;
     state->ObserveMs = state->ObserveMaxMs = 0.0;
     state->UpdateMs = state->UpdateMaxMs = 0.0;
     state->DrawMs = state->DrawMaxMs = 0.0;

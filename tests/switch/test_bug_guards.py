@@ -1081,6 +1081,18 @@ GUARDS = [
           r'const auto edgeX = \[&\]\(float native\) \{ return static_cast<int32_t>\(std::lround\(native \* scaleX\)\); \};',
           test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)",
           forbid=r'native \* scale\)\)'),
+    # --- 12/11: grass grew on the castle's concrete (Gustavo's tour of the "curva" build) ---
+    Guard("grass grew under paths, floors and planters drawn over a ground on deko3d: its draws were never "
+          "published as covering overlays (the PC's masks), so every placement had none",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'Oot3d::PublishPicaGrassSource\(draw, frame, state->Settings, \*state->Sources, frame,\s+'
+          r'state->DrawOrder\+\+, true\)\).*?state->Placements->CollectOverlays\(frame, state->Settings\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassOverlays)"),
+    Guard("grass on deko3d: a placement is requested with the overlays collected at the end of the last real frame",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'const auto overlays = mLateOverlays\.Find\(mesh\.InstanceId, frameId\);.*?'
+          r'request\.Overlays = overlays\.Set;',
+          test="oot3d_grass_switch_tests (Oot3dGrassOverlays)"),
     # --- 05/11: grass on deko3d (config/grass, SWITCH_PORT.md "Grass on deko3d") ---
     Guard("[decision] grass off without config/grass: nothing is configured, every hook returns at once",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",

@@ -1,15 +1,17 @@
 #pragma once
 
 // Grass sources from native PICA draws, for backends without the Vulkan
-// renderer (deko3d on the Switch). A copy of the source path of
+// renderer (deko3d on the Switch). A copy of
 // ResolveNativePicaGrassSurface/PublishNativePicaGrassSurface
-// (gfx_vulkan_pica_draw.cpp) without overlay masks or diagnostics: a
-// configured opaque world draw becomes a GrassSceneMesh in GrassSceneBridge,
-// where the placement builder finds it. The Vulkan copy is left untouched
+// (gfx_vulkan_pica_draw.cpp) without diagnostics: a configured opaque world
+// draw becomes a GrassSceneMesh in GrassSceneBridge, where the placement
+// builder finds it, and (masksOnly) a world draw over it becomes a covering
+// overlay whose coverage removes the grass under it. The Vulkan copy is left untouched
 // until the PC build can be checked with a shared version.
 
 #include "fast/oot3d/grass_async_placement_builder.h"
 #include "fast/oot3d/grass_draw_memo.h"
+#include "fast/oot3d/grass_late_overlays.h"
 #include "fast/oot3d/grass_scene_bridge.h"
 #include "fast/oot3d/grass_geometry_registry.h"
 #include "fast/oot3d/graphics_settings.h"
@@ -30,14 +32,17 @@ struct PicaGrassSourceState {
     uint64_t Frame = 0;
 };
 
-// The draw must be an opaque world draw of the scene (the caller checks the
-// composition layer). Returns true when a mesh was published.
+// A source: the draw must be an opaque world draw of the scene (the caller
+// checks the composition layer). `masksOnly`: a world draw of the scene drawn
+// after a source into its target, published as a covering overlay (never a
+// configured ground). Returns true when a mesh was published.
 bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t frameId,
                             const InteractiveGrassSettings& settings, PicaGrassSourceState& state,
-                            uint64_t sequenceId, uint64_t drawOrder);
+                            uint64_t sequenceId, uint64_t drawOrder, bool masksOnly = false);
 
 // The placements of this frame's sources (the request side of
-// InteractiveGrassPass::Prepare without lighting, shadows or overlays): one
+// InteractiveGrassPass::Prepare without lighting or shadows; overlays one
+// frame late, GrassLateOverlays): one
 // builder worker; a missing placement is built off the calling thread and
 // shows up in a later frame.
 struct PicaGrassPlacementStats {
@@ -45,7 +50,9 @@ struct PicaGrassPlacementStats {
     uint32_t Meshes = 0;         // source meshes matched this frame
     uint32_t Ready = 0;          // placements available
     uint32_t Empty = 0;          // built with no tuft (mask, slope or size left nothing)
-    uint32_t Queued = 0;         // placements being built
+    uint32_t Queued = 0;         // placements being built (or waiting for their overlays)
+    uint32_t WaitingOverlays = 0; // sources not requested: their overlays come at the end of this frame
+    uint32_t Overlaid = 0;       // requests with covering overlays
     uint64_t Anchors = 0;        // tufts in the ready placements
     double BuildMilliseconds = 0.0; // worker time of the placements finished this frame
     size_t ResidentBytes = 0;    // placements kept by the builder (all frames)
@@ -65,6 +72,9 @@ class PicaGrassPlacements {
     explicit PicaGrassPlacements(size_t retainedBytes = 512U * 1024U * 1024U);
     // Placements of the meshes published for `frameId`.
     const std::vector<PicaGrassDrawable>& Update(uint64_t frameId, const InteractiveGrassSettings& settings);
+    // At the end of a real frame (all of its draws published): the covering
+    // overlays of its sources, for the next frame's requests.
+    void CollectOverlays(uint64_t frameId, const InteractiveGrassSettings& settings);
     [[nodiscard]] const PicaGrassPlacementStats& Stats() const noexcept { return mStats; }
     // Built placements kept on disk and loaded instead of built again
     // (config/grass_placement_cache); the builder's totals (builds, loads).
@@ -79,6 +89,7 @@ class PicaGrassPlacements {
 
   private:
     GrassAsyncPlacementBuilder mBuilder;
+    GrassLateOverlays mLateOverlays;
     std::vector<PicaGrassDrawable> mReady;
     PicaGrassPlacementStats mStats;
 };

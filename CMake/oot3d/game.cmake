@@ -460,7 +460,9 @@ add_executable(oot3d_grass_switch_tests EXCLUDE_FROM_ALL
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_placement_cache.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_shadow_refinement.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_world_placement_cache.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_late_overlays.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_overlay_mask.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_scene_bridge.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_surface_extractor.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_switch_profile.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_texture_source_cache.cpp
