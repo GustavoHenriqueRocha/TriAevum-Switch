@@ -8,9 +8,9 @@ Do not merge into `topscreen-3.0` or send to the Switch before validating on the
 ## Goal
 
 Replace the render thread's OpenGL/Mesa (nouveau) with **deko3d** (the Switch GPU's native
-API), behind an option: `sdmc:/switch/oot3dre/config/renderer` with `deko3d` turns it on; a missing
-file or `gl` keeps today's GL (the fallback always stays compiled and working). Since 11/11 deko3d is
-the default: only `gl` or `opengl` on the file's first line chooses GL.
+API). Default since 11/11: `sdmc:/switch/oot3dre/config/renderer` is read, and only `gl` or `opengl` on its first
+line chooses the OpenGL/Mesa renderer, which stays built in; no file, an empty file or another name means deko3d.
+A deko3d start failure is not caught (the game stops with an error), so `gl` in that file is the way back.
 
 Why (A/B tour26 × tour27, `config/early_frame_slot`): logic stutters dropped 201→115,
 but render stutters rose 174→255. The bottleneck is the render thread (`pica_submit` 3–4 ms/frame

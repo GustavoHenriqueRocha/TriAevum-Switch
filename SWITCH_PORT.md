@@ -634,7 +634,9 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   hand-made install fell back, without a word.
 - **Now (`gfx_deko3d_selection.cpp`, `Deko3dRendererConfigSelects`):** no file, an empty one or any other
   first line means deko3d; only `gl` or `opengl` (any case, blanks ignored) chooses OpenGL. No menu writes the
-  file. OpenGL also stays the fallback when deko3d cannot start (`Fast3dWindow.cpp`).
+  file. A deko3d start failure is not caught: `GfxRenderingAPIDeko3d::Init` throws (device, shader or
+  descriptor memory), and the game stops with a fatal error from `oot3d_native_game.cpp`. OpenGL is used only
+  when the file is missing or names `gl`/`opengl` (`Fast3dWindow.cpp`).
 - **Test:** `oot3d_deko3d_backend_tests` `TestRendererConfigSelection`.
 
 ### RomFS mods: a mod folder without files says so (issue #12, 11/11)
