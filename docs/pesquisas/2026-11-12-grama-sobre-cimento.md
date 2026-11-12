@@ -33,7 +33,12 @@ grama do TriAevum de PC, Vulkan) decide onde pôr grama ali, e o que o Switch fa
   daquele desenho].
 
 ## Decisão
-Nenhuma ainda: depende do Gustavo (portar a etapa 2 para o deko3d).
+O Gustavo pediu o port da etapa 2 (12/11). Feito em c66c97b0/a78e1862: o `GrassObserveDraw` publica
+como sobreposição todo desenho do mundo (opaco ou translúcido) feito depois de um chão no mesmo
+alvo; como o deko3d põe a grama no ponto de desenho, antes dos translúcidos, o `GrassEndFrame`
+junta os conjuntos (`GrassLateOverlays`) e o quadro seguinte pede a posição com eles (um chão novo
+espera um quadro). A chave do cache do builder já tinha a `PlacementVersion` do conjunto.
+Na mesma build (0d83b373) os tufos de longe ficaram curvos (pedido do mesmo dia).
 
 ## Alternativas
 - Portar a coleta de sobreposições para o deko3d (`gfx_deko3d_pica_draw.cpp` → `GrassSceneBridge`):
@@ -42,5 +47,8 @@ Nenhuma ainda: depende do Gustavo (portar a etapa 2 para o deko3d).
 - Regras de máscara/`ActiveRects` só para as texturas do castelo: conserta um lugar e deixa os outros.
 
 ## Em aberto
+- Conferir no tour da build 0d83b373: cimento do castelo e canteiros da cidade sem grama; contadores
+  `overlays`/`waiting`/`overlaid` na linha `grass:` do `deko3d.txt`; custo de CPU das sobreposições
+  (`sources ... ms/frame`).
 - Qual desenho/textura é o cimento (print do Switch).
 - Quantas outras áreas têm o mesmo problema.
