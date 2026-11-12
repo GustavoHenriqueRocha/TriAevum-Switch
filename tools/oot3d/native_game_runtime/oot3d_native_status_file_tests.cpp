@@ -5,6 +5,7 @@
 // by an older posted heartbeat; Stop writes what is still waiting.
 #include "oot3d_native_status_file.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -112,9 +113,20 @@ void TestPostNeverWaits() {
     Require(writer.Stats().Written == 0U, "the blocked write finished without a reader");
     // The two writes may reach one open of the FIFO or two: read until both are in.
     const std::string expected = Heartbeat(600U) + Heartbeat(600U * 100U);
+    // One read end open until both texts are in: a reader that closed between
+    // the writer's two opens made its write hit a FIFO without a reader
+    // (SIGPIPE, code 141, about 1 run in 40).
     std::string received;
     std::thread reader([&] {
-        while (received.size() < expected.size()) received += ReadAll(path);
+        const int fd = ::open(path.c_str(), O_RDONLY);
+        if (fd < 0) return;
+        char buffer[4096];
+        while (received.size() < expected.size()) {
+            const ssize_t count = ::read(fd, buffer, sizeof(buffer));
+            if (count > 0) received.append(buffer, static_cast<size_t>(count));
+            else if (count < 0) break;
+        }
+        ::close(fd);
     });
     writer.Flush();
     reader.join();
