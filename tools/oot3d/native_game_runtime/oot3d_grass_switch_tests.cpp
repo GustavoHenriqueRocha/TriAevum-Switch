@@ -5,6 +5,7 @@
 #include "fast/oot3d/grass_draw_point.h"
 #include "fast/oot3d/grass_persistent_placement_cache.h"
 #include "fast/oot3d/grass_instance_stream.h"
+#include "fast/oot3d/grass_late_overlays.h"
 #include "fast/oot3d/grass_scene_hold.h"
 #include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_surface_extractor.h"
@@ -2642,3 +2643,100 @@ TEST(Oot3dGrassTempleEntry, AStaleTwinIsResolvedAgainOnceItsRuleTextureIsSeen) {
 }
 
 } // namespace
+
+// ---- Covering overlays (SWITCH_PORT.md "Grass on deko3d: overlays") ----
+// The user saw grass on concrete in Hyrule Castle (12/11): the PC removes
+// grass under another draw that covers the ground (a path, a floor, a planter
+// edge: GrassOverlaySurvival), the Switch never gave its placements those
+// overlays. deko3d asks for placements before the later draws of the frame,
+// so the sets are collected at the end of a frame for the next one.
+
+namespace {
+GrassSceneMesh OverlayTestQuad(uint64_t id, uint64_t order, float x0, float x1) {
+    GrassSceneMesh m;
+    m.GeometryId = m.InstanceId = id;
+    m.ContentVersion = m.AnchorVersion = 1;
+    m.DrawOrder = order;
+    m.SequenceId = 1;
+    m.FrameId = 1;
+    m.RenderTargetNamespace = 1;
+    m.TextureHash = m.ObservedTextureHash = 123;
+    m.TextureWidth = m.TextureHeight = 1;
+    m.TransformBakedIntoVertices = true;
+    m.Vertices = std::make_shared<const std::vector<GrassSourceVertex>>(std::initializer_list<GrassSourceVertex>{
+        {{x0, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, {0.0F, 0.0F}},
+        {{x1, 0.0F, 0.0F}, {0.0F, 1.0F, 0.0F}, {1.0F, 0.0F}},
+        {{x1, 0.0F, 200.0F}, {0.0F, 1.0F, 0.0F}, {1.0F, 1.0F}},
+        {{x0, 0.0F, 200.0F}, {0.0F, 1.0F, 0.0F}, {0.0F, 1.0F}}});
+    m.Indices = std::make_shared<const std::vector<uint32_t>>(std::initializer_list<uint32_t>{0, 1, 2, 0, 2, 3});
+    return m;
+}
+
+std::vector<GrassAnchor> OverlayTestExtract(const GrassSceneMesh& source, std::shared_ptr<const GrassOverlaySet> set) {
+    GrassSourceSurface surface;
+    surface.GeometryId = source.GeometryId;
+    surface.Vertices = *source.Vertices;
+    surface.Indices = *source.Indices;
+    surface.Overlays = std::move(set);
+    GrassPlacementRule rule;
+    rule.InputBlack = 0.0F;
+    rule.InputWhite = 1.0F;
+    GrassGenerationSettings generation;
+    generation.InstancesPerSquareMeter = 1000.0F;
+    generation.MinimumSpacing = 0.0F;
+    GrassScalarMask white;
+    white.Width = white.Height = 1;
+    white.Samples = {255};
+    return GrassSurfaceExtractor::Extract(surface, rule, generation, white, 100000U);
+}
+} // namespace
+
+TEST(Oot3dGrassOverlays, AGroundHalfCoveredByALaterDrawGrowsGrassOnlyOnTheOtherHalf) {
+    auto& bridge = GrassSceneBridge::Instance();
+    bridge.Clear();
+    const GrassSceneMesh ground = OverlayTestQuad(1, 10, 0.0F, 200.0F);
+    GrassSceneMesh concrete = OverlayTestQuad(2, 20, 0.0F, 100.0F);
+    concrete.Overlay = std::make_shared<GrassOverlayAlpha>(); // opaque: covers what it draws
+    bridge.Publish(ground);
+    bridge.Publish(concrete);
+
+    GrassLateOverlays late;
+    // The first request of a never collected ground waits for its overlays.
+    EXPECT_FALSE(late.Find(ground.InstanceId, 1).Ready);
+    // End of frame 1: every draw seen.
+    late.Collect(1, std::span<const GrassSceneMesh>(&ground, 1),
+                 [&](const GrassSceneMesh& source) { return bridge.OverlaysFor(source); });
+    const auto lookup = late.Find(ground.InstanceId, 2);
+    ASSERT_TRUE(lookup.Ready);
+    ASSERT_TRUE(lookup.Set != nullptr);
+
+    const auto bare = OverlayTestExtract(ground, nullptr);
+    const auto covered = OverlayTestExtract(ground, lookup.Set);
+    const auto under = [](const std::vector<GrassAnchor>& anchors) {
+        return std::count_if(anchors.begin(), anchors.end(), [](const GrassAnchor& a) { return a.LocalPosition[0] < 99.0F; });
+    };
+    const auto beside = [](const std::vector<GrassAnchor>& anchors) {
+        return std::count_if(anchors.begin(), anchors.end(), [](const GrassAnchor& a) { return a.LocalPosition[0] > 101.0F; });
+    };
+    EXPECT_GT(under(bare), 100);
+    EXPECT_EQ(under(covered), 0);
+    // The uncovered half keeps its grass.
+    EXPECT_GE(beside(covered), beside(bare) * 9 / 10);
+    bridge.Clear();
+}
+
+TEST(Oot3dGrassOverlays, ASourceWaitsOneFrameAtMostAndSetsOfOldSourcesGo) {
+    GrassLateOverlays late;
+    EXPECT_FALSE(late.Find(7, 10).Ready);
+    EXPECT_FALSE(late.Find(7, 10).Ready); // the same frame asks again
+    const auto next = late.Find(7, 11);    // never collected (no real frame end): go without
+    EXPECT_TRUE(next.Ready);
+    EXPECT_TRUE(next.Set == nullptr);
+    const GrassSceneMesh source = OverlayTestQuad(7, 1, 0.0F, 10.0F);
+    const auto set = std::make_shared<GrassOverlaySet>();
+    late.Collect(12, std::span<const GrassSceneMesh>(&source, 1), [&](const GrassSceneMesh&) { return set; });
+    EXPECT_TRUE(late.Find(7, 13).Set == set);
+    EXPECT_EQ(late.Size(), 1U);
+    late.Collect(12 + kGrassLateOverlayKeepFrames + 1, {}, [&](const GrassSceneMesh&) { return set; });
+    EXPECT_EQ(late.Size(), 0U);
+}
