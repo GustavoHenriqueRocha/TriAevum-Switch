@@ -799,6 +799,9 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp
         # The console's six-axis sensors as controller motion (gyro aiming).
         tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp
+        # SDL's Controllers applet launch on a controller change, wrapped out
+        # of the game loop (issue #11; --wrap below).
+        tools/oot3d/native_game_runtime/oot3d_switch_controller_applet.cpp
         # Guard pages for one malloc size range (config/guard_alloc) and the
         # libnx exception handler that reports faults to logs/hang.txt.
         tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp
@@ -836,7 +839,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
         -Wl,--wrap=SDL_SetThreadPriority
         -Wl,--wrap=_malloc_r -Wl,--wrap=_memalign_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r
-        -Wl,--wrap=_calloc_r -Wl,--wrap=_malloc_usable_size_r)
+        -Wl,--wrap=_calloc_r -Wl,--wrap=_malloc_usable_size_r
+        # SDL's joystick driver launched the Controllers applet from the game
+        # thread on a controller change and froze the game (issue #11):
+        # oot3d_switch_controller_applet.cpp.
+        -Wl,--wrap=hidLaShowControllerSupportForSystem)
     nx_generate_nacp(oot3d_native_game.nacp
         NAME "The Legend of Zelda: Ocarina of Time 3D Recompiled"
         AUTHOR "OoT3D Recompiled contributors"

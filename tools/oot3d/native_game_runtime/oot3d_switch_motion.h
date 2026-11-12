@@ -19,7 +19,8 @@
 // Lite's built-in sensor. A single sideways Joy-Con is not supported: the
 // frame of its processed six-axis state is undocumented.
 //
-// The conversion and the averaging are pure and tested on the host
+// The conversion, the averaging and the game log's "motion:" line
+// (SwitchMotionLog) are pure and tested on the host
 // (oot3d_switch_motion_tests.cpp); only the libnx part is Switch-only.
 
 #include "three_ds_input.h"
@@ -27,7 +28,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string>
 
 namespace Oot3dNativeGame {
 
@@ -97,17 +100,90 @@ class SwitchMotionAccumulator {
   ThreeDsRecomp::Input::MotionObservation mLast;
 };
 
+// The sensor PollSwitchMotion reads (the order of preference above).
+enum class SwitchMotionSource : std::uint8_t { None, FullKey, JoyDualLeft, JoyDualRight, Handheld };
+
+// none, fullkey, joy-dual-left, joy-dual-right, handheld.
+[[nodiscard]] const char *SwitchMotionSourceName(SwitchMotionSource source) noexcept;
+
+// One input poll as the game log's motion line counts it.
+struct SwitchMotionLogSample {
+  // PollSwitchMotion's `wanted`: controller enabled, SDL pad 0 selected and
+  // aim.source using controller motion (or calibration running).
+  bool Wanted = false;
+  // The SDL pad gameplay reads (-1: none). Only pad 0 has the sensor.
+  std::int32_t ControllerInstance = -1;
+  // The sensor a poll would pick whether wanted or not, and the one running.
+  SwitchMotionSource Available = SwitchMotionSource::None;
+  SwitchMotionSource Running = SwitchMotionSource::None;
+  // hidStartSixAxisSensor's result for the running sensor (0 = started).
+  std::uint32_t StartResult = 0;
+  // New LIFO samples taken by this poll, and whether it reported a gyro.
+  std::size_t SamplesAdded = 0;
+  bool GyroscopeValid = false;
+  // The sensor was started again after its data stalled.
+  bool Restarted = false;
+  // The aim the game got this poll came from the physical gyro.
+  bool PhysicalAim = false;
+  // The guest's side (oot3d_guest_motion_telemetry.h): the game's
+  // EnableGyroscopeLow state and its gyro ring's running totals.
+  bool GuestGyroscopeEnabled = false;
+  std::uint64_t GuestGyroscopeSamples = 0;
+  std::uint64_t GuestNonzeroGyroscopeSamples = 0;
+};
+
+// The game log's "motion:" line. A line at the first poll and whenever the
+// pad, the wanted state, the available or running sensor, the start result
+// or the game's gyro enable change; otherwise one every IntervalMicroseconds
+// while the sensor is wanted or the game's gyro ring moves. Counts cover the
+// polls since the previous line. Game thread only; no allocation unless a
+// line is due.
+class SwitchMotionLog {
+ public:
+  static constexpr std::uint64_t IntervalMicroseconds = 60'000'000;
+
+  [[nodiscard]] std::optional<std::string> Observe(const SwitchMotionLogSample &sample,
+                                                   std::uint64_t nowMicroseconds);
+
+ private:
+  struct Key {
+    bool Wanted = false;
+    std::int32_t ControllerInstance = -1;
+    SwitchMotionSource Available = SwitchMotionSource::None;
+    SwitchMotionSource Running = SwitchMotionSource::None;
+    std::uint32_t StartResult = 0;
+    bool GuestGyroscopeEnabled = false;
+    bool operator==(const Key &) const = default;
+  };
+  bool mStarted = false;
+  Key mKey;
+  std::uint64_t mWindowStartMicroseconds = 0;
+  std::uint64_t mPolls = 0;
+  std::uint64_t mWantedPolls = 0;
+  std::uint64_t mSamples = 0;
+  std::uint64_t mValidPolls = 0;
+  std::uint64_t mRestarts = 0;
+  std::uint64_t mPhysicalAimPolls = 0;
+  std::uint64_t mGuestSamplesAtWindowStart = 0;
+  std::uint64_t mGuestNonzeroAtWindowStart = 0;
+};
+
 #if defined(__SWITCH__)
 struct SwitchMotionPoll {
   ThreeDsRecomp::Input::MotionObservation Motion;
   // The sensor in use changed (or restarted): the caller resets state that
   // assumed a continuous pose (VirtualMotionState::ResetController).
   bool SourceChanged = false;
+  // For the motion log line (SwitchMotionLogSample).
+  SwitchMotionSource Running = SwitchMotionSource::None;
+  std::uint32_t StartResult = 0;
+  std::size_t SamplesAdded = 0;
+  bool Restarted = false;
 };
 
-// True when player 1 or handheld has a supported six-axis sensor connected.
-// Shared-memory reads only.
-[[nodiscard]] bool SwitchMotionSensorConnected() noexcept;
+// The sensor of player 1 or handheld that PollSwitchMotion would read, None
+// when no supported one is connected. Shared-memory reads only.
+[[nodiscard]] SwitchMotionSource SwitchMotionAvailableSource() noexcept;
 
 // Game thread only. `wanted` false stops the sensor (no IMU streaming while
 // nothing uses it). Starts and stops the sensor on device changes, restarts

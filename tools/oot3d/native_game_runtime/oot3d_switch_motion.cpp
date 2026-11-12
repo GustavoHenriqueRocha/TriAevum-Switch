@@ -3,7 +3,9 @@
 #include "oot3d_switch_motion.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cmath>
+#include <cstdio>
 
 #if defined(__SWITCH__)
 #include <switch.h>
@@ -95,10 +97,71 @@ ThreeDsRecomp::Input::MotionObservation SwitchMotionAccumulator::Take(
   return mLast;
 }
 
+const char *SwitchMotionSourceName(SwitchMotionSource source) noexcept {
+  switch (source) {
+  case SwitchMotionSource::None: return "none";
+  case SwitchMotionSource::FullKey: return "fullkey";
+  case SwitchMotionSource::JoyDualLeft: return "joy-dual-left";
+  case SwitchMotionSource::JoyDualRight: return "joy-dual-right";
+  case SwitchMotionSource::Handheld: return "handheld";
+  }
+  return "none";
+}
+
+std::optional<std::string> SwitchMotionLog::Observe(const SwitchMotionLogSample &sample,
+                                                    std::uint64_t nowMicroseconds) {
+  // A change waits this long after the previous line, so a state that flips
+  // every poll still gives at most one line a second.
+  constexpr std::uint64_t kChangeSpacingMicroseconds = 1'000'000;
+  const Key key{sample.Wanted,  sample.ControllerInstance, sample.Available,
+                sample.Running, sample.StartResult,        sample.GuestGyroscopeEnabled};
+  ++mPolls;
+  mWantedPolls += sample.Wanted ? 1U : 0U;
+  mSamples += sample.SamplesAdded;
+  mValidPolls += sample.GyroscopeValid ? 1U : 0U;
+  mRestarts += sample.Restarted ? 1U : 0U;
+  mPhysicalAimPolls += sample.PhysicalAim ? 1U : 0U;
+  const std::uint64_t elapsed = nowMicroseconds - mWindowStartMicroseconds;
+  const char *reason = nullptr;
+  if (!mStarted) {
+    reason = "start";
+  } else if (key != mKey && elapsed >= kChangeSpacingMicroseconds) {
+    reason = "change";
+  } else if (elapsed >= IntervalMicroseconds) {
+    if (mWantedPolls != 0U || sample.GuestGyroscopeSamples != mGuestSamplesAtWindowStart) reason = "interval";
+  }
+  std::optional<std::string> line;
+  if (reason != nullptr) {
+    char text[512];
+    std::snprintf(text, sizeof(text),
+                  "motion: reason=%s pad=%" PRId32 " wanted=%d available=%s sensor=%s start_rc=0x%" PRIX32
+                  " window_s=%.1f polls=%" PRIu64 " wanted_polls=%" PRIu64 " samples=%" PRIu64
+                  " valid=%" PRIu64 " restarts=%" PRIu64 " physical_aim=%" PRIu64 " guest_gyro=%s guest_ring=%" PRIu64
+                  " guest_nonzero=%" PRIu64,
+                  reason, sample.ControllerInstance, sample.Wanted ? 1 : 0, SwitchMotionSourceName(sample.Available),
+                  SwitchMotionSourceName(sample.Running), sample.StartResult,
+                  mStarted ? static_cast<double>(elapsed) * 1e-6 : 0.0, mPolls, mWantedPolls, mSamples, mValidPolls,
+                  mRestarts, mPhysicalAimPolls, sample.GuestGyroscopeEnabled ? "on" : "off",
+                  sample.GuestGyroscopeSamples - mGuestSamplesAtWindowStart,
+                  sample.GuestNonzeroGyroscopeSamples - mGuestNonzeroAtWindowStart);
+    line.emplace(text);
+    mKey = key;
+    mStarted = true;
+  } else if (elapsed < IntervalMicroseconds) {
+    return line;
+  }
+  // A line was written, or a quiet interval ended without one: a new window.
+  mWindowStartMicroseconds = nowMicroseconds;
+  mPolls = mWantedPolls = mSamples = mValidPolls = mRestarts = mPhysicalAimPolls = 0U;
+  mGuestSamplesAtWindowStart = sample.GuestGyroscopeSamples;
+  mGuestNonzeroAtWindowStart = sample.GuestNonzeroGyroscopeSamples;
+  return line;
+}
+
 #if defined(__SWITCH__)
 namespace {
 
-enum class MotionSource : std::uint8_t { None, FullKey, JoyDualLeft, JoyDualRight, Handheld };
+using MotionSource = SwitchMotionSource;
 
 // Restart a sensor whose data stalled at most this often.
 constexpr std::uint64_t kRestartIntervalMicroseconds = 1'000'000;
@@ -114,6 +177,8 @@ struct SwitchMotionProvider {
   HidSixAxisSensorHandle FullKey{};
   HidSixAxisSensorHandle JoyDual[2]{};
   MotionSource Started = MotionSource::None;
+  // hidStartSixAxisSensor's result for Started.
+  Result StartResult = 0;
   // The current sensor has reported valid data since it last started.
   bool HadData = false;
   std::uint64_t StartedMicroseconds = 0;
@@ -193,8 +258,9 @@ void Stop(SwitchMotionProvider& provider) {
 
 // A failed start is retried by the stall check of PollSwitchMotion.
 void Start(SwitchMotionProvider& provider, MotionSource source, std::uint64_t now) {
+  provider.StartResult = 0;
   if (source == MotionSource::None) return;
-  hidStartSixAxisSensor(HandleFor(provider, source));
+  provider.StartResult = hidStartSixAxisSensor(HandleFor(provider, source));
   provider.Started = source;
   provider.StartedMicroseconds = now;
   provider.Accumulator.Reset(now);
@@ -202,10 +268,10 @@ void Start(SwitchMotionProvider& provider, MotionSource source, std::uint64_t no
 
 } // namespace
 
-bool SwitchMotionSensorConnected() noexcept {
+SwitchMotionSource SwitchMotionAvailableSource() noexcept {
   auto& provider = Provider();
   RequestHandles(provider);
-  return SelectSource(provider) != MotionSource::None;
+  return SelectSource(provider);
 }
 
 SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
@@ -224,7 +290,10 @@ SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
     result.SourceChanged = true;
     provider.HadData = false;
   }
-  if (provider.Started == MotionSource::None) return result;
+  if (provider.Started == MotionSource::None) {
+    result.StartResult = provider.StartResult;
+    return result;
+  }
 
   HidSixAxisSensorState states[17];
   const size_t count = hidGetSixAxisSensorStates(HandleFor(provider, provider.Started), states,
@@ -238,7 +307,7 @@ SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
                       {state.angular_velocity.x, state.angular_velocity.y, state.angular_velocity.z},
                       (state.attributes & HidSixAxisSensorAttribute_IsConnected) != 0};
   }
-  provider.Accumulator.Observe(std::span(samples.data(), std::min(count, samples.size())), now);
+  result.SamplesAdded = provider.Accumulator.Observe(std::span(samples.data(), std::min(count, samples.size())), now);
   result.Motion = provider.Accumulator.Take(consume, now);
   if (result.Motion.GyroscopeValid) provider.HadData = true;
   // Data that stopped arriving (a sensor that did not survive a mode change
@@ -250,8 +319,11 @@ SwitchMotionPoll PollSwitchMotion(bool wanted, bool consume) noexcept {
     Stop(provider);
     Start(provider, source, now);
     result.SourceChanged = provider.HadData;
+    result.Restarted = true;
     provider.HadData = false;
   }
+  result.Running = provider.Started;
+  result.StartResult = provider.StartResult;
   return result;
 }
 #endif

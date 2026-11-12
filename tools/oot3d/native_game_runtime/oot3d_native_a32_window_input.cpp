@@ -3,11 +3,15 @@
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
+#include "oot3d_game_log.h"
+#include "oot3d_guest_motion_telemetry.h"
 #include "oot3d_host_menu_touch.h"
+#include "oot3d_switch_controller_applet.h"
 #include "oot3d_switch_motion.h"
 #include "oot3d_top_screen_hud_touch.h"
 
 #include <cfloat>
+#include <cstdio>
 #include <imgui_internal.h>
 #include <switch.h>
 #endif
@@ -185,6 +189,29 @@ void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
   if (events.ScrollY != 0.0F) ScrollHostMenuUnderPointer(events.ScrollY);
 }
 
+// SDL asked for the Controllers applet after a controller change; the wrap
+// (oot3d_switch_controller_applet.h) did not launch it. One line per poll
+// that finds requests, with what HID reports for player 1 and handheld now.
+void LogSkippedControllerApplets() {
+  const std::uint32_t skipped = Oot3dNativeGame::TakeSkippedControllerApplets();
+  if (skipped == 0U) return;
+  char text[384];
+  std::snprintf(text, sizeof(text),
+                "controllers: SDL asked for the Controllers applet after a controller change (skipped: "
+                "launching it from the game loop froze the game, issue #11); requests=%u player1_style=0x%X "
+                "player1_device=0x%X handheld_style=0x%X; pair controllers through HOME > Controllers",
+                static_cast<unsigned>(skipped), static_cast<unsigned>(hidGetNpadStyleSet(HidNpadIdType_No1)),
+                static_cast<unsigned>(hidGetNpadDeviceType(HidNpadIdType_No1)),
+                static_cast<unsigned>(hidGetNpadStyleSet(HidNpadIdType_Handheld)));
+  Oot3dNativeGame::WriteGameLog(text);
+}
+
+// The game log's "motion:" line (oot3d_switch_motion.h).
+Oot3dNativeGame::SwitchMotionLog &MotionLog() {
+  static Oot3dNativeGame::SwitchMotionLog log;
+  return log;
+}
+
 } // namespace
 #endif
 
@@ -229,6 +256,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   }
   pollingState.ControllerInstance = selectedController.InstanceId;
 #if defined(__SWITCH__)
+  LogSkippedControllerApplets();
   // L3+R3 opens/closes the debug menu (fast/oot3d/debug_menu.h). Read from the
   // physical pad even when the controller is disabled for gameplay; while the
   // menu is open the game sees it as host UI (no buttons, sticks or touch).
@@ -252,7 +280,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
 #if defined(__SWITCH__)
   // SDL pad 0 is player 1 plus handheld. Its sensors come from
   // oot3d_switch_motion.h, which devkitPro's SDL does not report.
-  if (SwitchMotionSensorConnected()) {
+  const auto availableMotion = SwitchMotionAvailableSource();
+  if (availableMotion != SwitchMotionSource::None) {
     for (auto &device : selectedController.Devices) {
       if (device.InstanceId == 0) device.HasGyroscope = device.HasAccelerometer = true;
     }
@@ -353,15 +382,16 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   // (oot3d_switch_motion.h) fills the same observation for SDL pad 0. It
   // also runs while host UI is visible so calibration from the L3+R3 menu
   // receives samples; the motion is cleared below for gameplay.
+  SwitchMotionPoll switchMotion;
+  bool motionWanted = false;
   if (!host.ControllerMotion.GyroscopeValid && !host.ControllerMotion.AccelerometerValid) {
     const bool motionAim = config.NativeAimSource == NativeMotionSource::Automatic ||
         config.NativeAimSource == NativeMotionSource::ControllerGyroscope ||
         config.NativeAimSource == NativeMotionSource::ControllerAccelerometer ||
         config.NativeAimSource == NativeMotionSource::ControllerMotion;
-    const auto switchMotion = PollSwitchMotion(
-        config.ControllerEnabled && selectedController.InstanceId == 0 &&
-            (motionAim || controls.CalibrationStatus().Active),
-        guestRefreshWillConsume || hostGuiVisible);
+    motionWanted = config.ControllerEnabled && selectedController.InstanceId == 0 &&
+        (motionAim || controls.CalibrationStatus().Active);
+    switchMotion = PollSwitchMotion(motionWanted, guestRefreshWillConsume || hostGuiVisible);
     if (switchMotion.SourceChanged) pollingState.VirtualMotion.ResetController();
     host.ControllerMotion = switchMotion.Motion;
   }
@@ -472,6 +502,23 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
 #if defined(__SWITCH__)
   // A tapped HUD control presses the physical control it pictures.
   frame.Hid.Buttons |= switchTouch.HudButtons;
+  // The physical gyro reached this poll's aim: a controller source with a
+  // valid gyro, or automatic aim on the physical base (not virtual motion).
+  // Host UI clears the motion above, so its polls count as not.
+  const bool physicalAim = host.ControllerMotion.GyroscopeValid &&
+      (config.NativeAimSource == NativeMotionSource::ControllerGyroscope ||
+       config.NativeAimSource == NativeMotionSource::ControllerMotion ||
+       (config.NativeAimSource == NativeMotionSource::Automatic && !pollingState.VirtualMotion.Active));
+  const auto &guestMotion = GuestMotion();
+  if (auto line = MotionLog().Observe(
+          {motionWanted, selectedController.InstanceId, availableMotion, switchMotion.Running,
+           switchMotion.StartResult, switchMotion.SamplesAdded, switchMotion.Motion.GyroscopeValid,
+           switchMotion.Restarted, physicalAim,
+           guestMotion.GyroscopeEnabled.load(std::memory_order_relaxed),
+           guestMotion.GyroscopeSamples.load(std::memory_order_relaxed),
+           guestMotion.NonzeroGyroscopeSamples.load(std::memory_order_relaxed)},
+          armTicksToNs(armGetSystemTick()) / 1000U))
+    WriteGameLog(std::move(*line));
 #endif
   if (nativeFrontendTouchEnabled && !hostGuiVisible) {
     if (window.IsMouseCaptured()) {

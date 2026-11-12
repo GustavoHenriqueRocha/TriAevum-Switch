@@ -1,12 +1,13 @@
 // Switch six-axis -> 3DS motion (oot3d_switch_motion.h): the axis conversion
-// against known rotations and the existing SDL path, and the averaging of
-// the six-axis LIFO into one observation per poll.
+// against known rotations and the existing SDL path, the averaging of the
+// six-axis LIFO into one observation per poll, and the game log's motion line.
 #include "oot3d_switch_motion.h"
 
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace {
@@ -221,6 +222,81 @@ void TestCalibrationSeesFreshSamples() {
           "calibration mean is not the converted bias and pose");
 }
 
+bool Contains(const std::string& text, const char* part) { return text.find(part) != std::string::npos; }
+
+void TestMotionLog() {
+  SwitchMotionLog log;
+  std::uint64_t now = 10'000'000;
+  SwitchMotionLogSample sample;
+  sample.Wanted = true;
+  sample.ControllerInstance = 0;
+  sample.Available = SwitchMotionSource::Handheld;
+  sample.Running = SwitchMotionSource::Handheld;
+  auto line = log.Observe(sample, now);
+  Require(line && Contains(*line, "motion: reason=start pad=0 wanted=1 available=handheld sensor=handheld start_rc=0x0"),
+          "the first poll did not write the state line");
+
+  // A minute of polls at 60 Hz: one line, at the minute, with the counts.
+  sample.SamplesAdded = 3;
+  sample.GyroscopeValid = true;
+  sample.PhysicalAim = true;
+  sample.GuestGyroscopeEnabled = false;
+  int lines = 0;
+  for (int poll = 0; poll < 3600; ++poll) {
+    now += 16'667;
+    sample.GuestGyroscopeSamples += 1;
+    if (poll % 2 == 0) sample.GuestNonzeroGyroscopeSamples += 1;
+    if ((line = log.Observe(sample, now))) {
+      ++lines;
+      Require(Contains(*line, "reason=interval") && Contains(*line, " polls=3600 wanted_polls=3600 samples=10800") &&
+                  Contains(*line, " valid=3600 restarts=0 physical_aim=3600 guest_gyro=off guest_ring=3600") &&
+                  Contains(*line, " guest_nonzero=1800"),
+              "the minute line does not count the minute's polls");
+    }
+  }
+  Require(lines == 1, "a minute of steady polls did not give exactly one line");
+
+  // The game enables its gyro: a change line, but not within a second of
+  // the previous line, so a state flipping every poll stays at one a second.
+  sample.GuestGyroscopeEnabled = true;
+  now += 16'667;
+  Require(!log.Observe(sample, now), "a change within a second of the previous line was written at once");
+  now += 1'000'000;
+  line = log.Observe(sample, now);
+  Require(line && Contains(*line, "reason=change") && Contains(*line, "guest_gyro=on"),
+          "the game's gyro enable did not write a change line");
+  sample.GuestGyroscopeEnabled = false;
+  int changes = 0;
+  for (int poll = 0; poll < 120; ++poll) {
+    now += 16'667;
+    sample.GuestGyroscopeEnabled = !sample.GuestGyroscopeEnabled;
+    changes += log.Observe(sample, now) ? 1 : 0;
+  }
+  Require(changes <= 2, "a state flipping every poll wrote more than one line a second");
+
+  // Not wanted and no guest gyro samples: the state line, then nothing more.
+  sample = {};
+  sample.ControllerInstance = 1;
+  sample.Available = SwitchMotionSource::Handheld;
+  now += 2'000'000;
+  line = log.Observe(sample, now);
+  Require(line && Contains(*line, "reason=change pad=1 wanted=0 available=handheld sensor=none"),
+          "selecting another pad did not write a change line");
+  for (int poll = 0; poll < 3 * 3600; ++poll) {
+    now += 16'667;
+    Require(!log.Observe(sample, now), "a quiet minute wrote a line");
+  }
+
+  // A failed start shows its result.
+  sample.Wanted = true;
+  sample.ControllerInstance = 0;
+  sample.Running = SwitchMotionSource::Handheld;
+  sample.StartResult = 0x1234;
+  now += 2'000'000;
+  line = log.Observe(sample, now);
+  Require(line && Contains(*line, "sensor=handheld start_rc=0x1234"), "a failed start did not show its result");
+}
+
 } // namespace
 
 int main() {
@@ -230,6 +306,7 @@ int main() {
   TestAimFollowsTheConsole();
   TestAccumulator();
   TestCalibrationSeesFreshSamples();
+  TestMotionLog();
   std::puts("oot3d_switch_motion_tests: ok");
   return 0;
 }

@@ -120,6 +120,7 @@ Performance and usability:
   focus and restarted on return (HOME, sleep) or when its data stalls.
   Stick, touch and gyro add up in the same aim; turning with the stick or a touch drag never
   changes how the gyro maps afterwards (it used to invert pitch after ~180° of stick/touch turn).
+  The game log's `motion:` line says what happened (below, "Gyro on a Switch Lite").
 - **TopScreen 3.x**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0, 3.2.1 and
   3.2.2 packages, and the Switch build downloads 3.2.2 and builds the pack itself (below).
 - **USA ROM** accepted in the build (the project's own canonical USA→EUR adapter).
@@ -798,6 +799,66 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
 - **Test:** `oot3d_top_screen_mod_profile_tests` (spot, Skull Kid, teaching; swapped labels) and
   `oot3d_top_screen_ocarina_tests`. Console check: the Triforce in a Great Fairy Fountain and the
   Death Mountain stone with the ocarina out; the swap, then a Navi tip and the ocarina prompt.
+
+### Joy-Cons reconnected or removed while the game runs (issue #11, 11/12)
+- **Seen:** reconnecting the Joy-Cons from the HOME menu while the game ran (after sleep) froze
+  the image and the audio (issue #11); removing a Joy-Con froze the whole console until the power
+  button was held for 15 s (reported twice). Reconnecting before launch worked.
+- **Cause:** devkitPro's SDL (switch-sdl2 2.28.5, `SDL_sysjoystick.c`) compares each open pad's npad
+  device type and style set at every `SWITCH_JoystickUpdate`; on any change it calls
+  `SWITCH_UpdateControllerSupport`, which for a pad that is not handheld calls
+  `hidLaShowControllerSupportForSystem`: libnx's `libappletLaunch` creates the Controllers library
+  applet (`appletCreateLibraryApplet` first waits for the launchable event, no timeout), starts it
+  and waits for it to close (`appletHolderJoin`, no timeout). That runs
+  inside `SDL_PumpEvents` on the game thread (`GfxWindowBackendSDL2::HandleEvents`), with SDL's
+  joystick lock held, so the frame loop, and with it the audio feed, stopped. The port never
+  launched the applet itself.
+- **Fix:** the game NRO links with `-Wl,--wrap=hidLaShowControllerSupportForSystem`
+  (`CMake/oot3d/game.cmake`); `oot3d_switch_controller_applet.cpp` returns success without
+  launching anything, fills the result with the players HID reports, and counts the request. SDL
+  then refreshes its pads as after a closed applet. The input poll writes one game log line per
+  poll that finds requests: `controllers: SDL asked for the Controllers applet after a controller
+  change (skipped: launching it from the game loop froze the game, issue #11); requests=..
+  player1_style=.. player1_device=.. handheld_style=..`.
+- **What the player sees now:** the game shows no Controllers applet. Removing or attaching a
+  Joy-Con keeps the game running; pair or reorder controllers through HOME > Controllers, which
+  the system runs while the game is suspended, and the game reads them when it is back.
+- **Other reactions to a controller change, checked:** the six-axis provider stops and starts the
+  sensor (`hidStopSixAxisSensor`/`hidStartSixAxisSensor`, one short hid IPC each) only when the
+  source changes; Ship's `ConnectedPhysicalDeviceManager` sees no device events after start-up
+  (the driver has 8 fixed pads, `SWITCH_JoystickDetect` is empty); `FeedDeko3dGamepad` reopens a pad
+  only when SDL reports it detached, which this driver never does. None of them waits.
+- **Check [console]:** in game, detach a Joy-Con from the console, attach it again, then reconnect
+  the Joy-Cons from HOME > Controllers after a sleep: the game keeps running each time and the log
+  has one `controllers:` line per change.
+- **Guards:** "reconnecting or removing a Joy-Con ..." in `tests/switch/test_bug_guards.py`.
+
+### Gyro on a Switch Lite (0.2.3 candidate report, 11/12)
+- **Seen:** "gyro seems to no longer work on the latest build" on a Switch Lite; the logs had no
+  motion lines.
+- **Checked:** the host's motion path (`oot3d_switch_motion.cpp`, `oot3d_native_a32_window_input.cpp`,
+  `tools/three_ds/input`, `oot3d_native_a32_ctr_host_hid.cpp`, the control config) is unchanged
+  since 0.1.0 except the config file replace (11/08). The 0.2.3 title module differs from 0.2.2's
+  only by the 33 Master Quest mirror block starts; the split at `0x00416370` (after `ldrb r0,
+  [fp, #0x0E]` at `0x0041636C`, before the flag store at `[r8, #0xA0]` and the call to `0x00417648`)
+  translates the same instructions, and its hook does nothing while Unmirrored Master Quest is off.
+  No cause in the code; the next log decides.
+- **Log:** game log line `motion: reason=start|change|interval pad=<SDL pad> wanted=<0|1>
+  available=<none|fullkey|joy-dual-left|joy-dual-right|handheld> sensor=<running sensor>
+  start_rc=<hidStartSixAxisSensor result> window_s=.. polls=.. wanted_polls=.. samples=<new six-axis
+  samples> valid=<polls with a gyro> restarts=<stall restarts> physical_aim=<polls whose aim used the
+  physical gyro> guest_gyro=<on|off: the game's EnableGyroscopeLow> guest_ring=<gyro samples written
+  to the game's HID ring> guest_nonzero=<of them, not all zero>` (`SwitchMotionLog`,
+  `oot3d_switch_motion.h`; the guest counts from `oot3d_guest_motion_telemetry.h`). At the first
+  poll, on a change of pad, wanted, available or running sensor, start result or the game's gyro
+  enable (at most one a second), and every 60 s while the sensor is wanted or the game's ring moves.
+- **Reading it:** `wanted=0` with `pad` other than 0: gameplay reads another SDL pad, which has no
+  sensor; `wanted=0` on pad 0: `aim.source` is not a controller-motion source or the controller is
+  disabled; `available=none`: HID reports no supported sensor; `start_rc` not 0 or `samples=0` with
+  restarts: the sensor does not answer; `valid` but `physical_aim=0`: the aim used virtual motion;
+  `guest_gyro=off` while aiming in first person: the game never asked for the gyro; `guest_ring`
+  moving with `guest_nonzero=0`: zero rates reached the game.
+- **Test:** `oot3d_switch_motion_tests` (TestMotionLog).
 
 ## How to build (Linux)
 

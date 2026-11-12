@@ -1000,6 +1000,40 @@ GUARDS = [
     Guard("savestate didn't overwrite the existing file on Switch (EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_savestate.cpp",
           r'#if defined\(__SWITCH__\).*?renameError == std::errc::file_exists.*?std::filesystem::remove\(destination'),
+    # --- 11/12 (issue #11 and a later report): reconnecting Joy-Cons from HOME, or removing one, froze the
+    # game and the console. devkitPro's SDL (switch-sdl2 2.28.5, SWITCH_JoystickUpdate) launches the
+    # Controllers applet (hidLaShowControllerSupportForSystem, a blocking library applet launch) from
+    # SDL_PumpEvents on the game thread whenever a pad's device type or style set changes. The link wraps
+    # it so the game never launches the applet; the input poll logs each request. ---
+    Guard("reconnecting or removing a Joy-Con while the game ran froze the game and the console (issue #11): "
+          "the game NRO links with --wrap=hidLaShowControllerSupportForSystem and compiles the wrap",
+          "CMake/oot3d/game.cmake",
+          r'tools/oot3d/native_game_runtime/oot3d_switch_controller_applet\.cpp.*?'
+          r'target_link_options\(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create.*?'
+          r'-Wl,--wrap=hidLaShowControllerSupportForSystem\)'),
+    Guard("reconnecting or removing a Joy-Con while the game ran froze the game and the console (issue #11): "
+          "the wrap has libnx's signature, counts the request and launches no applet",
+          "tools/oot3d/native_game_runtime/oot3d_switch_controller_applet.cpp",
+          r'extern "C" Result __wrap_hidLaShowControllerSupportForSystem\(HidLaControllerSupportResultInfo \*result_info,'
+          r'\s+const HidLaControllerSupportArg \*arg, bool flag\) \{.*?'
+          r'gSkippedControllerApplets\.fetch_add\(1U, std::memory_order_relaxed\);.*?return 0;\s+\}',
+          forbid=r'__real_hidLaShowControllerSupportForSystem|libappletLaunch|appletCreateLibraryApplet'
+                 r'|(?<!__wrap_)hidLaShowControllerSupport\w*\('),
+    Guard("reconnecting or removing a Joy-Con while the game ran froze the game and the console (issue #11): "
+          "each skipped Controllers applet request reaches the game log from the input poll",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'const std::uint32_t skipped = Oot3dNativeGame::TakeSkippedControllerApplets\(\);.*?'
+          r'"controllers: SDL asked for the Controllers applet after a controller change \(skipped: "\s+'
+          r'"launching it from the game loop froze the game, issue #11\).*?'
+          r'Oot3dNativeGame::WriteGameLog\(text\);.*?'
+          r'#if defined\(__SWITCH__\)\s+LogSkippedControllerApplets\(\);'),
+    Guard("gyro aiming stopped working on a Switch Lite (0.2.3 candidate) and no log said why: the input "
+          "poll writes the motion line (sensor picked and started, samples, physical aim, the game's gyro)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'switchMotion = PollSwitchMotion\(motionWanted, guestRefreshWillConsume \|\| hostGuiVisible\);.*?'
+          r'if \(auto line = MotionLog\(\)\.Observe\(\s+\{motionWanted, selectedController\.InstanceId, '
+          r'availableMotion, switchMotion\.Running,.*?WriteGameLog\(std::move\(\*line\)\);',
+          "oot3d_switch_motion_tests (TestMotionLog)"),
     # --- 05/11: "native PICA color capture failed" on every save state with deko3d ---
     Guard("deko3d: save states failed (\"native PICA color capture failed\"): the backend kept the "
           "interface defaults, which refuse to capture and restore render targets",
