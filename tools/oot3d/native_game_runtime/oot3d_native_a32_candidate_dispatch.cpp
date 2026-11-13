@@ -1,7 +1,9 @@
 // Per-block native candidates of the A32 window: TopScreen UI source-port blocks and product hooks.
+#include <cstdio>
 #include <cstring>
 #include "oot3d_native_a32_window_shared.h"
 #include "oot3d_free_camera_smoothing_config.h"
+#include "oot3d_game_log.h"
 
 namespace Oot3dA32Window {
 
@@ -610,6 +612,18 @@ bool ExecuteTopScreenUiSourcePortBlock(
       if (!Oot3dNativeGame::CommitTopScreenFreeCameraCollision(
               memory, &dispatch.TopScreenCamera))
         return false;
+      if (dispatch.TopScreenCamera.IgnoredFloorsSource !=
+          dispatch.TopScreenCameraLoggedFloorsSource) {
+        dispatch.TopScreenCameraLoggedFloorsSource =
+            dispatch.TopScreenCamera.IgnoredFloorsSource;
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "free camera: scene 0x%02X, %zu floors the game's camera "
+                      "test passes through now stop it",
+                      static_cast<unsigned>(dispatch.TopScreenCamera.IgnoredFloorsSource[0]),
+                      dispatch.TopScreenCamera.IgnoredFloors.size());
+        Oot3dNativeGame::WriteGameLog(line);
+      }
       return branchToNative(Oot3dNativeGame::kTopScreenCameraQuakeUpdate,
                             dispatch.TopScreenCamera.CameraAddress,
                             dispatch.TopScreenCamera.ScratchAddress + 0x60U);

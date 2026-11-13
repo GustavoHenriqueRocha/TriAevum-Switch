@@ -868,6 +868,42 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   moving with `guest_nonzero=0`: zero rates reached the game.
 - **Test:** `oot3d_switch_motion_tests` (TestMotionLog).
 
+### Free camera below the ground in the Forest Temple (user, after 0.2.3, 11/12)
+- **Seen:** "the camera does not stop at the ground sometimes as it does for the walls, it can go
+  underground" in the Forest Temple.
+- **Cause:** the free camera's only collision is the game's `Camera_BGCheckInfo` (`0x003553FC`) on the
+  line from Link's head to the eye, and the game's camera line test skips polygons whose first vertex
+  index has the ignore-camera flag (`0x2000`; `0x4000` entities, `0x8000` projectiles). The game's own
+  camera rarely looks from below the floor; the free camera does when it is tilted down. Floors with
+  the flag, from the scene files (`scene/<name>_info.zsi`, command 0x03; 20-byte polygons, 6-byte
+  vertices): the Forest Temple 78 (3.2% of its floor area; most of it one floor at height 309 around a
+  264x242 opening, at x -217..455, z 116..868), Spirit Temple 1.0%, Kokiri Forest 0.6%, Jabu-Jabu
+  0.4%, Shadow Temple 0.3%, Hyrule Field 0.3%, Fire Temple 0.2%, Water Temple 0.1%; the Deku Tree,
+  Dodongo's Cavern and the Temple of Time none. The Forest Temple's moving rooms (`zelda_mori_hineri*`)
+  have none.
+- **Fix (`CommitTopScreenFreeCameraCollision`):** the static collision (GlobalContext + 0xA98, laid out
+  as in the file with its lists relocated, as the camera data read at +0x24 already assumes) is decoded
+  once per scene into its ignore-camera floors (normal y above 0.5, every vertex within 2 units of the
+  polygon's plane, else left out: `DecodeTopScreenCameraIgnoredFloors`). Where the line from Link's
+  head passes down through one, the eye stops one unit above it, as `Camera_BGCheckInfo` places it for
+  other surfaces (`ClipTopScreenFreeCameraToFloors`): first the intended eye, then the eye drawn after
+  smoothing. Crossing from below (Link under a ledge) or beside a floor stops nothing. On the real
+  Forest Temple data the decoder finds the 78 floors and stops an eye at height 310 over the big
+  floor, not over its opening.
+- **Log:** one game log line per scene the free camera works in, `free camera: scene 0x.., N floors
+  the game's camera test passes through now stop it`; the summary has
+  `topscreen_camera_ignored_floors` and `topscreen_camera_ignored_floor_stops`.
+- **Test:** `oot3d_top_screen_mod_profile_tests` (ignore-camera floors: decoding, the clip, and a free
+  camera update with the eye tilted 45 degrees below a flagged floor). Guards "free camera sank below
+  some floors ..." and "free camera floors ...".
+
+### Controls > Shortcuts: Item R / Item L (user, after 0.2.3, 11/12)
+- **Seen:** the Shortcuts D-pad list said "Item ZR" and "Item ZL" (SingleScreen's names) while the
+  items are on R and L and the HUD says R and L.
+- **Change:** `DrawTopScreenActionBindings` takes the same rule as `SetTopScreenSwappedItemLabels`,
+  from the bindings being edited: "Item R" / "Item L", or "Item ZR" / "Item ZL" once "Swap shoulders /
+  triggers" has moved the items to ZR / ZL. The config words (`item_zr`, `item_zl`) are unchanged.
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.

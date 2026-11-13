@@ -69,10 +69,14 @@ inline bool DrawTopScreenStickAiming(TopScreenUiConfig& config) {
     return changed;
 }
 
-inline bool DrawTopScreenActionBindings(TopScreenUiConfig& config) {
-    constexpr const char* labels[]{"None", "View", "Ocarina", "Iron Boots", "Hover Boots",
-        "Item ZR", "Item ZL", "Sword toggle", "All boots", "Minimap toggle", "Boomerang",
-        "Slingshot", "Tunic toggle", "Shield toggle", "Item"};
+// itemIZr / itemIIZl: Item I / II are on ZR / ZL (after "Swap shoulders /
+// triggers"), else on R / L, as the HUD's labels say
+// (SetTopScreenSwappedItemLabels).
+inline bool DrawTopScreenActionBindings(TopScreenUiConfig& config, bool itemIZr, bool itemIIZl) {
+    const char* labels[]{"None", "View", "Ocarina", "Iron Boots", "Hover Boots",
+        itemIZr ? "Item ZR" : "Item R", itemIIZl ? "Item ZL" : "Item L", "Sword toggle",
+        "All boots", "Minimap toggle", "Boomerang", "Slingshot", "Tunic toggle",
+        "Shield toggle", "Item"};
     constexpr const char* directions[]{"Up", "Down", "Left", "Right"};
     constexpr const char* itemDirections[]{"Up item", "Down item", "Left item", "Right item"};
     // None, then kTopScreenDpadItemSlots in order.

@@ -4057,6 +4057,115 @@ int main() {
           "config/free_camera_smoothing round trip is incorrect");
   std::filesystem::remove_all(smoothingConfig);
 
+  // Floors the game's camera line test passes through (the Forest Temple
+  // has 78) stop the free camera's eye instead of letting it sink below.
+  const auto appendU16 = [](std::vector<std::uint8_t> &bytes, std::uint16_t value) {
+    bytes.push_back(static_cast<std::uint8_t>(value));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 8U));
+  };
+  const auto appendPolygon = [&](std::vector<std::uint8_t> &bytes, std::uint16_t a,
+                                 std::uint16_t b, std::uint16_t c, std::int16_t nx,
+                                 std::int16_t ny, std::int16_t nz, float distance) {
+    appendU16(bytes, 0U);
+    appendU16(bytes, a);
+    appendU16(bytes, b);
+    appendU16(bytes, c);
+    appendU16(bytes, 0U);
+    appendU16(bytes, static_cast<std::uint16_t>(nx));
+    appendU16(bytes, static_cast<std::uint16_t>(ny));
+    appendU16(bytes, static_cast<std::uint16_t>(nz));
+    const auto bits = std::bit_cast<std::uint32_t>(distance);
+    appendU16(bytes, static_cast<std::uint16_t>(bits));
+    appendU16(bytes, static_cast<std::uint16_t>(bits >> 16U));
+  };
+  std::vector<std::uint8_t> floorVertices;
+  for (const auto &[x, y, z] : std::vector<std::array<std::int16_t, 3>>{
+           {-1000, 20, -1000}, {1000, 20, -1000}, {-1000, 20, 1000}, {1000, 20, 1000},
+           {0, 0, 0}, {0, 100, 0}, {0, 0, 100}}) {
+    appendU16(floorVertices, static_cast<std::uint16_t>(x));
+    appendU16(floorVertices, static_cast<std::uint16_t>(y));
+    appendU16(floorVertices, static_cast<std::uint16_t>(z));
+  }
+  std::vector<std::uint8_t> floorPolygons;
+  appendPolygon(floorPolygons, 0x2000U | 0U, 1U, 2U, 0, 32767, 0, -20.0F); // kept
+  appendPolygon(floorPolygons, 0x2000U | 1U, 3U, 2U, 0, 32767, 0, -20.0F); // kept
+  appendPolygon(floorPolygons, 0U, 1U, 2U, 0, 32767, 0, -20.0F);  // the game's test has it
+  appendPolygon(floorPolygons, 0x2000U | 4U, 5U, 6U, 32767, 0, 0, 0.0F); // a wall
+  appendPolygon(floorPolygons, 0x2000U | 0U, 1U, 2U, 0, 32767, 0, -90.0F); // off its plane
+  appendPolygon(floorPolygons, 0x2000U | 0U, 1U, 9U, 0, 32767, 0, -20.0F); // no vertex 9
+  const auto decodedFloors =
+      DecodeTopScreenCameraIgnoredFloors(floorPolygons, floorVertices);
+  Require(decodedFloors.size() == 2U &&
+              std::abs(decodedFloors[0].Distance + 20.0F) < 0.001F &&
+              std::abs(decodedFloors[0].Normal.Y - 1.0F) < 0.001F &&
+              decodedFloors[1].Vertices[1].X == 1000.0F &&
+              decodedFloors[1].Vertices[1].Z == 1000.0F,
+          "ignore-camera floors: only flagged floors on their own plane decode");
+  const auto downward = ClipTopScreenFreeCameraToFloors(
+      {10.0F, 70.0F, 30.0F}, {10.0F, -30.0F, -70.0F}, decodedFloors);
+  Require(downward && std::abs(downward->Y - 21.0F) < 0.001F &&
+              std::abs(downward->Z + 20.0F) < 0.001F && downward->X == 10.0F,
+          "ignore-camera floors: an eye below the floor stops one unit above it");
+  Require(!ClipTopScreenFreeCameraToFloors({10.0F, 0.0F, 30.0F},
+                                           {10.0F, 100.0F, 30.0F}, decodedFloors) &&
+              !ClipTopScreenFreeCameraToFloors({1500.0F, 70.0F, 0.0F},
+                                               {1500.0F, -30.0F, 0.0F}, decodedFloors) &&
+              !ClipTopScreenFreeCameraToFloors({10.0F, 70.0F, 30.0F},
+                                               {10.0F, 30.0F, -70.0F}, decodedFloors),
+          "ignore-camera floors: from below, beside the floor or above it, nothing stops");
+  std::vector<TopScreenCameraFloorTriangle> stackedFloors = decodedFloors;
+  for (auto &corner : stackedFloors[0].Vertices) corner.Y = 50.0F;
+  stackedFloors[0].Distance = -50.0F;
+  const auto nearer = ClipTopScreenFreeCameraToFloors(
+      {-100.0F, 70.0F, -100.0F}, {-100.0F, -30.0F, -100.0F}, stackedFloors);
+  Require(nearer && std::abs(nearer->Y - 51.0F) < 0.001F,
+          "ignore-camera floors: the first floor the eye meets stops it");
+
+  constexpr std::uint32_t collisionHeader = 0x08030000U;
+  constexpr std::uint32_t collisionVertices = 0x08031000U;
+  constexpr std::uint32_t collisionPolygons = 0x08032000U;
+  const auto belowFloorEye = [&](bool collision, TopScreenCameraVec3 *eye,
+                                 TopScreenFreeCameraGuestRuntime *runtime) {
+    if (!cameraMemory.Write32(globalContext + 0xA98U, collision ? collisionHeader : 0U) ||
+        !cameraMemory.Write16(collisionHeader + 0x0CU, 7U) ||
+        !cameraMemory.Write16(collisionHeader + 0x0EU,
+                              static_cast<std::uint16_t>(floorPolygons.size() / 20U)) ||
+        !cameraMemory.Write32(collisionHeader + 0x18U, collisionVertices) ||
+        !cameraMemory.Write32(collisionHeader + 0x1CU, collisionPolygons) ||
+        !cameraMemory.WriteBytes(collisionVertices, floorVertices) ||
+        !cameraMemory.WriteBytes(collisionPolygons, floorPolygons) ||
+        !cameraMemory.Write16(cameraAddress + 0x182U, 0x2000U) ||
+        !writeFloat(cameraAddress + 0x80U, 0.0F) ||
+        !writeFloat(cameraAddress + 0x84U, 50.0F) ||
+        !writeFloat(cameraAddress + 0x88U, 0.0F) ||
+        !writeFloat(cameraAddress + 0x8CU, 0.0F) ||
+        !writeFloat(cameraAddress + 0x90U, 50.0F) ||
+        !writeFloat(cameraAddress + 0x94U, 150.0F)) {
+      return false;
+    }
+    runtime->Camera.Enabled = true;
+    runtime->Camera.Smoothing = false;
+    return stagedFreeCameraUpdate(*runtime, 31) && readCameraEye(eye);
+  };
+  TopScreenFreeCameraGuestRuntime sinkingCamera;
+  TopScreenFreeCameraGuestRuntime stoppedCamera;
+  TopScreenCameraVec3 sunkEye;
+  TopScreenCameraVec3 stoppedEye;
+  Require(belowFloorEye(false, &sunkEye, &sinkingCamera) &&
+              belowFloorEye(true, &stoppedEye, &stoppedCamera),
+          "ignore-camera floor guest fixture failed");
+  Require(sunkEye.Y < 0.0F && sinkingCamera.IgnoredFloors.empty() &&
+              sinkingCamera.IgnoredFloorStops == 0U,
+          "ignore-camera floor fixture: the eye no longer heads below the floor");
+  Require(stoppedCamera.IgnoredFloors.size() == 2U &&
+              std::abs(stoppedEye.Y - 21.0F) < 0.01F &&
+              stoppedCamera.IgnoredFloorStops == 1U,
+          "Forest Temple: the free camera sank below a floor the game's camera "
+          "test passes through");
+  Require(cameraMemory.Write32(globalContext + 0xA98U, 0U) &&
+              cameraMemory.Write16(cameraAddress + 0x182U, 0U),
+          "cannot reset the ignore-camera floor fixture");
+
   const auto zrSelection =
       ResolveTopScreenItemsSelectionBegin({true, false, 2U});
   const auto zlSelection =

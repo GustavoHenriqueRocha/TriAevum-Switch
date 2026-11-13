@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <string_view>
 #include <utility>
@@ -309,6 +310,129 @@ InterpolateTopScreenFreeCameraPosition(const TopScreenCameraVec3 &current,
   return {current.X + (target.X - current.X) * step,
           current.Y + (target.Y - current.Y) * step,
           current.Z + (target.Z - current.Z) * step};
+}
+
+namespace {
+
+TopScreenCameraVec3 Subtract(const TopScreenCameraVec3 &a,
+                             const TopScreenCameraVec3 &b) noexcept {
+  return {a.X - b.X, a.Y - b.Y, a.Z - b.Z};
+}
+
+TopScreenCameraVec3 AddScaled(const TopScreenCameraVec3 &a,
+                              const TopScreenCameraVec3 &b,
+                              float scale) noexcept {
+  return {a.X + b.X * scale, a.Y + b.Y * scale, a.Z + b.Z * scale};
+}
+
+TopScreenCameraVec3 Cross(const TopScreenCameraVec3 &a,
+                          const TopScreenCameraVec3 &b) noexcept {
+  return {a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z,
+          a.X * b.Y - a.Y * b.X};
+}
+
+float Dot(const TopScreenCameraVec3 &a, const TopScreenCameraVec3 &b) noexcept {
+  return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+}
+
+std::uint16_t ReadU16(std::span<const std::uint8_t> bytes,
+                      std::size_t offset) noexcept {
+  return static_cast<std::uint16_t>(bytes[offset] | (bytes[offset + 1U] << 8U));
+}
+
+float ReadS16(std::span<const std::uint8_t> bytes, std::size_t offset) noexcept {
+  return static_cast<float>(static_cast<std::int16_t>(ReadU16(bytes, offset)));
+}
+
+// Pushes the hit a unit out of the floor, as Camera_BGCheckInfo does.
+constexpr float kFloorClipMargin = 1.0F;
+// The collision's vertices are whole units: a hit this close outside an edge
+// is still on the floor, so the seam between two triangles holds.
+constexpr float kFloorEdgeTolerance = 1.0F;
+constexpr float kFloorPlaneTolerance = 2.0F;
+constexpr std::uint16_t kIgnoreCameraFlag = 0x2000U;
+constexpr std::uint16_t kVertexIndexMask = 0x1FFFU;
+
+} // namespace
+
+std::vector<TopScreenCameraFloorTriangle> DecodeTopScreenCameraIgnoredFloors(
+    std::span<const std::uint8_t> polygons,
+    std::span<const std::uint8_t> vertices) {
+  std::vector<TopScreenCameraFloorTriangle> floors;
+  const std::size_t vertexCount = vertices.size() / kTopScreenCollisionVertexSize;
+  for (std::size_t offset = 0U;
+       offset + kTopScreenCollisionPolygonSize <= polygons.size();
+       offset += kTopScreenCollisionPolygonSize) {
+    const std::uint16_t first = ReadU16(polygons, offset + 2U);
+    if ((first & kIgnoreCameraFlag) == 0U) continue;
+    TopScreenCameraFloorTriangle floor;
+    floor.Normal = {ReadS16(polygons, offset + 10U) / 32767.0F,
+                    ReadS16(polygons, offset + 12U) / 32767.0F,
+                    ReadS16(polygons, offset + 14U) / 32767.0F};
+    if (floor.Normal.Y <= 0.5F) continue;
+    std::uint32_t distanceBits = 0U;
+    for (std::size_t byte = 0U; byte < 4U; ++byte)
+      distanceBits |= static_cast<std::uint32_t>(polygons[offset + 16U + byte])
+                      << (8U * byte);
+    floor.Distance = std::bit_cast<float>(distanceBits);
+    bool valid = std::isfinite(floor.Distance);
+    const std::array<std::uint16_t, 3> indices{
+        static_cast<std::uint16_t>(first & kVertexIndexMask),
+        static_cast<std::uint16_t>(ReadU16(polygons, offset + 4U) & kVertexIndexMask),
+        static_cast<std::uint16_t>(ReadU16(polygons, offset + 6U) & kVertexIndexMask)};
+    for (std::size_t corner = 0U; valid && corner < 3U; ++corner) {
+      if (indices[corner] >= vertexCount) {
+        valid = false;
+        break;
+      }
+      const std::size_t at = indices[corner] * kTopScreenCollisionVertexSize;
+      floor.Vertices[corner] = {ReadS16(vertices, at), ReadS16(vertices, at + 2U),
+                                ReadS16(vertices, at + 4U)};
+      valid = std::abs(Dot(floor.Normal, floor.Vertices[corner]) +
+                       floor.Distance) <= kFloorPlaneTolerance;
+    }
+    if (valid) floors.push_back(floor);
+  }
+  return floors;
+}
+
+std::optional<TopScreenCameraVec3> ClipTopScreenFreeCameraToFloors(
+    const TopScreenCameraVec3 &from, const TopScreenCameraVec3 &to,
+    std::span<const TopScreenCameraFloorTriangle> floors) noexcept {
+  const auto segment = Subtract(to, from);
+  const TopScreenCameraFloorTriangle *nearest = nullptr;
+  float nearestShare = 0.0F;
+  for (const auto &floor : floors) {
+    const float fromSide = Dot(floor.Normal, from) + floor.Distance;
+    const float toSide = Dot(floor.Normal, to) + floor.Distance;
+    if (!(fromSide > 0.0F && toSide < 0.0F)) continue;
+    const float share = fromSide / (fromSide - toSide);
+    if (nearest != nullptr && share >= nearestShare) continue;
+    const auto hit = AddScaled(from, segment, share);
+    const auto &corners = floor.Vertices;
+    const float winding = Dot(floor.Normal, Cross(Subtract(corners[1], corners[0]),
+                                                  Subtract(corners[2], corners[0])));
+    if (winding == 0.0F) continue;
+    bool inside = true;
+    for (std::size_t corner = 0U; inside && corner < 3U; ++corner) {
+      const auto &start = corners[corner];
+      const auto edge = Subtract(corners[(corner + 1U) % 3U], start);
+      const float length = std::sqrt(Dot(edge, edge));
+      if (length <= 0.0F) {
+        inside = false;
+        break;
+      }
+      float side = Dot(floor.Normal, Cross(edge, Subtract(hit, start))) / length;
+      if (winding < 0.0F) side = -side;
+      inside = side >= -kFloorEdgeTolerance;
+    }
+    if (!inside) continue;
+    nearest = &floor;
+    nearestShare = share;
+  }
+  if (nearest == nullptr) return std::nullopt;
+  return AddScaled(AddScaled(from, segment, nearestShare), nearest->Normal,
+                   kFloorClipMargin);
 }
 
 } // namespace Oot3dNativeGame

@@ -3,8 +3,11 @@
 #include "oot3d_top_screen_config.h"
 #include "oot3d_ui/ui_primitives.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -144,5 +147,32 @@ TopScreenCameraVec3
 InterpolateTopScreenFreeCameraPosition(const TopScreenCameraVec3 &current,
                                        const TopScreenCameraVec3 &target,
                                        float step) noexcept;
+
+// A floor of the scene's static collision that the game's camera line test
+// (Camera_BGCheckInfo) skips: the polygon's ignore-camera flag.
+struct TopScreenCameraFloorTriangle {
+  std::array<TopScreenCameraVec3, 3> Vertices;
+  TopScreenCameraVec3 Normal;
+  float Distance = 0.0F; // Normal . P + Distance is 0 on the plane
+};
+
+inline constexpr std::size_t kTopScreenCollisionPolygonSize = 20U;
+inline constexpr std::size_t kTopScreenCollisionVertexSize = 6U;
+
+// The ignore-camera floors (normal y above 0.5) of a static collision's
+// polygon list: 20-byte records (u16 type; u16 vertex A, flags in bits 13-15,
+// 0x2000 ignore camera; u16 vertex B; u16 vertex C; u16; s16 normal x, y, z
+// in units of 1/0x7FFF; f32 distance) over 6-byte vertices (s16 x, y, z). A
+// polygon with a vertex out of range or off its own plane is left out.
+std::vector<TopScreenCameraFloorTriangle> DecodeTopScreenCameraIgnoredFloors(
+    std::span<const std::uint8_t> polygons,
+    std::span<const std::uint8_t> vertices);
+
+// `to` moved to where the segment from `from` first passes down through one
+// of `floors` (from the side its normal faces), one unit in front of it as
+// Camera_BGCheckInfo places the eye; nothing when it crosses none.
+std::optional<TopScreenCameraVec3> ClipTopScreenFreeCameraToFloors(
+    const TopScreenCameraVec3 &from, const TopScreenCameraVec3 &to,
+    std::span<const TopScreenCameraFloorTriangle> floors) noexcept;
 
 } // namespace Oot3dNativeGame

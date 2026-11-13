@@ -554,6 +554,8 @@ struct NativeCandidateDispatchState {
   uint64_t TopScreenCameraNormal1Calls = 0;
   uint64_t TopScreenCameraUpdateCalls = 0;
   uint64_t TopScreenCameraActiveCalls = 0;
+  // TopScreenCamera.IgnoredFloorsSource when the game log last named it.
+  std::array<std::uint32_t, 5> TopScreenCameraLoggedFloorsSource{};
   Oot3dNativeGame::Oot3dNativeUiLifecycleBridge *UiLifecycleBridge = nullptr;
   Oot3dNativeGame::TopScreenOcarinaTextRuntime *OcarinaText = nullptr;
   Oot3dNativeGame::Oot3dPicaCompositionDomain *PicaCompositionDomain =

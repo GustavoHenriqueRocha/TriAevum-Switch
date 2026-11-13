@@ -2,8 +2,10 @@
 
 #include "oot3d_top_screen_camera.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Oot3dNativeGame {
 
@@ -33,6 +35,13 @@ struct TopScreenFreeCameraGuestRuntime {
   std::int16_t RightStickX = 0;
   std::int16_t RightStickY = 0;
   bool RelativeInput = false;
+  // The static collision's ignore-camera floors, which the game's camera
+  // line test passes through, and what they were read from (scene, header,
+  // vertex list, polygon list, counts): read again when that changes.
+  std::array<std::uint32_t, 5> IgnoredFloorsSource{};
+  std::vector<TopScreenCameraFloorTriangle> IgnoredFloors;
+  // Camera updates whose eye one of them stopped.
+  std::uint64_t IgnoredFloorStops = 0;
 };
 
 bool BeginTopScreenFreeCameraGuestUpdate(

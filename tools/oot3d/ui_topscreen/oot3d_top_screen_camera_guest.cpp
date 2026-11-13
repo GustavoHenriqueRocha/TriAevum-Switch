@@ -310,6 +310,47 @@ bool PrepareTopScreenFreeCameraCollision(
   return true;
 }
 
+namespace {
+
+// GlobalContext + 0xA98: the static collision header, laid out as in the
+// scene file with its lists relocated (+0x0C u16 vertices, +0x0E u16
+// polygons, +0x18 vertex list, +0x1C polygon list; +0x24 is the camera data
+// ApplyTopScreenFreeCameraData reads).
+void RefreshIgnoredFloors(NativeA32Memory &memory,
+                          TopScreenFreeCameraGuestRuntime &runtime) {
+  const auto global = runtime.GlobalContextAddress;
+  std::uint16_t scene = 0U;
+  std::uint32_t header = 0U;
+  std::uint16_t vertexCount = 0U;
+  std::uint16_t polygonCount = 0U;
+  std::uint32_t vertexList = 0U;
+  std::uint32_t polygonList = 0U;
+  if (!memory.Read16(global + 0x104U, &scene) ||
+      !memory.Read32(global + 0xA98U, &header) || header == 0U ||
+      !memory.Read16(header + 0x0CU, &vertexCount) ||
+      !memory.Read16(header + 0x0EU, &polygonCount) ||
+      !memory.Read32(header + 0x18U, &vertexList) ||
+      !memory.Read32(header + 0x1CU, &polygonList)) {
+    runtime.IgnoredFloorsSource = {};
+    runtime.IgnoredFloors.clear();
+    return;
+  }
+  const std::array<std::uint32_t, 5> source{
+      scene, header, vertexList, polygonList,
+      (static_cast<std::uint32_t>(vertexCount) << 16U) | polygonCount};
+  if (source == runtime.IgnoredFloorsSource) return;
+  runtime.IgnoredFloorsSource = source;
+  runtime.IgnoredFloors.clear();
+  std::vector<std::uint8_t> vertices(vertexCount * kTopScreenCollisionVertexSize);
+  std::vector<std::uint8_t> polygons(polygonCount * kTopScreenCollisionPolygonSize);
+  if (vertexList == 0U || polygonList == 0U ||
+      !memory.ReadBytes(vertexList, vertices) ||
+      !memory.ReadBytes(polygonList, polygons)) return;
+  runtime.IgnoredFloors = DecodeTopScreenCameraIgnoredFloors(polygons, vertices);
+}
+
+} // namespace
+
 bool CommitTopScreenFreeCameraCollision(
     NativeA32Memory &memory, TopScreenFreeCameraGuestRuntime *runtime,
     std::string *error) {
@@ -330,12 +371,28 @@ bool CommitTopScreenFreeCameraCollision(
                 &intendedEye) ||
       !ReadVec3(memory, camera + 0x80U, &currentAt) ||
       !ReadVec3(memory, camera + 0x8CU, &currentEye)) return false;
+  // Camera_BGCheckInfo stopped the eye in front of what it tests; the floors
+  // it passes through would let it sink below the ground, so they stop it
+  // here, both where it heads and where it is drawn.
+  RefreshIgnoredFloors(memory, *runtime);
+  const auto &floors = runtime->IgnoredFloors;
+  bool stopped = false;
+  if (const auto clipped =
+          ClipTopScreenFreeCameraToFloors(intendedAt, intendedEye, floors)) {
+    intendedEye = *clipped;
+    stopped = true;
+  }
   const float step =
       runtime->Camera.Smoothing ? kTopScreenFreeCameraFollowStep : 1.0F;
   const auto at = InterpolateTopScreenFreeCameraPosition(
       currentAt, intendedAt, step);
-  const auto eye = InterpolateTopScreenFreeCameraPosition(
+  auto eye = InterpolateTopScreenFreeCameraPosition(
       currentEye, intendedEye, step);
+  if (const auto clipped = ClipTopScreenFreeCameraToFloors(at, eye, floors)) {
+    eye = *clipped;
+    stopped = true;
+  }
+  runtime->IgnoredFloorStops += stopped ? 1U : 0U;
   if (!WriteVec3(memory, camera + 0x80U, at) ||
       !WriteVec3(memory, camera + 0x8CU, eye) ||
       !WriteVec3(memory, camera + 0xA4U, eye) ||

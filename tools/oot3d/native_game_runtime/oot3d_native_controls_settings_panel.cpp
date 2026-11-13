@@ -243,7 +243,13 @@ class NativeControlsSettingsPanel final
         if (ImGui::CollapsingHeader("Motion calibration")) DrawCalibration();
       });
       section("Shortcuts", [&] {
-        if (mTopScreen) DrawTopScreenActionBindings(mTopDraft);
+        const auto gamepad = [&](NativeControlAction action) {
+          return mControlDraft.Bindings[static_cast<std::size_t>(action)].Gamepad;
+        };
+        if (mTopScreen)
+          DrawTopScreenActionBindings(
+              mTopDraft, gamepad(NativeControlAction::Zr) == NativeGamepadButton::RightShoulder,
+              gamepad(NativeControlAction::Zl) == NativeGamepadButton::LeftShoulder);
         else ImGui::TextDisabled("TopScreen profile is not active");
       });
       ImGui::EndTabBar();

@@ -107,6 +107,26 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
           r'TopScreenCamera\.Camera\.Smoothing =\s+Oot3dNativeGame::LiveFreeCameraSmoothing\(\)\.load\(',
           "oot3d_top_screen_mod_profile_tests"),
+    # --- 11/12 (after 0.2.3): the free camera went below the ground in the Forest Temple ---
+    Guard("free camera sank below some floors in the Forest Temple: Camera_BGCheckInfo passes through "
+          "polygons with the ignore-camera flag (78 floors there), so the commit stops the eye at them, "
+          "where it heads and where it is drawn",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp",
+          r'RefreshIgnoredFloors\(memory, \*runtime\);.*?'
+          r'ClipTopScreenFreeCameraToFloors\(intendedAt, intendedEye, floors\).*?'
+          r'InterpolateTopScreenFreeCameraPosition\(\s*currentEye, intendedEye, step\);.*?'
+          r'ClipTopScreenFreeCameraToFloors\(at, eye, floors\)',
+          "oot3d_top_screen_mod_profile_tests (ignore-camera floors)"),
+    Guard("free camera floors: only flagged floors on their own plane, crossed from above",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_camera.cpp",
+          r'if \(\(first & kIgnoreCameraFlag\) == 0U\) continue;.*?if \(floor\.Normal\.Y <= 0\.5F\) continue;.*?'
+          r'<= kFloorPlaneTolerance;.*?if \(!\(fromSide > 0\.0F && toSide < 0\.0F\)\) continue;',
+          "oot3d_top_screen_mod_profile_tests (ignore-camera floors)"),
+    Guard("Controls > Shortcuts named the item lanes Item ZR / Item ZL while the items are on R / L: the "
+          "labels follow the item bindings, as the HUD's do",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_control_widgets.h",
+          r'itemIZr \? "Item ZR" : "Item R", itemIIZl \? "Item ZL" : "Item L"',
+          forbid=r'"Item ZR", "Item ZL"'),
     # --- 11/09: far Kokiri Forest objects still popped in at Draw distance Maximum (logs25) ---
     Guard("far objects held back at Draw distance Maximum: 32 extensions per walk for every choice (logs25: "
           "up to 14 capped a step in Kokiri Forest); the limit follows the choice",
