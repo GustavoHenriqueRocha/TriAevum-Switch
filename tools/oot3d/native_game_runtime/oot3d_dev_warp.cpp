@@ -24,7 +24,9 @@ constexpr uint32_t kSaveAge = kSaveContext + 0x04U;          // s32: 0 adult, 1 
 constexpr uint32_t kSaveCutscene = kSaveContext + 0x08U;     // s32
 constexpr uint32_t kSaveDayTime = kSaveContext + 0x0CU;      // u16
 constexpr uint32_t kSaveGameMode = kSaveContext + 0x14E4U;   // s32, 0 = normal gameplay
-constexpr uint32_t kSaveHealth = kSaveContext + 0x44U;       // s16 (log only)
+// s16, sixteenths of a heart: Health_ChangeBy's field (oot3d_damage_multiplier.h),
+// the TopScreen action gate's `health != 0` and the SoH save import (+0x44).
+constexpr uint32_t kSaveHealth = kSaveContext + 0x44U;
 // The N64 respawn state, 0x188 further than the N64 SaveContext (gameMode
 // 0x135C/0x14E4): Gameplay_SetupRespawnPoint (0x0036C494) writes the
 // RespawnData rows at +0x14F0 (0x1C each: pos, yaw +0x0C, playerParams +0x0E,
@@ -47,6 +49,10 @@ constexpr uint32_t kPlayerVoidDamage = 0x249EU;  // s8
 // PlayState fields (structural scenario contract and decomp).
 constexpr uint32_t kPlaySceneId = 0x104U;          // s16
 constexpr uint32_t kPlayPendingEntrance = 0x5C32U; // s16, negative when free
+// u8 transition trigger: the request helpers store their trigger (0x14) here
+// and 0x002E2E60 handles it while nonzero, then clears it
+// (decomp_support/scripts/build_transition_request_helper_semantics.py).
+constexpr uint32_t kPlayTransitionTrigger = 0x5C2DU;
 // u8 linkAgeOnLoad: the N64 PlayState tail maps onto OOT3D's at -0xC1E8
 // (transitionTrigger 0x11E15/0x5C2D, nextEntranceIndex 0x11E1A/0x5C32,
 // transitionType 0x11E5E/0x5C76, numSetupActors 0x11DEB/0x5C03,
@@ -241,7 +247,7 @@ bool DevWarpRuntime::Observe(DevWarpGuest &guest, uint32_t playState, int16_t *p
   mPlayerActor = 0U;
   if (!ReadValue(guest, kSaveEntrance, observation.Entrance) || !ReadValue(guest, kSaveAge, observation.Age) ||
       !ReadValue(guest, kSaveCutscene, cutscene) || !ReadValue(guest, kSaveDayTime, observation.DayTime) ||
-      !ReadValue(guest, kSaveGameMode, gameMode)) {
+      !ReadValue(guest, kSaveGameMode, gameMode) || !ReadValue(guest, kSaveHealth, observation.Health)) {
     mStatus.Observation = observation;
     return false;
   }
@@ -251,6 +257,7 @@ bool DevWarpRuntime::Observe(DevWarpGuest &guest, uint32_t playState, int16_t *p
     if (!ReadValue(guest, playState + kPlaySceneId, observation.Scene) ||
         !ReadValue(guest, playState + OOT3D_CURRENT_ROOM_PLAY_OFFSET, observation.Room) ||
         !ReadValue(guest, playState + kPlayPendingEntrance, *pendingEntrance) ||
+        !ReadValue(guest, playState + kPlayTransitionTrigger, observation.TransitionTrigger) ||
         !ReadValue(guest, playState + kPlayLinkAgeOnLoad, ageOnLoad) ||
         !ReadValue(guest, playState + kPlayPlayerHead, player)) {
       mStatus.Observation = observation;
@@ -432,13 +439,20 @@ void DevWarpRuntime::Advance(DevWarpGuest &guest, uint32_t playState, uint64_t g
 
   if (!mPending.has_value()) return;
   if (!observed || !observation.Gameplay) {
-    mStatus.Phase = DevWarpPhase::Waiting;
-    mStatus.Message = "Waiting for gameplay: warps start from normal play (not the title, a cutscene or a menu).";
+    Defer("not_gameplay", "Waiting for gameplay: warps start from normal play (not the title, a cutscene or a menu).",
+          guestFrame);
     return;
   }
-  if (pendingEntrance >= 0) {
-    mStatus.Phase = DevWarpPhase::Waiting;
-    mStatus.Message = "Waiting for the current transition to finish...";
+  if (pendingEntrance >= 0 || observation.TransitionTrigger != 0U) {
+    Defer("transition", "Waiting for the current transition to finish...", guestFrame);
+    return;
+  }
+  // The game mode stays normal play while Link dies and in the game over: a
+  // warp then left the game in a state that later read a null pointer
+  // (docs/pesquisas/2026-11-12-crash-tour-grama-pc.md).
+  if (observation.Health <= 0) {
+    Defer("link_dying", "Waiting: Link is dying or dead (health 0); the warp starts once he has health again.",
+          guestFrame);
     return;
   }
   auto request = std::move(*mPending);
@@ -459,6 +473,19 @@ void DevWarpRuntime::Advance(DevWarpGuest &guest, uint32_t playState, uint64_t g
   mStatus.Message = "Warping to " + request.Label + " (entrance " + Hex4(request.Entrance) + ")...";
   mActive = std::move(request);
   Report(guest, "requested", guestFrame);
+}
+
+void DevWarpRuntime::Defer(const char *reason, const char *message, uint64_t guestFrame) {
+  mStatus.Phase = DevWarpPhase::Waiting;
+  mStatus.Message = message;
+  if (mPending->Deferred == reason) return;
+  mPending->Deferred = reason;
+  const auto &o = mStatus.Observation;
+  std::fprintf(stderr,
+               "TRIAEVUM_DEV_WARP deferred target=\"%s\" reason=%s frame=%llu scene=%d health=%d "
+               "transition_trigger=%u gameplay=%d\n",
+               mPending->Label.c_str(), reason, static_cast<unsigned long long>(guestFrame), o.Scene, o.Health,
+               o.TransitionTrigger, o.Gameplay ? 1 : 0);
 }
 
 void DevWarpRuntime::Load() {

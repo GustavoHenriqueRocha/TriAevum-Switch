@@ -993,6 +993,14 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
           r'Ship::WriteConfigFileAtomically\(mStorage,',
           forbid=r'std::filesystem::rename\(temporary, mStorage'),
+    # --- 12/11: the lab tour warped while Link was dying (health 0, game mode still normal play); the
+    # game later read a null pointer at 0x2C09D4 (docs/pesquisas/2026-11-12-crash-tour-grama-pc.md).
+    Guard("dev warp started while Link was dying or a transition trigger was set (tour crash 0x2C09D4)",
+          "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
+          r'if \(pendingEntrance >= 0 \|\| observation\.TransitionTrigger != 0U\) \{\s+Defer\("transition".*?'
+          r'if \(observation\.Health <= 0\) \{\s+Defer\("link_dying".*?\s+return;\s+\}\s+'
+          r'auto request = std::move\(\*mPending\);',
+          "oot3d_dev_warp_tests (DyingOrTransitionDefers)"),
     Guard("savestate preferences didn't save on Switch (rename over an existing file gives EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_savestate_library.cpp",
           r'Ship::WriteConfigFileAtomically\(mPreferencesPath,',

@@ -27,9 +27,41 @@ grama? Foi a mescla do John? Já tinha acontecido?
 - Primeira vez em todos os tours salvos.
 
 ## Decisão
-Nenhuma ainda: falta saber se repete e quem zerou aquela palavra.
+Travar o warp de desenvolvimento durante a morte e a transição (seção abaixo); continua em
+aberto quem zerou aquela palavra.
 
-## Em aberto
+## Causa provável (relato do Gustavo) e correção
+- Relato do Gustavo (observado no console): o Link estava morrendo (animação de morte / game over)
+  quando o tour do lab mandou um warp; o jogo ficou num estado estranho e caiu depois em 0x2C09D4.
+- Confirmado no código: o warp de desenvolvimento (`DevWarpRuntime::Advance`) só esperava por
+  "gameplay" (`gameMode == 0` e sem cutscene de título) e por `PlayState+0x5C32 >= 0`. Durante a
+  morte e o game over o `gameMode` continua 0 (mesmo que no N64), então o warp passava. O teste
+  sintético novo (`DyingOrTransitionDefers`) viu isso: `requested ... health=0`.
+- Correção: o pedido pendente fica em `Waiting` enquanto
+  - a vida (save context +0x44, s16 em dezesseis avos de coração) é <= 0. Fonte do campo:
+    `oot3d_damage_multiplier.h:6-8` (Health_ChangeBy), `oot3d_top_screen_gameplay_action_consumer.cpp:85`
+    (portão `health != 0` do TopScreen) e `tools/oot3d/soh_save_to_oot3d.py:86`;
+  - o gatilho de transição `PlayState+0x5C2D` é diferente de 0. Fonte:
+    `decomp_support/scripts/build_transition_request_helper_semantics.py:242-247` (os helpers
+    gravam o gatilho 0x14 ali; 0x002E2E60 trata enquanto não é zero e zera depois).
+  Cada mudança de motivo sai uma vez no log: `TRIAEVUM_DEV_WARP deferred target=... reason=link_dying|
+  transition|not_gameplay`. A op `warp` do lab continua com o limite de 3600 quadros: se o Link não
+  voltar a ter vida (tela de game over parada), ela responde `timeout` com o motivo e o tour segue.
+- Teste: `oot3d_dev_warp_tests` (`DyingOrTransitionDefers`), falhou antes ("a warp started while Link
+  was dying (health 0)") e passa depois (38 checagens); guarda em `tests/switch/test_bug_guards.py`.
+
+## Em aberto (depois da correção)
+- Hipótese, sem prova: que o warp durante a morte tenha zerado a palavra em 0x08723838. Falta repetir o
+  tour com a trava e ver se o crash some.
+- Revive por fada: a vida sobe aos poucos enquanto a fada ainda age; o warp pode sair nesse intervalo.
+  O bit de morte do Player (N64 `PLAYER_STATE1_DEAD` 0x80, stateFlags1 em +0x1710 no OOT3D) não foi
+  conferido no código do OOT3D e não foi usado.
+- Fade de entrada da cena nova: não se sabe se o OOT3D mantém +0x5C2D diferente de 0 nele (no N64 é
+  `TRANS_TRIGGER_END`); `PlayState+0x7F12` (logado como `transition_state`) ficou sem semântica conferida.
+- Um pedido adiado que deu `timeout` no lab continua pendente e sai quando o estado ficar seguro
+  (ou é substituído pelo próximo warp do tour).
+
+## Em aberto (antes da correção)
 - Repetir o tour (mesmo save) para ver se o crash e os travamentos se repetem.
 - Simbolizar a pilha dos travamentos: `nm` no ELF do Ryzen (`build/oot3d_native_game.elf`, 17:43)
   deu mapeamento sem sentido (thread de render "parada" em `_mesa_MapBufferRange`); falta a base certa.

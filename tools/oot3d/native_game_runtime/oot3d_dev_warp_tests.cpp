@@ -90,6 +90,7 @@ FakeGuest Game(int16_t scene) {
   guest.Put<int32_t>(kSave, 0x00BB);
   guest.Put<int32_t>(kSave + 4U, 1);
   guest.Put<uint16_t>(kSave + 0x0CU, 0x6000U);
+  guest.Put<int16_t>(kSave + 0x44U, 0x30);  // three hearts: Link is alive
   guest.Put<int32_t>(kRespawnFlag, 1);  // left by an earlier void-out
   guest.Put<int16_t>(kPlay + 0x104U, scene);
   guest.Put<uint8_t>(kPlay + 0x4C30U, 2U);
@@ -255,6 +256,36 @@ void GrottoAndAdmission() {
           "a grotto with a mismatching way back is offered");
 }
 
+// The lab tour of 12/11 warped while Link was dying (health 0, game mode
+// still normal play) and the game later read a null pointer at 0x2C09D4
+// (docs/pesquisas/2026-11-12-crash-tour-grama-pc.md). A warp waits while
+// health (save context +0x44) is 0 and while the PlayState's transition
+// trigger (+0x5C2D) is set, and goes once both are clear.
+void DyingOrTransitionDefers() {
+  auto guest = Game(85);
+  DevWarpRuntime warp({});
+  uint64_t frame = 1;
+  warp.Advance(guest, kPlay, frame++);
+  guest.Put<int16_t>(kSave + 0x44U, 0);  // Link is dying: no health left
+  warp.WarpTo(Better("Near Drawbridge"), DevWarpAge::Child, false);
+  for (int step = 0; step < 5; ++step) warp.Advance(guest, kPlay, frame++);
+  Require(guest.Requests.empty(), "a warp started while Link was dying (health 0)");
+  Require(warp.Status().Phase == DevWarpPhase::Waiting &&
+              warp.Status().Message.find("dying") != std::string::npos,
+          "the dying wait is not shown: " + warp.Status().Message);
+  Require(guest.Get<int32_t>(kRespawnFlag) == 1, "the respawn flag was written while Link was dying");
+  // Revived (fairy) but a transition trigger is still set: keep waiting.
+  guest.Put<int16_t>(kSave + 0x44U, 0x30);
+  guest.Put<uint8_t>(kPlay + 0x5C2DU, 0x14U);
+  warp.Advance(guest, kPlay, frame++);
+  Require(guest.Requests.empty(), "a warp started while the transition trigger was set");
+  Require(warp.Status().Phase == DevWarpPhase::Waiting, "the transition wait is not shown");
+  guest.Put<uint8_t>(kPlay + 0x5C2DU, 0U);
+  warp.Advance(guest, kPlay, frame++);
+  Require(guest.Requests.size() == 1U && warp.Status().Phase == DevWarpPhase::Requested,
+          "the deferred warp did not start once Link was alive and no transition was set");
+}
+
 void PersistenceAndBoot() {
   const auto path = std::filesystem::temp_directory_path() / "triaevum-dev-warp-test.json";
   std::filesystem::remove(path);
@@ -293,6 +324,7 @@ int main() try {
   SceneEntranceWarp();
   WarpPointRespawn();
   GrottoAndAdmission();
+  DyingOrTransitionDefers();
   PersistenceAndBoot();
   std::cout << "dev warp tests passed: " << gChecks << " checks\n";
   return 0;

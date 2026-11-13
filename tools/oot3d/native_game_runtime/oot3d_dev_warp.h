@@ -66,6 +66,11 @@ struct DevWarpObservation {
   int32_t Age = 0;
   int32_t AgeOnLoad = -1;  // PlayState linkAgeOnLoad
   uint16_t DayTime = 0;
+  // Save context +0x44, sixteenths of a heart: 0 while Link is dying, in the
+  // game over and until a fairy or the continue gives health back.
+  int16_t Health = 0;
+  // PlayState +0x5C2D: nonzero while a transition is requested or starting.
+  uint8_t TransitionTrigger = 0;
   bool Player = false;
   float Position[3]{};
   int16_t RotY = 0;
@@ -138,10 +143,14 @@ class DevWarpRuntime {
     std::optional<bool> Night;
     DevWarpPoint Point;
     DevWarpGrotto Grotto{};
+    // Why the request is waiting, logged once per change (static text).
+    const char *Deferred = nullptr;
   };
 
   bool Observe(DevWarpGuest &guest, uint32_t playState, int16_t *pendingEntrance);
   bool ReadEntranceTable(DevWarpGuest &guest);
+  // Keeps the pending request waiting, with the reason in the status.
+  void Defer(const char *reason, const char *message, uint64_t guestFrame);
   bool Apply(DevWarpGuest &guest, uint32_t playState, const Request &request, std::string *error);
   void Report(DevWarpGuest &guest, const char *event, uint64_t guestFrame);
   void Load();
