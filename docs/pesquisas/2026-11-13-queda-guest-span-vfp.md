@@ -28,6 +28,27 @@ Depois da mescla do `english` do John, o guest ficou ~1-2 ms mais lento em todas
   auditoria ok (12439 funções, 0 resíduo); 247 arquivos diferentes do C++ do John. Leva também a trava do warp
   durante a morte (441d64d5).
 
+## Resultados dos tours de 13/11 (guest médio por área, ms; `area_campos.py`, campo `guest`)
+| área | p7e | r1 (PRs 1-5) | r2 | nospan sem grama | nospan |
+|---|---|---|---|---|---|
+| Market | 10,70 | 10,63 | 11,03 | 11,95 | 13,51 |
+| Kakariko | 10,32 | 9,83 | 10,43 | 11,04 | 11,87 |
+| Hyrule Field | 8,13 | 7,88 | 8,55 | 9,33 | 9,81 |
+| Water Temple | 10,76 | 7,55 | 8,11 | 12,09 | 12,05 |
+| Kokiri | 7,75 | 7,66 | 8,01 | 9,13 | 9,23 |
+| Bottom of the Well | 9,63 | 7,80 | 8,17 | 11,00 | 11,06 |
+
+- **Span VFP: descartado.** `nospan` = build atual (Market 13,51 × 13,55).
+- **Grama: parte da queda.** Sem `config/grass` o Market cai 1,56 ms; o render volta ao normal no Market
+  (`rt_ms_step` 13,9 → 6,5; `plan_lock_waits_render` ~600 → 0; `plan_late_draws` ~250 → 0): o render fica lento
+  e o guest espera por ele. Fora do Market a grama custa ≤ 0,8 ms. A busca de chão de grama ("sources") em área
+  sem grama custa só 0,1-0,3 ms/quadro no render (`deko3d.txt`).
+- **`plan_resolve_locks` (447 → ~12.000) é pista falsa:** sem grama fica alto mas sem espera; subiu com a contagem
+  nova do plano paralelo do John (3c819d5e).
+- **Sobra +1,0-1,4 ms em toda área** (até +3-4 ms em Water Temple/Bottom of the Well) entre r1/r2 e a `nospan`
+  sem grama: 276 commits (227 do John). Suspeito testado em seguida: iluminação por pixel por padrão (3c9d3058;
+  os tours lentos rodaram com `lighting: mode perpixel`, a r1 não tinha a opção).
+
 ## Decisão
 Medir antes de mexer: tour normal com a `nospan`. Se o Market voltar perto de 10,7 ms, o span VFP é a causa e a
 decisão é entre tirar o span ou só para os tamanhos/caminhos que pioram. Se não voltar, o span sai da lista.
