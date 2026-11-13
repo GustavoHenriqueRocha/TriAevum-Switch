@@ -19,11 +19,15 @@ Regra dele (13/11): manter a essência do jogo; a sombra simples perde a origina
 | 199f309f | 0.2.4: sombra ligada e "Preserve scene brightness" ligado por padrão (environments/*.json). | Fora: muda o visual padrão. |
 
 ## Decisão
-Nada entra agora (Gustavo, 13/11: "não precisa comitar"). Candidatos se ele quiser: 8d70ff28 inteiro; do seletor,
-b57d9934 + a parte de oot3d_top_screen_dpad_items e window_frame de 221a425f, sem player_shadow.
+Primeiro nada entraria (Gustavo, 13/11: "não precisa comitar"). Depois, aprovado ("pode ser então") trazer:
+- 8d70ff28 inteiro → e35456dd (autor John; guardas 607/607, oot3d_top_screen_mod_profile_tests ok).
+- Seletor, depois que o Gustavo confirmou que segurar A falha no nosso build ("falha sim"): b57d9934 → acc809de
+  (cherry-pick -x) e só as partes de seletor de 694ee0f7 + 221a425f (dpad_items .cpp/.h/_tests e window_frame) →
+  ebb5d35d, com as 2 guardas do seletor (610/610; as duas falham no código anterior). Ficou de fora a troca
+  `simpleShadow.TakeFrame()` → `FrameForPublish()` de 694ee0f7, que depende da sombra nova.
 
 ## Alternativas rejeitadas
 - Trazer o branch inteiro: arrasta a sombra ligada por padrão e o brilho preservado (contra a regra da essência).
 
 ## Em aberto
-- Confirmar no nosso build se segurar A na página de itens falha (issue #13) antes de trazer a correção.
+- Teste no console: câmera livre no Forest Temple (não atravessar pisos) e segurar A + D-pad na página de itens.
