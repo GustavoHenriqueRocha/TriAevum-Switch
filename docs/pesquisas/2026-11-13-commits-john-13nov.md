@@ -29,5 +29,9 @@ Primeiro nada entraria (Gustavo, 13/11: "não precisa comitar"). Depois, aprovad
 ## Alternativas rejeitadas
 - Trazer o branch inteiro: arrasta a sombra ligada por padrão e o brilho preservado (contra a regra da essência).
 
+## Teste no console
+NRO camera-seletor (ebb5d35d, md5 d6d07efb68dda8db9659f12b2f0426b1), 13/11: o Gustavo testou a câmera livre e o
+seletor (segurar A + D-pad na página de itens): "tudo funciona". Configs do SD sem mudança (lighting = native).
+
 ## Em aberto
-- Teste no console: câmera livre no Forest Temple (não atravessar pisos) e segurar A + D-pad na página de itens.
+- Nada desta leva.
