@@ -630,8 +630,8 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 "%.2f-%.2f tall, at most %u per placement, %.1f MiB retained",
                 mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements", state->Settings.Rules.size(),
                 static_cast<double>(state->Profile.TuftsPerSquareMeter), state->Profile.BladesPerTuft,
-                static_cast<double>(state->Profile.TuftHeightMin), static_cast<double>(state->Profile.TuftHeightMax),
-                state->Profile.MaxAnchorsPerPlacement,
+                static_cast<double>(state->Settings.Generation.BladeHeightMin),
+                static_cast<double>(state->Settings.Generation.BladeHeightMax), state->Profile.MaxAnchorsPerPlacement,
                 static_cast<double>(state->Profile.RetainedBytes) / (1024.0 * 1024.0));
     LogProfile(*state);
     LogLod(*state);

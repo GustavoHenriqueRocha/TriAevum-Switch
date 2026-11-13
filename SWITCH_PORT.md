@@ -5457,6 +5457,10 @@ temple entry had `no shared placement 2` too.
   Still not the PC's: no crossed planes near the camera, no bend memory behind Link, no actor shadows
   on the grass, no dither at the draw distance. GPU cost to measure in a tour (more near vertices:
   75 per single-blade tuft against 45 for a 5-blade far tuft).
+- **Then (same day, after seeing it):** the PC's height looked artificial in Kakariko and the castle
+  ("there is no other texture layer there, it just does not match"; "maybe smaller still"): the
+  profile's `HeightFactor` 0.5 halves the placements' heights (3.84-6.26 before the preset's 1.15),
+  the width stays the PC's. Stored placements are rebuilt once (their generation changed).
 - Tests: `test_grass_lod.py` (`GrassPcMotion`), `oot3d_grass_switch_tests` (`SixtyFpsBudget`,
   `AppliesOnTopOfThePresetRules`, `TheBladeIsThePcPresetsAndTheDensityComesFromItsFile`), all seen
   failing before the change.

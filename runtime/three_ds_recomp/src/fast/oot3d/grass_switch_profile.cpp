@@ -291,8 +291,8 @@ void ApplyGrassSwitchProfile(const GrassSwitchProfile& profile, InteractiveGrass
     auto& generation = settings.Generation;
     generation.InstancesPerSquareMeter = profile.TuftsPerSquareMeter;
     generation.MinimumSpacing = profile.MinimumSpacing;
-    generation.BladeHeightMin = profile.TuftHeightMin;
-    generation.BladeHeightMax = std::max(profile.TuftHeightMin, profile.TuftHeightMax);
+    generation.BladeHeightMin = profile.TuftHeightMin * profile.HeightFactor;
+    generation.BladeHeightMax = std::max(profile.TuftHeightMin, profile.TuftHeightMax) * profile.HeightFactor;
     generation.BladeWidthMin = profile.BladeWidthMin;
     generation.BladeWidthMax = std::max(profile.BladeWidthMin, profile.BladeWidthMax);
     settings.Appearance.BladeSegments = 1U;

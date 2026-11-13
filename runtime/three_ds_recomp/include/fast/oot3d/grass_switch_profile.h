@@ -142,6 +142,10 @@ struct GrassSwitchProfile {
     // Width of one blade of the tuft (the tuft is BladesPerTuft blades wide).
     float BladeWidthMin = 1.8F;
     float BladeWidthMax = 1.94F;
+    // The placements' heights are the tuft's times this: half the PC's, the
+    // width the PC's (Gustavo, 13/11: the PC's height looked artificial in
+    // Kakariko and the castle; half chosen).
+    float HeightFactor = 0.5F;
     uint8_t BladesPerTuft = 5U;
     // The colour is the preset's (its TextureColorInfluence, 0.22 on the PC):
     // the profile's 0.85 made the grass the ground's colour (13/11).

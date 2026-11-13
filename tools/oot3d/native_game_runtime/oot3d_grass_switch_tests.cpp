@@ -243,6 +243,15 @@ TEST(Oot3dGrassSwitchProfile, TheBladeIsThePcPresetsAndTheDensityComesFromItsFil
     EXPECT_FLOAT_EQ(profile.TuftHeightMax, 12.51F);
     EXPECT_FLOAT_EQ(profile.BladeWidthMin, 1.8F);
     EXPECT_FLOAT_EQ(profile.BladeWidthMax, 1.94F);
+    // Half the PC's height (Gustavo, 13/11: "the grass too artificial";
+    // half of it chosen): the placements' blades, the width as the PC's.
+    InteractiveGrassSettings settings;
+    ApplyGrassSwitchProfile(profile, settings);
+    EXPECT_FLOAT_EQ(settings.Generation.BladeHeightMin, 7.68F * 0.5F);
+    EXPECT_FLOAT_EQ(settings.Generation.BladeHeightMax, 12.51F * 0.5F);
+    EXPECT_FLOAT_EQ(settings.Generation.BladeWidthMin, 1.8F);
+    ApplyGrassSwitchProfile(profile, settings);
+    EXPECT_FLOAT_EQ(settings.Generation.BladeHeightMax, 12.51F * 0.5F); // applied again: the same
     // 100 tufts of 5 blades: 500 blades per m2 against the PC's ~1049 (80 before, 13/11).
     EXPECT_EQ(kGrassDensityDefault, 100.0F);
     EXPECT_EQ(ParseGrassSwitchDensity(std::nullopt), kGrassDensityDefault);
