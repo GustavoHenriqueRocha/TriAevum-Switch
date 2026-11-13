@@ -43,7 +43,7 @@ Pendente do Gustavo. Recomendação: não portar o preset do PC; se quiser o vis
 2. memória da dobra (rastro atrás do Link), 1-2 sessões;
 3. toon e rim, meia sessão.
 Muito do visual do PC já foi trazido (forma em 3 segmentos f0ce6d09, curva longe 0d83b373, máscara
-c66c97b0, tamanho e→ metade 7826c82d, cor/vento/LOD 740353e4).
+c66c97b0, tamanho e65d9a30 e metade da altura 7826c82d, cor/vento/LOD 740353e4).
 
 ## Alternativas rejeitadas
 - Port inteiro com o preset do PC: GPU (estimativa acima), memória (~32 MB de âncoras + 34 MB de
