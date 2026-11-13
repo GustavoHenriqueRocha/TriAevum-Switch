@@ -137,6 +137,11 @@ def main(argv: Sequence[str] | None = None) -> int:
              "constant, like LDR literals: no page-flag check, load or fault "
              "path (same values)",
     )
+    parser.add_argument(
+        "--no-vfp-word-span", action="store_true",
+        help="VLDM/VSTM/VPUSH/VPOP of 2+ words keep only the word-by-word "
+             "lowering (no ReadWordsFast/WriteWordsFast span, as before d0c42b4d)",
+    )
     args = parser.parse_args(argv)
     if args.shards <= 0:
         parser.error("--shards must be positive")
@@ -164,6 +169,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sparse_block_entries=args.sparse_block_entries,
         hook_gates=load_hook_gates(args.hook_gates) if args.sparse_block_entries else None,
         fold_vfp_literals=args.fold_vfp_literals,
+        no_vfp_word_span=args.no_vfp_word_span,
     )
     if args.guest_overrides is not None:
         from apply_guest_overrides import apply as apply_overrides, load_manifest

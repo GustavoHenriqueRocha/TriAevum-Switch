@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import whole_aot_cpp
 from whole_aot_cpp import Instruction, _emit_vfp
 
 
@@ -243,6 +244,23 @@ void Check(Run run, int index) {
                            check=True, capture_output=True, text=True, timeout=120)
             run = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_no_vfp_word_span_restores_the_word_by_word_lowering(self) -> None:
+        # Regression lead of 12/11 (guest +1-2 ms after the english merge): the
+        # VFP word span of d0c42b4d changed 2938 of the 2972 functions that
+        # differ from p7e. --no-vfp-word-span must give back the old lowering.
+        cases = (0xED2D8B04, 0xECBD8B04, 0xEC900A04, 0xEC800A04)  # VPUSH/VPOP {d8-d9}, VLDM/VSTM {s0-s3}
+        spanned = ["\n".join(_emit_vfp(Instruction(0x1000, raw))) for raw in cases]
+        for text in spanned:
+            self.assertIn("WordsFast(firstAddress, spanWords", text)
+        whole_aot_cpp._VFP_WORD_SPAN = False
+        try:
+            plain = ["\n".join(_emit_vfp(Instruction(0x1000, raw))) for raw in cases]
+        finally:
+            whole_aot_cpp._VFP_WORD_SPAN = True
+        for text in plain:
+            self.assertNotIn("spanWords", text)
+            self.assertNotIn("WordsFast", text)
 
 
 if __name__ == "__main__":

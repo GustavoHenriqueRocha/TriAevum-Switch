@@ -156,6 +156,9 @@ _SPARSE_STATS: dict[str, int] = {}
 # load and no fault path. Text is mapped read-only for the whole process, so
 # the read always yields the code.bin bytes and can never fault.
 _FOLD_VFP_LITERALS = False
+# Cleared by generate() (--no-vfp-word-span): VLDM/VSTM/VPUSH/VPOP go back to
+# the word-by-word lowering only (before d0c42b4d), to measure the span's cost.
+_VFP_WORD_SPAN = True
 # Giant cold functions marked with GIANT_COLD_ATTRIBUTE (see generate).
 _GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
 # The pre-allocation scheduler (sched1, which on AArch64 GCC enables only at -O3)
@@ -1612,7 +1615,7 @@ def _vfp_word_span(
     its own scope, so fault order, partial stores and lane updates stay
     identical. A store snapshots the lanes first; guest memory never aliases
     the VFP registers, so the values are the same."""
-    if words < 2:
+    if words < 2 or not _VFP_WORD_SPAN:
         return per_word
     if load:
         return [
@@ -4013,6 +4016,7 @@ def generate(
     sparse_block_entries: bool = False,
     hook_gates: frozenset[int] | None = None,
     fold_vfp_literals: bool = False,
+    no_vfp_word_span: bool = False,
 ) -> dict[str, object]:
     """``giant_function_instructions`` > 0 marks the functions with at least
     that many guest instructions, except those in ``hot_entries`` (profile), with
@@ -4023,7 +4027,7 @@ def generate(
     (whole_aot_hook_gates.json). ``fold_vfp_literals``: see _FOLD_VFP_LITERALS."""
     global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
     global _VFP_ZERO_AWARE, _LEAN_STACK, _PROMOTE_REGISTERS
-    global _SPARSE_BLOCK_ENTRIES, _HOOK_GATES, _FOLD_VFP_LITERALS
+    global _SPARSE_BLOCK_ENTRIES, _HOOK_GATES, _FOLD_VFP_LITERALS, _VFP_WORD_SPAN
     if vfp_zero_aware and not native_vfp_aarch64:
         raise ValueError("--vfp-zero-aware requires --native-vfp-aarch64")
     if sparse_block_entries:
@@ -4041,6 +4045,7 @@ def generate(
         **({"sparse_block_entries": True,
             "hook_gates": sorted(hook_gates or ())} if sparse_block_entries else {}),
         **({"fold_vfp_literals": True} if fold_vfp_literals else {}),
+        **({"no_vfp_word_span": True} if no_vfp_word_span else {}),
     }
     if giant_function_instructions < 0:
         raise ValueError("giant function threshold must not be negative")
@@ -4115,7 +4120,7 @@ def generate(
         ) and all(
             cached.get(key, False) == (key in option_contract)
             for key in ("vfp_zero_aware", "lean_stack", "sparse_block_entries",
-                        "fold_vfp_literals")
+                        "fold_vfp_literals", "no_vfp_word_span")
         ) and all(
             (output / name).is_file() and
             _sha256((output / name).read_bytes()) == digest
@@ -4152,6 +4157,7 @@ def generate(
     _SPARSE_BLOCK_ENTRIES = sparse_block_entries
     _HOOK_GATES = frozenset(hook_gates or ()) if sparse_block_entries else frozenset()
     _FOLD_VFP_LITERALS = fold_vfp_literals
+    _VFP_WORD_SPAN = not no_vfp_word_span
     _GIANT_COLD_ENTRIES = frozenset(
         function.entry
         for function in functions
@@ -4175,6 +4181,7 @@ def generate(
         _SPARSE_BLOCK_ENTRIES = False
         _HOOK_GATES = frozenset()
         _FOLD_VFP_LITERALS = False
+        _VFP_WORD_SPAN = True
         _GIANT_COLD_ENTRIES = frozenset()
 
 
