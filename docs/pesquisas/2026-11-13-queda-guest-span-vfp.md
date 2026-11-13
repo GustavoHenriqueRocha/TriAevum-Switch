@@ -73,3 +73,30 @@ decisão é entre tirar o span ou só para os tamanhos/caminhos que pioram. Se n
 - O tour da `nospan` (FTP do Switch não apareceu em 2 h na madrugada de 13/11).
 - sys-clk: `clk_ipc_us` de 17-50 ms em algumas janelas.
 - Dois travamentos (20 s e 11 s) com a thread do jogo parada em frame_end na sessão do crash.
+
+## Atualização 13/11 à tarde: a grama no render, achada e corrigida
+Três builds de medição no tour normal (pastas `~/oot3d-work/bench/grama-medida`, `grama-memo`, `grama-filtro`;
+campos por área com `area_campos.py 6 <pastas>`, linhas `grass: frame N render|memo` do `deko3d.txt`):
+
+| Market (área 6) | sem grama | grama-medida | grama-memo | grama-filtro (5132a006) |
+|---|---|---|---|---|
+| FPS médio / mínimo | 60,0 / 60,0 | 53,8 / 44,6 | — | 59,4 / 57,7 |
+| perdidas por janela | 0 | 20,0 | — | 0,5 |
+| `rt_ms_step` | 6,53 | 13,85 | 12,97 | 7,34 |
+| tentativas de fonte (pior janela) | — | 3,39 ms/quadro | 3,41 ms/quadro | 0,39 ms/quadro |
+
+- O fim do quadro da grama (máscaras, cull, limpeza) custa ~0,1 ms/quadro: não era ele.
+- O custo era o teste de fonte de cada draw opaco (`PublishPicaGrassSource`), ~53 us por draw no Market contra 3-8 us
+  nas outras áreas. Decodificação de textura e `Resolve` custam ~0,04 ms/quadro; o memo acerta 90%.
+- Hipótese descartada: a geração do cache de texturas invalidando o memo (contadores da grama-memo).
+- Armadilha de medição: a troca de cena recria `PicaGrassSourceState` (`CheckGrassArea`) e zera contadores dele no
+  meio da janela; "33 mil tentativas contra 4,3 mil no memo" era isso.
+- Correção (pedido do Gustavo: deixar a decisão mais leve em vez de caçar o ponto exato): `GrassNonGroundTextures`,
+  textura já resolvida como não-chão sai antes da chave do memo. No Market ~24 mil draws por janela saem por ele.
+- `clk_ipc_us` (sys-clk) acompanhava a grama (22 us → 23,6 ms → 39 us): sintoma de CPU ocupada, não causa.
+- Kakariko: 57,8 → 60,0. Uma rodada só da grama-filtro; a diferença (3,4 → 0,39 ms) é maior que o ruído.
+
+## Em aberto (grama)
+- Por que cada chave/consulta do memo custava ~50 us só no Market (hash XOR de `GrassDrawMemoKeyHash` e a varredura
+  de `Store` com 4096 entradas são suspeitos): já não pesa, não investigado.
+- Segunda rodada da grama-filtro para confirmar.
