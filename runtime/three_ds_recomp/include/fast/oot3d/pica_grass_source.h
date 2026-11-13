@@ -12,6 +12,7 @@
 #include "fast/oot3d/grass_async_placement_builder.h"
 #include "fast/oot3d/grass_draw_memo.h"
 #include "fast/oot3d/grass_late_overlays.h"
+#include "fast/oot3d/grass_non_ground_textures.h"
 #include "fast/oot3d/grass_scene_bridge.h"
 #include "fast/oot3d/grass_geometry_registry.h"
 #include "fast/oot3d/graphics_settings.h"
@@ -27,12 +28,14 @@ namespace Fast::Oot3d {
 struct PicaGrassSourceState {
     GrassGeometryRegistry Geometry;
     GrassDrawMemo Memo;
+    // Textures already resolved as no ground: their draws skip the memo.
+    GrassNonGroundTextures NonGround;
     // Occurrences of one draw identity per render target, this frame.
     std::unordered_map<uint64_t, uint32_t> Occurrences;
     uint64_t Frame = 0;
     // Diagnostics, read and reset by the backend's window log.
     struct Counters {
-        uint64_t NoKey = 0, MemoHits = 0, MemoMisses = 0, Uncacheable = 0, Decodes = 0;
+        uint64_t NonGround = 0, NoKey = 0, MemoHits = 0, MemoMisses = 0, Uncacheable = 0, Decodes = 0;
         double ResolveMs = 0.0, DecodeMs = 0.0;
     } Counts;
 };

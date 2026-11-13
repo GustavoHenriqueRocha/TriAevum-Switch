@@ -178,16 +178,16 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     if (eligible && texture->NativeType == 0 && texture->CopyReferences.empty() && texture->Width >= 16 &&
         texture->Height >= 16 && !sources.Contains(*textureHash)) {
         const auto decodeBegin = std::chrono::steady_clock::now();
+        ++state.Counts.Decodes;
         const auto size = EncodedMipSize(texture->NativeFormat, texture->Width, texture->Height);
         std::vector<uint8_t> rgba;
         if (size && *size <= texture->NativeBytes.size() &&
             ::Oot3d::Renderer::DecodePicaTextureRgba8(texture->NativeFormat, texture->Width, texture->Height,
                                                       texture->NativeBytes.first(*size), rgba, nullptr)) {
+            state.Counts.DecodeMs +=
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decodeBegin).count();
             sources.ObserveDecoded(*textureHash, texture->Width, texture->Height, rgba);
         }
-        ++state.Counts.Decodes;
-        state.Counts.DecodeMs +=
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decodeBegin).count();
     }
     const uint64_t observedHash = texture == draw.Textures.end()
                                       ? 0U
@@ -196,6 +196,11 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     const bool configuredSource =
         texture != draw.Textures.end() &&
         GrassTwinRules::Instance().Configured(settings.Rules, observedHash, texture->Width, texture->Height, 0U);
+    if (!masksOnly && eligible && !configuredSource) {
+        if (const auto key = GrassNonGroundTextures::Key(draw.Textures)) {
+            state.NonGround.Remember(*key, state.Memo.Rules(settings, frameId), sources.Generation());
+        }
+    }
     // A ground is never its own overlay.
     if (masksOnly ? (!maskCandidate || (eligible && configuredSource)) : (!eligible || !configuredSource)) {
         return false;
@@ -588,10 +593,18 @@ bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t fram
         state.Occurrences.clear();
     }
     GrassStageTimer total(masksOnly ? GrassStage::Overlay : GrassStage::Source);
+    const uint64_t rules = state.Memo.Rules(settings, frameId);
+    const uint64_t textures = GrassTextureSourceCache::Instance().Generation();
+    if (!masksOnly) {
+        if (const auto ground = GrassNonGroundTextures::Key(draw.Textures);
+            ground && state.NonGround.Known(*ground, rules, textures)) {
+            ++state.Counts.NonGround;
+            return false;
+        }
+    }
     const bool perspective = UsesPicaPerspectiveProjection(draw.VertexUniformBytes);
-    const auto key = BuildGrassDrawMemoKey(draw, state.Memo.Rules(settings, frameId),
-                                           GrassTextureSourceCache::Instance().Generation(), true,
-                                           draw.FragmentShaderHooks.SamplesTexture(0), perspective, masksOnly);
+    const auto key = BuildGrassDrawMemoKey(draw, rules, textures, true, draw.FragmentShaderHooks.SamplesTexture(0),
+                                           perspective, masksOnly);
     auto* entry = key ? state.Memo.Find(*key, frameId) : nullptr;
     ++(key ? (entry ? state.Counts.MemoHits : state.Counts.MemoMisses) : state.Counts.NoKey);
     if (entry) {

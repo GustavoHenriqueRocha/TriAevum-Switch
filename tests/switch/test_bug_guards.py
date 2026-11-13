@@ -1089,6 +1089,15 @@ GUARDS = [
           r'const auto edgeX = \[&\]\(float native\) \{ return static_cast<int32_t>\(std::lround\(native \* scaleX\)\); \};',
           test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)",
           forbid=r'native \* scale\)\)'),
+    # --- 13/11: the Market at 53 fps with config/grass and no grass drawn (grama-medida tour) ---
+    Guard("grass on deko3d: the source test of every opaque draw cost 3.4 ms of render a frame in the Market; "
+          "a texture already resolved as no ground returns before the memo key",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'state\.NonGround\.Remember\(\*key, state\.Memo\.Rules\(settings, frameId\), sources\.Generation\(\)\);.*?'
+          r'ground && state\.NonGround\.Known\(\*ground, rules, textures\)\) \{\s+'
+          r'\+\+state\.Counts\.NonGround;\s+return false;\s+\}\s+\}\s+'
+          r'const bool perspective = .*?const auto key = BuildGrassDrawMemoKey\(',
+          test="oot3d_grass_switch_tests (Oot3dGrassNonGroundTextures)"),
     # --- 12/11: grass grew on the castle's concrete (Gustavo's tour of the "curva" build) ---
     Guard("grass grew under paths, floors and planters drawn over a ground on deko3d: its draws were never "
           "published as covering overlays (the PC's masks), so every placement had none",

@@ -6,6 +6,7 @@
 #include "fast/oot3d/grass_persistent_placement_cache.h"
 #include "fast/oot3d/grass_instance_stream.h"
 #include "fast/oot3d/grass_late_overlays.h"
+#include "fast/oot3d/grass_non_ground_textures.h"
 #include "fast/oot3d/grass_scene_hold.h"
 #include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_surface_extractor.h"
@@ -2820,4 +2821,70 @@ TEST(Oot3dGrassOverlays, ASourceWaitsOneFrameAtMostAndSetsOfOldSourcesGo) {
     EXPECT_EQ(late.Size(), 1U);
     late.Collect(12 + kGrassLateOverlayKeepFrames + 1, {}, [&](const GrassSceneMesh&) { return set; });
     EXPECT_EQ(late.Size(), 0U);
+}
+
+// 13/11 (grama-medida tour): in the Market, with no grass drawn, the source
+// test of every opaque draw cost 3.4 ms of render a frame (0.1-0.4 elsewhere).
+// A texture already resolved as no ground makes its next draws return before
+// the memo key, for as long as the rules and the decoded textures stay.
+namespace {
+Fast::Renderer3ds::PicaTextureView NonGroundTexture(uint64_t hash) {
+    Fast::Renderer3ds::PicaTextureView texture;
+    texture.Slot = 0;
+    texture.Width = 256;
+    texture.Height = 128;
+    texture.NativeFormat = 12;
+    texture.NativeBaseLevelContentHash = hash;
+    texture.NativeBaseLevelContentHashAvailable = true;
+    return texture;
+}
+} // namespace
+
+TEST(Oot3dGrassNonGroundTextures, ARememberedTextureIsKnownUntilRulesOrTexturesChange) {
+    std::array textures{NonGroundTexture(0x1234)};
+    const auto key = GrassNonGroundTextures::Key(textures);
+    ASSERT_TRUE(key.has_value());
+    GrassNonGroundTextures known;
+    EXPECT_FALSE(known.Known(*key, 1, 10));
+    known.Remember(*key, 1, 10);
+    EXPECT_TRUE(known.Known(*key, 1, 10));
+    std::array other{NonGroundTexture(0x5678)};
+    EXPECT_FALSE(known.Known(*GrassNonGroundTextures::Key(other), 1, 10));
+    // A new decoded texture can make this one a rule's twin; new rules can name it.
+    EXPECT_FALSE(known.Known(*key, 1, 11));
+    known.Remember(*key, 1, 11);
+    EXPECT_FALSE(known.Known(*key, 2, 11));
+}
+
+TEST(Oot3dGrassNonGroundTextures, OnlyAPlainSlotZeroTextureWithItsBaseLevelHashHasAKey) {
+    std::array plain{NonGroundTexture(0x1234)};
+    EXPECT_TRUE(GrassNonGroundTextures::Key(plain).has_value());
+    EXPECT_FALSE(GrassNonGroundTextures::Key(std::span<const Fast::Renderer3ds::PicaTextureView>{}).has_value());
+    auto slot = plain;
+    slot[0].Slot = 1;
+    EXPECT_FALSE(GrassNonGroundTextures::Key(slot).has_value());
+    auto noHash = plain;
+    noHash[0].NativeBaseLevelContentHashAvailable = false;
+    EXPECT_FALSE(GrassNonGroundTextures::Key(noHash).has_value());
+    auto cube = plain;
+    cube[0].NativeType = 1;
+    EXPECT_FALSE(GrassNonGroundTextures::Key(cube).has_value());
+    const std::array<Fast::Renderer3ds::PicaTextureCopyReference, 1> copies{};
+    auto copied = plain;
+    copied[0].CopyReferences = copies;
+    EXPECT_FALSE(GrassNonGroundTextures::Key(copied).has_value());
+    // A rule matches the image and its size: the same bytes at another size are another texture.
+    auto wide = plain;
+    wide[0].Width = 128;
+    EXPECT_NE(GrassNonGroundTextures::Key(wide), GrassNonGroundTextures::Key(plain));
+    auto format = plain;
+    format[0].NativeFormat = 13;
+    EXPECT_NE(GrassNonGroundTextures::Key(format), GrassNonGroundTextures::Key(plain));
+}
+
+TEST(Oot3dGrassNonGroundTextures, TheSetStaysBounded) {
+    GrassNonGroundTextures known;
+    for (uint64_t i = 0; i < 3 * GrassNonGroundTextures::kMaxTextures; ++i)
+        known.Remember(i, 1, 1);
+    EXPECT_LE(known.Size(), GrassNonGroundTextures::kMaxTextures);
 }

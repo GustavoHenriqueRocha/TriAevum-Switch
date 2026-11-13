@@ -726,6 +726,12 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
         ++state->OverlayCalls;
         state->OverlayMs += MillisecondsSince(overlayBegin);
     };
+    const auto sourceBegin = std::chrono::steady_clock::now();
+    const auto sourceTried = [&](const char* result) {
+        ++state->SourceCalls;
+        state->SourceMs += MillisecondsSince(sourceBegin);
+        branch = result;
+    };
     if (state->InBetweenFrame == frame) {
         if (draw.Composition.Layer != Layer::OpaqueWorld) {
             return;
@@ -743,13 +749,9 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
         overlay();
     } else {
         try {
-            const auto sourceBegin = std::chrono::steady_clock::now();
-            const bool published = Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame,
-                                                                 state->DrawOrder);
-            ++state->SourceCalls;
-            state->SourceMs += MillisecondsSince(sourceBegin);
-            branch = published ? "source" : "not a source";
-            if (published) {
+            if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame,
+                                              state->DrawOrder)) {
+                sourceTried("source");
                 ++state->DrawOrder;
                 ++state->Published;
                 sourceDrawn();
@@ -758,6 +760,7 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
                                                               draw.FramebufferColorPhysicalAddress),
                                                 *clip);
             } else {
+                sourceTried("not a source");
                 overlay();
             }
         } catch (const std::exception& exception) {
@@ -1146,9 +1149,10 @@ void GrassEndFrame(uint64_t frame) {
         state->Slowest.Branch, state->Slowest.Layer, static_cast<unsigned long long>(state->Slowest.Geometry),
         state->Slowest.Texture, state->Slowest.Width, state->Slowest.Height);
     const auto& counts = state->Sources->Counts;
-    Log("grass: frame %llu memo | hits %llu misses %llu no key %llu uncacheable %llu | resolve %.3f ms/frame | "
-        "decodes %llu %.3f ms/frame | texture generation %llu",
-        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(counts.MemoHits),
+    Log("grass: frame %llu memo | not ground %llu hits %llu misses %llu no key %llu uncacheable %llu | resolve %.3f "
+        "ms/frame | decodes %llu %.3f ms/frame | texture generation %llu",
+        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(counts.NonGround),
+        static_cast<unsigned long long>(counts.MemoHits),
         static_cast<unsigned long long>(counts.MemoMisses), static_cast<unsigned long long>(counts.NoKey),
         static_cast<unsigned long long>(counts.Uncacheable), counts.ResolveMs / frames,
         static_cast<unsigned long long>(counts.Decodes), counts.DecodeMs / frames,
