@@ -123,6 +123,13 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   determinística" de 26/10 era uma linha só (sessão 96, tour16) relida a cada tour. → Confira de
   que sessão é a linha (`tools/oot3d/perf_report.py perf.txt --session -1`).
   `perf.txt` parar sem crash report também é saída normal (o jogador fechou o jogo).
+- **C++ regerado não passa na auditoria ("block count mismatch")** → o `~/oot3d-work/gen/aot_program.json`
+  do notebook é o da p7e (sha 99e176c3); o C++ do John (english) sai do `aot_program-john.json` (39872df1), o
+  mesmo que o Ryzen usa. → Gere com `--program $W/gen/aot_program-john.json` e confira `program_sha256` no
+  manifesto antes de mandar (13/11).
+- **`ninja -n` mostra só 2 passos no Ryzen** → o check dos globs força o "Re-running CMake" e o dry run para
+  ali; e o rsync -a guarda a data do notebook (mais velha que os .o): nada recompila. → `touch` nos arquivos
+  mudados lá e conte pelas datas (13/11).
 - **Comparação de desempenho enganosa** → rodadas com clocks diferentes (tour9 em 1020/307/1331 deu
   40 fps contra rodadas a 1785/768/1600). → Confira a linha `clocks:` do `perf_report` antes de
   comparar. No clock padrão (1020/307) nem o 30 nativo segura: decisão de 26/10, não investir nisso.
@@ -143,7 +150,8 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   `docs/pesquisas/2026-10-17-temperatura-builds.md`.
 - **Ryzen travou (26/10)** → RAM do Windows esgotada por WSL + build + PowerShells órfãos (teto de
   3 GB/-j 1 na época). → Desde 05/11 à noite o Gustavo liberou o Ryzen a 100% com RAM em 2400 sem
-  DOCP: WSL com 12 GB, `JOBS=12 SHARDS=1 bash /root/agentes/deko3d/build.sh build` (fonte em
+  DOCP. **Desde 13/11 (3 desligamentos com o build -j 12, BSODs 0x1A/0xEF): WSL com 6 GB/4 núcleos e
+  `JOBS=3 SHARDS=1 bash /root/agentes/deko3d/build.sh build`** (248 shards em 33,6 min; fonte em
   `src/`, build em `build/`, montados por `mount --bind` nos caminhos do notebook). Transferência
   até 10 MB/s nos dois sentidos (ida e volta; o Wi-Fi ainda falha, regra de 10/11):
   `rsync -a --bwlimit=9500 --rsync-path='wsl rsync'`, `scp -l 76000`, preservando
