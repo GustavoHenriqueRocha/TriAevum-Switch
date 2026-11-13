@@ -3002,19 +3002,37 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         inputFrame.Hid.Buttons &= ~button(Oot3dNativeGame::NativeA32HidButton::Select);
       }
     }
-    // SingleScreen 3.0, Items page: A over an item a D-pad direction can
-    // hold is the picker's, not the game's; while it is held the D-pad gives
-    // the item to a direction (oot3d_top_screen_dpad_items.h).
+    // SingleScreen 3.0, Items page, "Hold A" (oot3d_top_screen_dpad_items.h):
+    // the A press picks the item up (the game's state 8); while A is held a
+    // direction takes that item and is kept from the game, whose cursor so
+    // stays on it. After the release one A press of the port's own drops the
+    // item where it was, and the page browses again.
     const auto aMask = button(Oot3dNativeGame::NativeA32HidButton::A);
-    if (Oot3dNativeGame::TopScreenDpadItemPickerState picker;
-        (buttons & aMask) != 0U && topScreenConfigRuntime != nullptr &&
-        Oot3dNativeGame::ReadTopScreenDpadItemPickerState(process.Memory(), &picker)) {
+    constexpr std::array<Oot3dNativeGame::NativeA32HidButton, 4> kPickerDirections{
+        Oot3dNativeGame::NativeA32HidButton::DpadUp,
+        Oot3dNativeGame::NativeA32HidButton::DpadDown,
+        Oot3dNativeGame::NativeA32HidButton::DpadLeft,
+        Oot3dNativeGame::NativeA32HidButton::DpadRight};
+    static std::optional<std::uint32_t> pickerPutBack;
+    static bool pickerReleaseSeen = false;
+    const bool aHeld = (buttons & aMask) != 0U;
+    Oot3dNativeGame::TopScreenDpadItemPickerState picker;
+    const bool pickerRead = topScreenConfigRuntime != nullptr && (aHeld || pickerPutBack) &&
+        Oot3dNativeGame::ReadTopScreenDpadItemPickerState(process.Memory(), &picker);
+    if (pickerRead && pickerPutBack && !aHeld) {
+      if (!picker.PickedUp || picker.Position != *pickerPutBack) {
+        pickerPutBack.reset();
+        pickerReleaseSeen = false;
+      } else if (!pickerReleaseSeen) {
+        pickerReleaseSeen = true; // the game takes the release this frame
+      } else {
+        inputFrame.Hid.Buttons |= aMask;
+        pickerPutBack.reset();
+        pickerReleaseSeen = false;
+      }
+    }
+    if (pickerRead && aHeld) {
       const auto slot = Oot3dNativeGame::ResolveTopScreenDpadItemPickerSlot(picker);
-      constexpr std::array<Oot3dNativeGame::NativeA32HidButton, 4> kPickerDirections{
-          Oot3dNativeGame::NativeA32HidButton::DpadUp,
-          Oot3dNativeGame::NativeA32HidButton::DpadDown,
-          Oot3dNativeGame::NativeA32HidButton::DpadLeft,
-          Oot3dNativeGame::NativeA32HidButton::DpadRight};
       // Issue #13 (hold A did nothing): what the picker read, on the A press
       // and on each direction while A is held, on any pause page state but
       // the closed one; a few lines a session.
@@ -3033,7 +3051,6 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         }
       }
       if (slot != Oot3dNativeGame::kTopScreenDpadItemSlotNone) {
-        inputFrame.Hid.Buttons &= ~aMask;
         for (std::size_t direction = 0U; direction < kPickerDirections.size(); ++direction) {
           const auto mask = button(kPickerDirections[direction]);
           inputFrame.Hid.Buttons &= ~mask;
@@ -3046,6 +3063,8 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
           if (!Oot3dNativeGame::PlayTopScreenUiSound(process, 0x01000498U,
                                                      kTopScreenDirectCallReturn, &pickerError))
             throw std::runtime_error("TopScreen D-pad picker sound failed: " + pickerError);
+          pickerPutBack = picker.Position;
+          pickerReleaseSeen = false;
         }
       }
     }

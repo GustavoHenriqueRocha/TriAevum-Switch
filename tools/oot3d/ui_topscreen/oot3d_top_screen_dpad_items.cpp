@@ -147,10 +147,11 @@ bool ReadTopScreenDpadItemPickerState(NativeA32Memory &memory,
   std::uint32_t pageState = 0U, age = 0U;
   if (!memory.Read32(0x0050672CU, &pageState) ||
       !memory.Read32(0x00506748U, &result.Position) ||
+      !memory.Read32(0x0050674CU, &result.OtherPosition) ||
       !memory.Read32(kSaveContext + 0x04U, &age))
     return false;
   result.PageState = pageState;
-  result.Browsing = pageState == 2U;
+  result.PickedUp = pageState == kTopScreenItemsPickedUp;
   result.Age = age != 0U ? 1U : 0U;
   const std::uint32_t grid = kSaveContext + (result.Age != 0U ? 0x138AU : 0x13A2U);
   for (std::size_t position = 0; position < result.Grid.size(); ++position)
@@ -166,7 +167,7 @@ bool ReadTopScreenDpadItemPickerState(NativeA32Memory &memory,
 
 std::uint8_t
 ResolveTopScreenDpadItemPickerSlot(const TopScreenDpadItemPickerState &state) noexcept {
-  if (!state.Browsing || state.Position >= state.Grid.size())
+  if (!state.PickedUp || state.Position >= state.Grid.size())
     return kTopScreenDpadItemSlotNone;
   const auto slot = state.Grid[state.Position];
   if (slot >= state.Inventory.size())
@@ -187,7 +188,7 @@ std::string DescribeTopScreenDpadItemPicker(const TopScreenDpadItemPickerState &
       : kTopScreenNoItem;
   const unsigned itemAge = item <= 61U ? state.ItemAge[item] : 0xFFU;
   const char *outcome = slot != kTopScreenDpadItemSlotNone ? "takes it"
-      : !state.Browsing                     ? "refused: not browsing the Items page"
+      : !state.PickedUp                     ? "refused: no item picked up with A"
       : !inGrid                             ? "refused: no hovered position"
       : hovered >= state.Inventory.size()   ? "refused: no slot at that position"
       : item == kTopScreenNoItem            ? "refused: no item a D-pad direction can hold"
@@ -195,10 +196,10 @@ std::string DescribeTopScreenDpadItemPicker(const TopScreenDpadItemPickerState &
   constexpr const char *kDirections[]{"up", "down", "left", "right"};
   char line[200];
   std::snprintf(line, sizeof(line),
-                "dpad picker: %s page_state=%u position=%d age=%s slot=%u item=0x%02X "
-                "item_age=%u: %s",
+                "dpad picker: %s page_state=%u position=%d other_position=%d age=%s slot=%u "
+                "item=0x%02X item_age=%u: %s",
                 direction >= 0 && direction < 4 ? kDirections[direction] : "A held",
-                state.PageState, static_cast<int>(state.Position),
+                state.PageState, static_cast<int>(state.Position), static_cast<int>(state.OtherPosition),
                 state.Age != 0U ? "child" : "adult", hovered, item, itemAge, outcome);
   return line;
 }

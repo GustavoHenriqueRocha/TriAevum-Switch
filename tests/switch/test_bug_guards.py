@@ -122,6 +122,18 @@ GUARDS = [
           r'if \(\(first & kIgnoreCameraFlag\) == 0U\) continue;.*?if \(floor\.Normal\.Y <= 0\.5F\) continue;.*?'
           r'<= kFloorPlaneTolerance;.*?if \(!\(fromSide > 0\.0F && toSide < 0\.0F\)\) continue;',
           "oot3d_top_screen_mod_profile_tests (ignore-camera floors)"),
+    Guard("issue #13 (logs41): hold A did nothing because the A press picks the item up (Items page state 8, "
+          "0x00506748 its position) and the D-pad then moved it: the picker takes the picked item while A is held, "
+          "keeps the direction from the game and puts the item back after the release",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(pickerRead && pickerPutBack && !aHeld\) \{.*?inputFrame\.Hid\.Buttons \|= aMask;.*?'
+          r'if \(pickerRead && aHeld\) \{.*?inputFrame\.Hid\.Buttons &= ~mask;.*?pickerPutBack = picker\.Position;',
+          "oot3d_top_screen_mod_profile_tests (TestPicker)"),
+    Guard("issue #13: the picker resolves only the item A picked up (state 8), not a browsing page whose "
+          "positions are -1",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_items.cpp",
+          r'result\.PickedUp = pageState == kTopScreenItemsPickedUp;.*?if \(!state\.PickedUp \|\| state\.Position >= state\.Grid\.size\(\)\)',
+          "oot3d_top_screen_mod_profile_tests (TestPicker)"),
     Guard("issue #13: holding A on the Items page to put an item on the D-pad did nothing, with no log to say "
           "why: the picker writes what it read and decided on the A press and each direction",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",

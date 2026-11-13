@@ -335,7 +335,7 @@ void TestPresentation() {
 
 void TestPicker() {
   TopScreenDpadItemPickerState picker;
-  picker.Browsing = true;
+  picker.PickedUp = true;
   picker.Age = 1U;
   picker.ItemAge.fill(9U);
   picker.ItemAge[kHammer] = 0U;
@@ -357,26 +357,26 @@ void TestPicker() {
   Require(slot(4) == kTopScreenDpadItemSlotNone && slot(3) == kTopScreenDpadItemSlotNone &&
               slot(24) == kTopScreenDpadItemSlotNone,
           "no magic arrow, empty slot or position past the grid");
-  picker.PageState = 2U;
+  picker.PageState = 8U;
   picker.Position = 1U;
   const auto taken = DescribeTopScreenDpadItemPicker(picker, 1U, -1);
-  Require(taken.find("dpad picker: A held page_state=2 position=1 age=adult slot=1 item=0x") == 0U &&
+  Require(taken.find("dpad picker: A held page_state=8 position=1 other_position=0 age=adult slot=1 item=0x") == 0U &&
               taken.ends_with(": takes it"),
           "the picker log line names what it read and that it took the item");
   picker.Position = 2U;
   picker.Age = 1U;
   Require(DescribeTopScreenDpadItemPicker(picker, slot(2), 3).find(
-              "dpad picker: right page_state=2 position=2 age=child slot=15") == 0U &&
+              "dpad picker: right page_state=8 position=2 other_position=0 age=child slot=15") == 0U &&
               DescribeTopScreenDpadItemPicker(picker, slot(2), 3)
                   .ends_with("refused: the item is for the other age"),
           "the picker log line says why it refused the item");
   picker.Age = 0U;
-  picker.Browsing = false;
-  picker.PageState = 8U;
-  Require(slot(1) == kTopScreenDpadItemSlotNone, "only while the Items page browses");
+  picker.PickedUp = false;
+  picker.PageState = 2U;
+  Require(slot(1) == kTopScreenDpadItemSlotNone, "only once A has picked the item up (state 8)");
   Require(DescribeTopScreenDpadItemPicker(picker, slot(1), 0)
-              .ends_with("refused: not browsing the Items page"),
-          "the picker log line says the page was not browsing");
+              .ends_with("refused: no item picked up with A"),
+          "the picker log line says no item was picked up");
 
   TopScreenUiConfig config;
   AssignTopScreenDpadItem(config, true, 2U, 1U);
