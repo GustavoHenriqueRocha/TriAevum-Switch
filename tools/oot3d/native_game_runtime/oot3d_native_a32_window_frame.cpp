@@ -13,6 +13,7 @@
 #include "oot3d_switch_threads.h"
 #include "oot3d_switch_clocks.h"
 #include "oot3d_hang_watchdog.h"
+#include "oot3d_game_log.h"
 #include "oot3d_heap_bin_check.h"
 #include "oot3d_switch_guard_alloc.h"
 #include "oot3d_fps_counter.h"
@@ -3009,12 +3010,29 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         (buttons & aMask) != 0U && topScreenConfigRuntime != nullptr &&
         Oot3dNativeGame::ReadTopScreenDpadItemPickerState(process.Memory(), &picker)) {
       const auto slot = Oot3dNativeGame::ResolveTopScreenDpadItemPickerSlot(picker);
+      constexpr std::array<Oot3dNativeGame::NativeA32HidButton, 4> kPickerDirections{
+          Oot3dNativeGame::NativeA32HidButton::DpadUp,
+          Oot3dNativeGame::NativeA32HidButton::DpadDown,
+          Oot3dNativeGame::NativeA32HidButton::DpadLeft,
+          Oot3dNativeGame::NativeA32HidButton::DpadRight};
+      // Issue #13 (hold A did nothing): what the picker read, on the A press
+      // and on each direction while A is held, on any pause page state but
+      // the closed one; a few lines a session.
+      static int pickerLogLines = 0;
+      if (picker.PageState != 0U && pickerLogLines < 30) {
+        if ((pressed & aMask) != 0U) {
+          Oot3dNativeGame::WriteGameLog(
+              Oot3dNativeGame::DescribeTopScreenDpadItemPicker(picker, slot, -1));
+          ++pickerLogLines;
+        }
+        for (std::size_t direction = 0U; direction < kPickerDirections.size(); ++direction) {
+          if ((pressed & button(kPickerDirections[direction])) == 0U) continue;
+          Oot3dNativeGame::WriteGameLog(Oot3dNativeGame::DescribeTopScreenDpadItemPicker(
+              picker, slot, static_cast<int>(direction)));
+          ++pickerLogLines;
+        }
+      }
       if (slot != Oot3dNativeGame::kTopScreenDpadItemSlotNone) {
-        constexpr std::array<Oot3dNativeGame::NativeA32HidButton, 4> kPickerDirections{
-            Oot3dNativeGame::NativeA32HidButton::DpadUp,
-            Oot3dNativeGame::NativeA32HidButton::DpadDown,
-            Oot3dNativeGame::NativeA32HidButton::DpadLeft,
-            Oot3dNativeGame::NativeA32HidButton::DpadRight};
         inputFrame.Hid.Buttons &= ~aMask;
         for (std::size_t direction = 0U; direction < kPickerDirections.size(); ++direction) {
           const auto mask = button(kPickerDirections[direction]);

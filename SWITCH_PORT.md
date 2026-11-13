@@ -868,6 +868,21 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   moving with `guest_nonzero=0`: zero rates reached the game.
 - **Test:** `oot3d_switch_motion_tests` (TestMotionLog).
 
+### Hold A on the Items page did nothing (issue #13, 11/12)
+- **Seen:** "Pressing and holding the A button to assign objects to the D-pad does not work" (no log,
+  no build named; 0.2.3 is the first with the picker). Not reproduced: no host build of the game here.
+- **Checked against the game's code:** the picker reads the Items page state `0x0050672C` (2 while
+  browsing; the 2.1.1 ZR/ZL selection works on the same rule) and the position `0x00506748`, which the
+  unmodified game resets to -1 when the menu opens (`0x002EB070`) and reads as a 0..23 index into the
+  same age grids (`SaveContext + 0x13A2` adult, `+ 0x138A` child; `0x00446A70`, `0x00446B44`); 3.2.2's
+  `0x005D3358` copies it each update except in page states 8, 9 and 12. Nothing found wrong.
+- **Log (0.2.4-test.2 on):** a game log line on the A press and on each D-pad direction while A is
+  held, on any page state but 0, at most 30 a session: `dpad picker: <A held|up|down|left|right>
+  page_state=.. position=.. age=.. slot=.. item=0x.. item_age=..: takes it | refused: <not browsing
+  the Items page | no hovered position | no slot at that position | no item a D-pad direction can
+  hold | the item is for the other age>` (`DescribeTopScreenDpadItemPicker`).
+- **Test:** `oot3d_top_screen_mod_profile_tests` (TestPicker, the log lines).
+
 ### Free camera below the ground in the Forest Temple (user, after 0.2.3, 11/12)
 - **Seen:** "the camera does not stop at the ground sometimes as it does for the walls, it can go
   underground" in the Forest Temple.

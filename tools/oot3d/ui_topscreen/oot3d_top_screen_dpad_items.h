@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace Oot3dNativeGame {
 
@@ -103,7 +104,8 @@ bool ReadTopScreenDpadItemUsability(NativeA32Memory &memory,
 // grid update (0x005D3358) and takes the native A action 0x0050AF18 bit 0
 // for an item a D-pad direction can hold (0x005D3394).
 struct TopScreenDpadItemPickerState {
-  bool Browsing = false;          // Items page state 0x0050672C == 2
+  std::uint32_t PageState = 0U;   // Items page state 0x0050672C
+  bool Browsing = false;          // PageState == 2
   std::uint32_t Position = 0U;    // hovered grid position, 0x00506748
   std::uint32_t Age = 0U;         // 0 adult, 1 child
   // The grid of the current age: position -> slot (SaveContext +0x138A for
@@ -120,6 +122,12 @@ bool ReadTopScreenDpadItemPickerState(NativeA32Memory &memory,
 // age can use it, else kTopScreenDpadItemSlotNone.
 std::uint8_t
 ResolveTopScreenDpadItemPickerSlot(const TopScreenDpadItemPickerState &state) noexcept;
+
+// The game log line for a picker input (issue #13: hold A did nothing):
+// what it read and why it took or refused the hovered item. `direction` is
+// the D-pad direction pressed (0..3), or -1 for the A press itself.
+std::string DescribeTopScreenDpadItemPicker(const TopScreenDpadItemPickerState &state,
+                                            std::uint8_t slot, int direction);
 
 // 3.2.2 0x005CAEC4: the scene, the water and the minigame refuse the item.
 bool TopScreenDpadItemRestricted(const TopScreenDpadItemGuestState &state,

@@ -122,6 +122,13 @@ GUARDS = [
           r'if \(\(first & kIgnoreCameraFlag\) == 0U\) continue;.*?if \(floor\.Normal\.Y <= 0\.5F\) continue;.*?'
           r'<= kFloorPlaneTolerance;.*?if \(!\(fromSide > 0\.0F && toSide < 0\.0F\)\) continue;',
           "oot3d_top_screen_mod_profile_tests (ignore-camera floors)"),
+    Guard("issue #13: holding A on the Items page to put an item on the D-pad did nothing, with no log to say "
+          "why: the picker writes what it read and decided on the A press and each direction",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(picker\.PageState != 0U && pickerLogLines < 30\) \{.*?'
+          r'DescribeTopScreenDpadItemPicker\(picker, slot, -1\).*?'
+          r'DescribeTopScreenDpadItemPicker\(\s*picker, slot, static_cast<int>\(direction\)\)',
+          "oot3d_top_screen_mod_profile_tests (TestPicker)"),
     Guard("Controls > Shortcuts named the item lanes Item ZR / Item ZL while the items are on R / L: the "
           "labels follow the item bindings, as the HUD's do",
           "tools/oot3d/native_game_runtime/oot3d_top_screen_control_widgets.h",

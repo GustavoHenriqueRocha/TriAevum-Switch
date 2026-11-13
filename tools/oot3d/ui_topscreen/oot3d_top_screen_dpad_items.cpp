@@ -3,6 +3,7 @@
 #include "oot3d_top_screen_config.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace Oot3dNativeGame {
 namespace {
@@ -148,6 +149,7 @@ bool ReadTopScreenDpadItemPickerState(NativeA32Memory &memory,
       !memory.Read32(0x00506748U, &result.Position) ||
       !memory.Read32(kSaveContext + 0x04U, &age))
     return false;
+  result.PageState = pageState;
   result.Browsing = pageState == 2U;
   result.Age = age != 0U ? 1U : 0U;
   const std::uint32_t grid = kSaveContext + (result.Age != 0U ? 0x138AU : 0x13A2U);
@@ -174,6 +176,31 @@ ResolveTopScreenDpadItemPickerSlot(const TopScreenDpadItemPickerState &state) no
     return kTopScreenDpadItemSlotNone;
   const auto age = item <= 61U ? state.ItemAge[item] : 9U;
   return age == 9U || age == state.Age ? slot : kTopScreenDpadItemSlotNone;
+}
+
+std::string DescribeTopScreenDpadItemPicker(const TopScreenDpadItemPickerState &state,
+                                            std::uint8_t slot, int direction) {
+  const bool inGrid = state.Position < state.Grid.size();
+  const unsigned hovered = inGrid ? state.Grid[state.Position] : 0xFFU;
+  const unsigned item = inGrid && hovered < state.Inventory.size()
+      ? TopScreenDpadSlotItem(state.Inventory, static_cast<std::uint8_t>(hovered))
+      : kTopScreenNoItem;
+  const unsigned itemAge = item <= 61U ? state.ItemAge[item] : 0xFFU;
+  const char *outcome = slot != kTopScreenDpadItemSlotNone ? "takes it"
+      : !state.Browsing                     ? "refused: not browsing the Items page"
+      : !inGrid                             ? "refused: no hovered position"
+      : hovered >= state.Inventory.size()   ? "refused: no slot at that position"
+      : item == kTopScreenNoItem            ? "refused: no item a D-pad direction can hold"
+                                            : "refused: the item is for the other age";
+  constexpr const char *kDirections[]{"up", "down", "left", "right"};
+  char line[200];
+  std::snprintf(line, sizeof(line),
+                "dpad picker: %s page_state=%u position=%d age=%s slot=%u item=0x%02X "
+                "item_age=%u: %s",
+                direction >= 0 && direction < 4 ? kDirections[direction] : "A held",
+                state.PageState, static_cast<int>(state.Position),
+                state.Age != 0U ? "child" : "adult", hovered, item, itemAge, outcome);
+  return line;
 }
 
 bool ReadTopScreenDpadItemUsability(NativeA32Memory &memory,
