@@ -17,6 +17,10 @@ grass_lod_common.glsl runs on the CPU (glsl_eval.py, binary32) and these tests c
     a tuft drawn by the near program keeps test.9's triangle corners;
   - the tuft pass's lit root and tip colours, interpolated by the height, give
     grass_vsh.glsl's per-vertex colour (its lines run as they are in the file).
+  - the tuft pass's wind is the PC's evaluate_wind (grass_shader_sources.cpp): the 0.55
+    lean, the gust, the lateral turbulence and the per-tuft random phase; a blade bends
+    along the PC's profile (t (0.65 + 0.35 t)) and is the tuft's height on average, as a
+    PC blade is its anchor's.
 
     python3 tests/switch/test_grass_lod.py
 """
@@ -437,6 +441,92 @@ vec3 new_colour(vec4 ground, float y) {{
                 for a, b in zip(old_value, new_value):
                     self.assertAlmostEqual(a, b, delta=4.0e-7 * 255.0 / 255.0 + 1.0e-6)
 
+
+
+PC_SHADERS = REPO / "runtime/three_ds_recomp/src/fast/oot3d/grass_shader_sources.cpp"
+
+
+def pc_wind(position, phase, seconds, direction, strength, speed, spatial_scale, gust_strength,
+            gust_frequency, turbulence, randomness, maximum_bend):
+    """evaluate_wind of the PC's grass shader (grass_shader_sources.cpp), its records given."""
+    lateral = (-direction[1], direction[0])
+    spatial = (position[0] * direction[0] + position[2] * direction[1]) * 0.01 * spatial_scale
+    random_phase = phase * min(max(randomness, 0.0), 1.0)
+    primary = math.sin(seconds * speed + spatial + random_phase)
+    gust = 0.5 + 0.5 * math.sin(seconds * gust_frequency * 6.28318530718 + spatial * 0.21 + random_phase * 0.37)
+    turb = math.sin(seconds * (speed * 1.71 + 0.31) - position[0] * 0.017 + position[2] * 0.013 +
+                    random_phase * 2.13)
+    along = strength * (0.55 + primary * 0.30 + gust * gust_strength * 0.45)
+    across = strength * turbulence * turb * 0.35
+    bend = [direction[i] * along + lateral[i] * across for i in range(2)]
+    length = math.hypot(*bend)
+    if length > maximum_bend and length > 1.0e-6:
+        bend = [b * maximum_bend / length for b in bend]
+    return bend
+
+
+class GrassPcMotion(unittest.TestCase):
+    """The tufts move and stand as the PC's blades (13/11: the Switch's grass as the PC's)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.program = common()
+
+    def test_the_tuft_wind_is_the_pcs(self):
+        self.assertIn("(0.55 + primary * 0.30 +", PC_SHADERS.read_text(), "the PC's wind moved")
+        rng = random.Random(13)
+        for _ in range(300):
+            angle = rng.uniform(0.0, 2.0 * math.pi)
+            direction = (f32(math.cos(angle)), f32(math.sin(angle)))
+            strength, speed, spatial = rng.uniform(0.0, 1.5), rng.uniform(0.2, 3.0), rng.uniform(0.2, 2.0)
+            gust_strength, gust_frequency = rng.uniform(0.0, 1.0), rng.uniform(0.05, 1.0)
+            turbulence, randomness, maximum_bend = rng.uniform(0.0, 1.0), rng.uniform(0.0, 1.2), rng.uniform(0.3, 2.0)
+            seconds = rng.uniform(0.0, 600.0)
+            position = [f32(rng.uniform(-3000.0, 3000.0)) for _ in range(3)]
+            phase = f32(rng.uniform(0.0, 6.2831853))
+            g = self.program.globals
+            g["grass_wind"] = Vec([direction[0], direction[1], f32(strength), f32(seconds)])
+            g["grass_wind_detail"] = Vec([f32(speed), f32(spatial), f32(gust_strength), f32(gust_frequency)])
+            g["grass_shape"] = Vec([5.0, 1.0, f32(maximum_bend), 1.0])
+            g["grass_tip_color"] = Vec([0.0, 0.0, 0.0, f32(turbulence)])
+            g["grass_brightness"] = Vec([1.0, 1.0, f32(randomness), 0.0])
+            got = self.program.call("grass_wind_bend", Vec(position), phase).c
+            want = pc_wind(position, phase, f32(seconds), direction, f32(strength), f32(speed), f32(spatial),
+                           f32(gust_strength), f32(gust_frequency), f32(turbulence), f32(randomness),
+                           f32(maximum_bend))
+            for a, b in zip(got, want):
+                # binary32 sin of an argument up to ~1800 radians: a few 1e-4 of a unit bend.
+                self.assertAlmostEqual(a, b, delta=2.0e-3)
+
+    def test_the_tuft_pass_bends_by_it_and_the_frame_sends_its_terms(self):
+        tuft = (GRASS / "grass_tuft_vsh.glsl").read_text()
+        self.assertIn("vec2 bend = grass_wind_bend(base, phase);", tuft)
+        self.assertNotIn("0.6 * wave", tuft)
+        frame = (REPO / "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp").read_text()
+        self.assertRegex(frame, r"frame\.TipColor = \{[^}]*settings\.WindTurbulence\}")
+        self.assertRegex(frame, r"frame\.Brightness = \{[^}]*settings\.WindRandomness,")
+
+    def test_a_blade_bends_along_the_pcs_profile(self):
+        pc = re.search(r"float bend_factor =\s*height_factor \* \(0\.65 \+ 0\.35 \* height_factor\);",
+                       PC_SHADERS.read_text())
+        self.assertIsNotNone(pc, "the PC's bend profile moved")
+        for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+            self.assertAlmostEqual(self.program.call("grass_bend_profile", f32(t)), t * (0.65 + 0.35 * t), delta=1e-6)
+        lod = (GRASS / "grass_lod_vsh.glsl").read_text()
+        self.assertIn("position.xz += bend * (height * grass_bend_profile(y));", lod)
+        common_text = (GRASS / "grass_lod_common.glsl").read_text()
+        self.assertIn("position.xz += lean * (height * grass_bend_profile(t));", common_text)
+
+    def test_a_blade_is_the_tufts_height_on_average(self):
+        # A PC blade is its anchor's height (in the preset's range); a tuft's
+        # five blades were 0.7..1 of it, ~15% lower than the PC's grass.
+        tops = [self.program.call("grass_blade_top", f32((i + 0.5) / 1000.0)) for i in range(1000)]
+        self.assertAlmostEqual(sum(tops) / len(tops), 1.0, delta=1e-4)
+        self.assertGreaterEqual(min(tops), 0.8)
+        self.assertLessEqual(max(tops), 1.2)
+        lod = (GRASS / "grass_lod_vsh.glsl").read_text()
+        self.assertNotIn("0.7 + 0.3 * random.z", lod)
+        self.assertEqual(lod.count("grass_blade_top(random.z)"), 2, "the tuft's card and the single blade")
 
 if __name__ == "__main__":
     unittest.main()

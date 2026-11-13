@@ -22,8 +22,8 @@ layout(std140, binding = 1) uniform GrassFrame {
     vec4 grass_shape;             // blades per tuft, card width scale, maximum bend, lighting
     vec4 grass_distance;          // draw distance, fade start, single blades to, tufts from
     vec4 grass_root_color;        // rgb, ground colour influence
-    vec4 grass_tip_color;         // rgb, unused
-    vec4 grass_brightness;        // root, tip, unused, collider count
+    vec4 grass_tip_color;         // rgb, wind turbulence
+    vec4 grass_brightness;        // root, tip, wind randomness, collider count
     vec4 grass_collider[4];       // capsule centre xyz, radius
     vec4 grass_collider_extent[4];// half height, unused
 };
@@ -168,6 +168,39 @@ vec3 grass_near_blade_shape(float t, float phase, float signedRandom, vec2 rootA
     return vec3(offset.x, t - shape.y * t * t * t, offset.y);
 }
 
+// How far up the blade a bend reaches at height t (0..1): the PC's
+// bend_factor (grass_shader_sources.cpp).
+float grass_bend_profile(float t) {
+    return t * (0.65 + 0.35 * t);
+}
+
+// A tuft blade's height, of the tuft's, from its random r in [0, 1): the
+// tuft's height on average (a PC blade is its anchor's height), +-15%.
+float grass_blade_top(float r) {
+    return 0.85 + 0.3 * r;
+}
+
+// The PC's evaluate_wind (grass_shader_sources.cpp) for a tuft at `base`
+// with its phase: a 0.55 lean along the wind plus the wave and the gust, a
+// lateral turbulence, the phase scaled by the randomness, at most the
+// maximum bend. Colliders add to it in the tuft pass.
+vec2 grass_wind_bend(vec3 base, float phase) {
+    vec2 direction = grass_wind.xy;
+    vec2 lateral = vec2(-direction.y, direction.x);
+    float spatial = dot(base.xz, direction) * 0.01 * grass_wind_detail.y;
+    float randomPhase = phase * clamp(grass_brightness.z, 0.0, 1.0);
+    float primary = sin(grass_wind.w * grass_wind_detail.x + spatial + randomPhase);
+    float gust = 0.5 + 0.5 * sin(grass_wind.w * grass_wind_detail.w * 6.2831853 + spatial * 0.21 + randomPhase * 0.37);
+    float turbulence = sin(grass_wind.w * (grass_wind_detail.x * 1.71 + 0.31) - base.x * 0.017 + base.z * 0.013 +
+                           randomPhase * 2.13);
+    float along = grass_wind.z * (0.55 + primary * 0.30 + gust * grass_wind_detail.z * 0.45);
+    float across = grass_wind.z * grass_tip_color.w * turbulence * 0.35;
+    vec2 bend = direction * along + lateral * across;
+    float bendLength = length(bend);
+    if (bendLength > grass_shape.z && bendLength > 1.0e-6) bend *= grass_shape.z / bendLength;
+    return bend;
+}
+
 // grass_blade_shape's twist: how far the blade's width axis turns at height t.
 float grass_near_twist(float t, float signedRandom) {
     return GRASS_NEAR_SHAPE.w * signedRandom * t * t;
@@ -180,7 +213,7 @@ float grass_near_twist(float t, float signedRandom) {
 vec3 grass_near_blade_point(vec3 root, vec2 facing, float halfWidth, float height, vec2 lean,
                             float phase, float signedRandom, float t, float side) {
     vec3 position = root + grass_near_blade_shape(t, phase, signedRandom, facing) * height;
-    position.xz += lean * (height * t * (0.65 + 0.35 * t));
+    position.xz += lean * (height * grass_bend_profile(t));
     position.y -= dot(lean, lean) * height * 0.3 * t * t;
     float twist = grass_near_twist(t, signedRandom);
     float c = cos(twist);

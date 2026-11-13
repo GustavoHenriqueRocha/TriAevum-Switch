@@ -296,7 +296,6 @@ void ApplyGrassSwitchProfile(const GrassSwitchProfile& profile, InteractiveGrass
     generation.BladeWidthMin = profile.BladeWidthMin;
     generation.BladeWidthMax = std::max(profile.BladeWidthMin, profile.BladeWidthMax);
     settings.Appearance.BladeSegments = 1U;
-    settings.Appearance.TextureColorInfluence = profile.TextureColorInfluence;
 }
 
 size_t GrassRetainedBytesPerAnchor() noexcept {

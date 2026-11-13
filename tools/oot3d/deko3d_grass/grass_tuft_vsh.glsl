@@ -20,7 +20,7 @@ layout(std430, binding = 0) writeonly buffer GrassTufts {
 };
 
 void main() {
-    // Base, size and wind as grass_vsh.glsl.
+    // Base and size as grass_vsh.glsl; the wind is the PC's (grass_wind_bend).
     vec3 base = grass_position_height.xyz;
     float fade = float(grass_width_phase_fade >> 24u) / 255.0;
     float height = grass_position_height.w * smoothstep(0.0, 1.0, fade);
@@ -30,10 +30,7 @@ void main() {
     float cardHalf = halfWidth * bladeCount * grass_shape.y;
     float distanceToEye = length(grass_eye.xyz - base);
 
-    float along = dot(base.xz, grass_wind.xy) * grass_wind_detail.y * 0.01;
-    float wave = sin(grass_wind.w * grass_wind_detail.x + along + phase);
-    float gust = 0.5 + 0.5 * sin(grass_wind.w * grass_wind_detail.w * 6.2831853 + along * 0.3);
-    vec2 bend = grass_wind.xy * grass_wind.z * (0.6 * wave + grass_wind_detail.z * gust);
+    vec2 bend = grass_wind_bend(base, phase);
     int colliders = int(grass_brightness.w);
     for (int i = 0; i < 4; ++i) {
         if (i >= colliders) break;

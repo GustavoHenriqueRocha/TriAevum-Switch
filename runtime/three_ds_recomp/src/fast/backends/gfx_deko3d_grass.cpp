@@ -411,7 +411,8 @@ GrassFrameUniforms BuildFrameUniforms(const GrassState& state) {
                       1.5F * state.Stream.SingleBladeDistance};
     const auto& look = settings.Appearance;
     frame.RootColor = {look.RootColor[0], look.RootColor[1], look.RootColor[2], look.TextureColorInfluence};
-    frame.TipColor = {look.TipColor[0], look.TipColor[1], look.TipColor[2], 0.0F};
+    // The PC wind's lateral turbulence and phase randomness (grass_wind_bend).
+    frame.TipColor = {look.TipColor[0], look.TipColor[1], look.TipColor[2], settings.WindTurbulence};
     uint32_t colliders = 0U;
     for (const auto& actor : Oot3d::GrassInteractionBridge::Instance().LatestActors()) {
         if (colliders == kMaxColliders) break;
@@ -423,7 +424,8 @@ GrassFrameUniforms BuildFrameUniforms(const GrassState& state) {
         frame.ColliderExtent[colliders] = {actor.HalfHeight * settings.ColliderHeightMultiplier, 0.0F, 0.0F, 0.0F};
         ++colliders;
     }
-    frame.Brightness = {look.TextureRootBrightness, look.TextureTipBrightness, 0.0F, static_cast<float>(colliders)};
+    frame.Brightness = {look.TextureRootBrightness, look.TextureTipBrightness, settings.WindRandomness,
+                        static_cast<float>(colliders)};
     return frame;
 }
 

@@ -5435,12 +5435,31 @@ temple entry had `no shared placement 2` too.
   HeightScale 1.15: 16-34.5), against the PC preset's 7.68-12.51 x 1.8-1.94 (8.8-14.4 tall) at
   1048.8 single blades/m2; the Switch had 40 tufts x 5 blades/m2 and made up with size.
 - **Now:** the profile's blade is the PC preset's; `config/grass_density` gives the tufts per m2
-  (default 80, 40-200, read at start), the minimum spacing shrinking as 1/sqrt and the visible cap
+  (default 80 then, 100 since 13/11; 40-200, read at start), the minimum spacing shrinking as 1/sqrt and the visible cap
   growing with it (at most `kGrassWholeAreaInstances`); retained memory stays 12 MiB (the process
   was at 3185 of 3189 MB in the "mascara" tour), so more placements get rebuilt on return. All
   stored placements are rebuilt once (the generation changed). The PC's full density (26x the
   anchors) does not fit the 65536-tuft stream.
 - Test: `oot3d_grass_switch_tests` (`TheBladeIsThePcPresetsAndTheDensityComesFromItsFile`).
+
+### Grass on deko3d: blade by blade as the PC, its colour and wind (13/11)
+- **Report:** the PC's design, "made one by one", is the one Gustavo likes.
+- **Measured (code, PC preset in `graphics_settings_persistence.cpp`):** the Switch drew single blades
+  only within 400 units and tufts past 600, where the PC's tufts start at 730 (LodReferenceDistance
+  2282 x LodStartFraction 0.32); the profile overwrote the preset's TextureColorInfluence 0.22 with
+  0.85 (grass the ground's colour); a tuft's blades were 0.7-1 of its height (a PC blade is its
+  anchor's); the wind lacked the PC's 0.55 lean, its lateral turbulence (0.42) and phase randomness
+  (0.44); the far tufts bent as t^2 instead of the PC's t (0.65 + 0.35 t).
+- **Now:** single blades to 730 (tufts by 1095); the preset's colour influence; blades 0.85-1.15 of
+  the tuft (its height on average); the tuft pass's wind is the PC's `evaluate_wind`
+  (`grass_wind_bend`, turbulence in `grass_tip_color.w`, randomness in `grass_brightness.z`); every
+  blade bends along the PC's profile; `config/grass_density` default 100 (500 blades/m2, 80 before).
+  Still not the PC's: no crossed planes near the camera, no bend memory behind Link, no actor shadows
+  on the grass, no dither at the draw distance. GPU cost to measure in a tour (more near vertices:
+  75 per single-blade tuft against 45 for a 5-blade far tuft).
+- Tests: `test_grass_lod.py` (`GrassPcMotion`), `oot3d_grass_switch_tests` (`SixtyFpsBudget`,
+  `AppliesOnTopOfThePresetRules`, `TheBladeIsThePcPresetsAndTheDensityComesFromItsFile`), all seen
+  failing before the change.
 
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism

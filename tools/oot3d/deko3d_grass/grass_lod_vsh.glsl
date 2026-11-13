@@ -70,11 +70,11 @@ void main() {
     float signedRandom = fract(random.x * 4.0 + random.y) * 2.0 - 1.0;
     float cardWidth = max(2.0 * length(sideHalf), 1.0e-3);
     float curve = GRASS_NEAR_SHAPE.x * (1.0 + signedRandom * GRASS_NEAR_SHAPE.z) * cos(phase) * height / cardWidth;
-    vec2 card = grass_tuft_xy(centre, halfBase, tipX, 0.7 + 0.3 * random.z, curve, rowSide.x, rowSide.y);
+    vec2 card = grass_tuft_xy(centre, halfBase, tipX, grass_blade_top(random.z), curve, rowSide.x, rowSide.y);
     float x = card.x;
     float y = card.y;
     vec3 position = base + vec3(sideHalf.x, 0.0, sideHalf.y) * (x * 2.0 - 1.0) + vec3(0.0, height * y, 0.0);
-    position.xz += bend * (height * y * y);
+    position.xz += bend * (height * grass_bend_profile(y));
     position.y -= dot(bend, bend) * height * 0.3 * y * y;
     vec3 colour = mix(tuft.root_seed.rgb, tuft.tip_level.rgb, y);
 
@@ -94,7 +94,7 @@ void main() {
                       across * ((random.x - 0.5) * cardHalf * 0.6);
         float angle = b * 1.3 + random.y * 3.14159;
         vec2 facing = vec2(cos(angle), sin(angle));
-        float bladeHeight = height * (0.7 + 0.3 * random.z);
+        float bladeHeight = height * grass_blade_top(random.z);
         vec2 lean = (random.yz - 0.5) * 0.35 + bend;
         vec3 root = base + vec3(offset.x, 0.0, offset.y);
         vec3 bladePosition = grass_near_blade_point(root, facing, halfWidth, bladeHeight, lean, phase, signedRandom,

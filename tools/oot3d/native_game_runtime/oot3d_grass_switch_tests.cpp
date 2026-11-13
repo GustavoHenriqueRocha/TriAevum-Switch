@@ -199,7 +199,10 @@ TEST(Oot3dGrassSwitchProfile, SixtyFpsBudget) {
     EXPECT_EQ(profile.DrawDistance, 4000.0F);
     EXPECT_GT(profile.FadeStart, profile.FullDensityDistance);
     EXPECT_LT(profile.FadeStart, profile.DrawDistance);
-    EXPECT_EQ(profile.SingleBladeDistance, 400.0F); // 4 m
+    // Single blades as far as the PC's: its tufts start at LodReferenceDistance
+    // x LodStartFraction (2282 x 0.32, graphics_settings_persistence.cpp);
+    // 4 m showed tufts the PC draws blade by blade (13/11).
+    EXPECT_EQ(profile.SingleBladeDistance, 730.0F);
     EXPECT_EQ(profile.TuftsPerSquareMeter, 40.0F);
     EXPECT_GE(profile.BladesPerTuft, 4U);
     EXPECT_LE(profile.BladesPerTuft, 5U);
@@ -240,6 +243,8 @@ TEST(Oot3dGrassSwitchProfile, TheBladeIsThePcPresetsAndTheDensityComesFromItsFil
     EXPECT_FLOAT_EQ(profile.TuftHeightMax, 12.51F);
     EXPECT_FLOAT_EQ(profile.BladeWidthMin, 1.8F);
     EXPECT_FLOAT_EQ(profile.BladeWidthMax, 1.94F);
+    // 100 tufts of 5 blades: 500 blades per m2 against the PC's ~1049 (80 before, 13/11).
+    EXPECT_EQ(kGrassDensityDefault, 100.0F);
     EXPECT_EQ(ParseGrassSwitchDensity(std::nullopt), kGrassDensityDefault);
     EXPECT_EQ(ParseGrassSwitchDensity("120\n"), 120.0F);
     EXPECT_EQ(ParseGrassSwitchDensity("lots"), kGrassDensityDefault);
@@ -270,7 +275,11 @@ TEST(Oot3dGrassSwitchProfile, AppliesOnTopOfThePresetRules) {
     EXPECT_EQ(settings.Generation.InstancesPerSquareMeter, 40.0F);
     EXPECT_EQ(settings.DrawDistance, 4000.0F);
     EXPECT_FALSE(settings.MidrangeClustersEnabled);
-    EXPECT_GT(settings.Appearance.TextureColorInfluence, 0.0F);
+    // The preset's look stays: the profile's 0.85 against the PC's 0.22 gave
+    // ground-coloured grass (13/11).
+    settings.Appearance.TextureColorInfluence = 0.22F;
+    ApplyGrassSwitchProfile(profile, settings);
+    EXPECT_FLOAT_EQ(settings.Appearance.TextureColorInfluence, 0.22F);
     const auto stream = GrassStreamSettingsFromProfile(profile);
     EXPECT_EQ(stream.MaxInstances, profile.MaxVisibleInstances);
     EXPECT_EQ(stream.DrawDistance, profile.DrawDistance);
@@ -521,7 +530,10 @@ TEST(Oot3dGrassInstanceStream, TheBudgetDropsTheFarthestClusters) {
     settings.MaxInstances = 1000000U;
     const auto all = builder.Build({&placement, 1}, settings, unlimited, ranges);
     const uint32_t total = all.Tufts + all.Blades;
-    settings.MaxInstances = total / 3U;
+    // A third of the tufts past the single blades: the blades reach 730 since
+    // 13/11 (the PC's), more than a third of this grid on their own.
+    ASSERT_LT(all.Blades, total);
+    settings.MaxInstances = all.Blades + all.Tufts / 3U;
     std::vector<GrassStreamInstance> output(settings.MaxInstances);
     const auto capped = builder.Build({&placement, 1}, settings, output, ranges);
     EXPECT_EQ(capped.Tufts + capped.Blades, settings.MaxInstances);
@@ -1727,10 +1739,10 @@ TEST(Oot3dGrassLod, LevelCoordinateSamples) {
     EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts), 6U * kGrassFarBladeSegments - 3U);
     EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts3), 6U * kGrassFarBladeSegments - 3U);
     EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts1), 6U * kGrassFarBladeSegments - 3U);
-    // Single blades turn into tufts by 600; the levels start past that and
-    // twice the cull margin there.
+    // Single blades turn into tufts by 1095 (1.5 x 730); the levels start past
+    // that and twice the cull margin there (64 + 0.06 x 1095).
     const auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));
-    EXPECT_EQ(GrassLodMinimumDistance(settings), 800.0F);
+    EXPECT_FLOAT_EQ(GrassLodMinimumDistance(settings), 1095.0F + 2.0F * (64.0F + 0.06F * 1095.0F));
 }
 
 TEST(Oot3dGrassLod, FocalLengthIsAPixelWidthOfA1200By720Target) {

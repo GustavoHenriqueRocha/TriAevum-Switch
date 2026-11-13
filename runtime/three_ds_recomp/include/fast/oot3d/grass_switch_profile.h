@@ -122,7 +122,8 @@ inline constexpr size_t kGrassPlacementCacheEntries = 96U;
 // config/grass_density (read at start): tufts per square metre, for the PC's
 // blade size (A/B within one build). Absent or unreadable:
 // kGrassDensityDefault; clamped to [kGrassDensityMin, kGrassDensityMax].
-inline constexpr float kGrassDensityDefault = 80.0F;
+// 100 tufts of 5 blades: 500 blades per m2, the PC ~1049 (80 until 13/11).
+inline constexpr float kGrassDensityDefault = 100.0F;
 inline constexpr float kGrassDensityMin = 40.0F;
 inline constexpr float kGrassDensityMax = 200.0F;
 [[nodiscard]] float ParseGrassSwitchDensity(std::optional<std::string_view> fileText) noexcept;
@@ -142,9 +143,8 @@ struct GrassSwitchProfile {
     float BladeWidthMin = 1.8F;
     float BladeWidthMax = 1.94F;
     uint8_t BladesPerTuft = 5U;
-    // How much of the blade colour comes from the ground texture under the
-    // tuft (the rest from the preset's root and tip colours).
-    float TextureColorInfluence = 0.85F;
+    // The colour is the preset's (its TextureColorInfluence, 0.22 on the PC):
+    // the profile's 0.85 made the grass the ground's colour (13/11).
     float ClusterSize = 300.0F;
     // A cap per placement request; a cap that bites thins evenly
     // (ThinGrassAnchorsToLimit), it never cuts the index buffer short.
@@ -160,9 +160,11 @@ struct GrassSwitchProfile {
     float FullDensityDistance = 1000.0F;
     float DrawDistance = 4000.0F;
     float FadeStart = 3300.0F;
-    // Tufts closer than this are drawn as their blades, one segment each;
-    // they turn into tufts over the next half of it (grass_vsh.glsl).
-    float SingleBladeDistance = 400.0F;
+    // Tufts closer than this are drawn as their blades; they turn into tufts
+    // over the next half of it (grass_lod_vsh.glsl). The PC's tufts start at
+    // LodReferenceDistance x LodStartFraction (2282 x 0.32); at 400 the
+    // Switch showed tufts where the PC draws blade by blade (13/11).
+    float SingleBladeDistance = 730.0F;
     // Fill near the camera (GrassStreamFillMultiplier): FillDistance /
     // distance tufts per placement tuft, within FillRadius of it, so the grass
     // around Link covers the screen as the full-density band does. Near:
