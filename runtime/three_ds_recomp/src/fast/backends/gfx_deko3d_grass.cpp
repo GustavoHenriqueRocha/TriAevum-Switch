@@ -1145,6 +1145,15 @@ void GrassEndFrame(uint64_t frame) {
         static_cast<unsigned long long>(state->OverlayCalls), state->OverlayMs / frames, state->Slowest.Ms,
         state->Slowest.Branch, state->Slowest.Layer, static_cast<unsigned long long>(state->Slowest.Geometry),
         state->Slowest.Texture, state->Slowest.Width, state->Slowest.Height);
+    const auto& counts = state->Sources->Counts;
+    Log("grass: frame %llu memo | hits %llu misses %llu no key %llu uncacheable %llu | resolve %.3f ms/frame | "
+        "decodes %llu %.3f ms/frame | texture generation %llu",
+        static_cast<unsigned long long>(frame), static_cast<unsigned long long>(counts.MemoHits),
+        static_cast<unsigned long long>(counts.MemoMisses), static_cast<unsigned long long>(counts.NoKey),
+        static_cast<unsigned long long>(counts.Uncacheable), counts.ResolveMs / frames,
+        static_cast<unsigned long long>(counts.Decodes), counts.DecodeMs / frames,
+        static_cast<unsigned long long>(Oot3d::GrassTextureSourceCache::Instance().Generation()));
+    state->Sources->Counts = {};
     state->SourceCalls = state->OverlayCalls = 0;
     state->SourceMs = state->OverlayMs = 0.0;
     state->EndMs = state->EndMaxMs = state->CollectMs = state->CollectMaxMs = state->PostMs = state->PruneMs = 0.0;

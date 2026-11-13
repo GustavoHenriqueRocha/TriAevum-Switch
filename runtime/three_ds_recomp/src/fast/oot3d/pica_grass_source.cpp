@@ -177,6 +177,7 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     // are kept (GrassTwinRules).
     if (eligible && texture->NativeType == 0 && texture->CopyReferences.empty() && texture->Width >= 16 &&
         texture->Height >= 16 && !sources.Contains(*textureHash)) {
+        const auto decodeBegin = std::chrono::steady_clock::now();
         const auto size = EncodedMipSize(texture->NativeFormat, texture->Width, texture->Height);
         std::vector<uint8_t> rgba;
         if (size && *size <= texture->NativeBytes.size() &&
@@ -184,6 +185,9 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
                                                       texture->NativeBytes.first(*size), rgba, nullptr)) {
             sources.ObserveDecoded(*textureHash, texture->Width, texture->Height, rgba);
         }
+        ++state.Counts.Decodes;
+        state.Counts.DecodeMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decodeBegin).count();
     }
     const uint64_t observedHash = texture == draw.Textures.end()
                                       ? 0U
@@ -588,7 +592,9 @@ bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t fram
     const auto key = BuildGrassDrawMemoKey(draw, state.Memo.Rules(settings, frameId),
                                            GrassTextureSourceCache::Instance().Generation(), true,
                                            draw.FragmentShaderHooks.SamplesTexture(0), perspective, masksOnly);
-    if (auto* entry = key ? state.Memo.Find(*key, frameId) : nullptr) {
+    auto* entry = key ? state.Memo.Find(*key, frameId) : nullptr;
+    ++(key ? (entry ? state.Counts.MemoHits : state.Counts.MemoMisses) : state.Counts.NoKey);
+    if (entry) {
         if (!entry->Mesh) {
             return false;
         }
@@ -618,7 +624,11 @@ bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t fram
     }
     GrassSceneMesh mesh;
     bool cacheable = false;
+    const auto resolveBegin = std::chrono::steady_clock::now();
     const bool resolved = Resolve(draw, frameId, settings, state, sequenceId, drawOrder, masksOnly, mesh, cacheable);
+    state.Counts.ResolveMs +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - resolveBegin).count();
+    state.Counts.Uncacheable += cacheable ? 0U : 1U;
     if (key && cacheable) {
         state.Memo.Store(*key, resolved ? std::optional(mesh) : std::nullopt, frameId);
     }

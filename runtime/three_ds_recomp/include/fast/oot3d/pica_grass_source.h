@@ -30,6 +30,11 @@ struct PicaGrassSourceState {
     // Occurrences of one draw identity per render target, this frame.
     std::unordered_map<uint64_t, uint32_t> Occurrences;
     uint64_t Frame = 0;
+    // Diagnostics, read and reset by the backend's window log.
+    struct Counters {
+        uint64_t NoKey = 0, MemoHits = 0, MemoMisses = 0, Uncacheable = 0, Decodes = 0;
+        double ResolveMs = 0.0, DecodeMs = 0.0;
+    } Counts;
 };
 
 // A source: the draw must be an opaque world draw of the scene (the caller
