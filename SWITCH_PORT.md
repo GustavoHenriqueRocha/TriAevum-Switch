@@ -71,9 +71,37 @@ Desempenho e usabilidade:
     cujo frustum o hook alargou (anisotropia medida = 1/fator) têm o viewport alargado pelo mesmo
     fator em torno do centro, recortado ao quadro (não ficam espremidos). Política e testes:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
-- **Tela de toque**: tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo e
-  as páginas de pausa Itens/Mapa/Equipamento do TopScreen); no jogo em movimento o toque é ignorado,
-  como o mouse no PC. Toques curtos ficam retidos até o jogo ler.
+- **Tela de toque**: lida do HID (libnx `hidGetTouchScreenStates`), já que o SDL não reporta dedos
+  sem janela (deko3d). Tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo
+  e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). Um toque nessas páginas cai no
+  elemento sob o dedo: o TopScreen desenha as páginas de 320 de largura da tela de baixo pixel por
+  pixel na tela de cima de 400 em X + 40 (a grade da página Itens alargada em X + 63, a sexta
+  coluna em X + 80), e o toque inverte isso (`oot3d_top_screen_page_layout.h`, que os planos de
+  alvo das páginas e o desenho da Itens alargada também leem; teste `oot3d_native_a32_input_tests`).
+  Antes o toque reduzia 400 para 320, e no lado esquerdo da página Itens um toque selecionava o
+  item à direita (primeira coluna: X nativo 76 em vez de 32). No jogo em movimento, tocar num
+  controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
+  Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
+  (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo).
+  O primeiro dedo que encosta fora de todos os controles mira arrastando (estilingue, arco, gancho,
+  visão em primeira pessoa), somado ao analógico direito e ao giroscópio como a mira do mouse no
+  PC: `aim.touch_enabled` (padrão ligado) e `aim.touch_degrees_per_pixel` (padrão 0,14: meia tela,
+  640 px, gira cerca de 90°) no `oot3d_controls.json`, também em L3+R3 → Controls → Aiming;
+  `aim.invert_x`/`invert_y` valem. Ele alimenta o giroscópio do jogo, que o jogo só lê mirando,
+  então arrastar em terceira pessoa não faz nada. Só no OoT3D, como o giroscópio: o perfil de título
+  (`CtrTitleProfile::SwitchTouchAim`) deixa a mira por arraste desligada nos títulos genéricos.
+  Outros dedos fora de um controle são ignorados.
+  Toques curtos ficam retidos até o jogo ler. Com o menu L3+R3 (ou outra janela ImGui) aberto, o
+  primeiro dedo que encosta é um mouse de toque do ImGui: toque em botões, caixas, abas e itens de
+  combo, arraste sliders e barras de rolagem, arraste espaço vazio para rolar; o controle continua
+  navegando. Um toque (dedo que sai da tela a até 16 px de onde encostou, em 720p) sempre clica
+  onde encostou, por mais curto que seja: o ponteiro apertado fica parado até o dedo sair dessa
+  folga, então um dedo que rola ao levantar não leva a soltura para fora de um botão pequeno. Um
+  dedo que encosta a até 24 px do X da barra de título de uma janela (17 px, menos de 2 mm no Lite)
+  aperta o X, que fecha o menu como o L3+R3. Esse dedo nunca chega ao jogo, e dedos que encostaram
+  antes de o menu abrir ficam fora dele. Teste de acerto, encaixe e posse:
+  `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`; o gesto do menu:
+  `oot3d_host_menu_touch.h`, `oot3d_host_menu_touch_tests.cpp`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.

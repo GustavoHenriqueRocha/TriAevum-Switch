@@ -88,7 +88,8 @@ NRO `~/oot3d-work/oot3d_native_game.deko3d-p5c.nro` (md5 `4bed0f7bd238baa2299663
   samplers), testadas em `TestUiPlan`.
 - ImGui: `Fast3dGui::ImGuiRenderDrawData` manda uma cópia para `Deko3dRenderImGuiDrawData` na thread de render;
   só o atlas de fontes (TexID 0) é amostrado → aparece o `config/fps_counter`. Imagens de outras texturas do ImGui
-  são puladas e contadas. Sem entrada (toque/mouse) no ImGui ainda.
+  são puladas e contadas. Entrada: o controle (`FeedDeko3dGamepad`) e, desde o trabalho de toque, a tela de
+  toque como mouse de toque (`FeedHostMenuTouch` em `oot3d_native_a32_window_input.cpp`).
 - Log: linha `ui (...)` com draws, texturas e comandos ImGui.
 
 **p6 no console (25/10):** entrou no gameplay, HUD e contador de FPS aparecem (56–60 fps), mas UI de cabeça para

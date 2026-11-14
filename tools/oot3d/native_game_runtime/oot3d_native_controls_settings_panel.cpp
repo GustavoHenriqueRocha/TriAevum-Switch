@@ -610,6 +610,17 @@ class NativeControlsSettingsPanel final
           &mControlDraft.ControllerAccelerometerSensitivity,
           0.1F, 4.0F, "%.2fx");
     }
+#if defined(__SWITCH__)
+    // Build de console: um dedo que pousa fora dos controles do HUD durante o
+    // jogo mira (fontes de visão Automatic, Mouse, Right stick e Digital look).
+    changed |= ImGui::Checkbox("Touchscreen drag aim",
+                               &mControlDraft.TouchAimEnabled);
+    if (mControlDraft.TouchAimEnabled) {
+      changed |= ControlWidgets::SliderFloat(
+          "Touch aim sensitivity", &mControlDraft.TouchAimDegreesPerPixel,
+          0.02F, 1.0F, "%.2f deg/px", ImGuiSliderFlags_Logarithmic);
+    }
+#endif
     changed |= ImGui::Checkbox(
         "Invert native aim X", &mControlDraft.NativeAimInvertX);
     changed |= ImGui::Checkbox(
