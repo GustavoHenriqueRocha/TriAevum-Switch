@@ -88,7 +88,9 @@ Desempenho e usabilidade:
   PC: `aim.touch_enabled` (padrão ligado) e `aim.touch_degrees_per_pixel` (padrão 0,14: meia tela,
   640 px, gira cerca de 90°) no `oot3d_controls.json`, também em L3+R3 → Controls → Aiming;
   `aim.invert_x`/`invert_y` valem. Ele alimenta o giroscópio do jogo, que o jogo só lê mirando,
-  então arrastar em terceira pessoa não faz nada. Outros dedos fora de um controle são ignorados.
+  então arrastar em terceira pessoa não faz nada. Só no OoT3D, como o giroscópio: o perfil de título
+  (`CtrTitleProfile::SwitchTouchAim`) deixa a mira por arraste desligada nos títulos genéricos.
+  Outros dedos fora de um controle são ignorados.
   Toques curtos ficam retidos até o jogo ler. Com o menu L3+R3 (ou outra janela ImGui) aberto, o
   primeiro dedo que encosta é um mouse de toque do ImGui: toque em botões, caixas, abas e itens de
   combo, arraste sliders e barras de rolagem, arraste espaço vazio para rolar; o controle continua

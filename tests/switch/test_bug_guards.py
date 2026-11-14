@@ -1149,6 +1149,20 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'Oot3d::DebugMenuOpenFlag\(\)\.store\(false, std::memory_order_relaxed\);\s+'
           r'io\.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;'),
+    # --- 13/11: mira por arraste pelo perfil de título (revisão do #6) ---
+    # A mira por arraste valia em qualquer título; como o giroscópio do console
+    # (SwitchConsoleMotion), só o perfil do OoT3D a liga.
+    Guard("mira por arraste só no OoT3D (perfil de título); genérico desligado",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool SwitchTouchAim = true;.*?GenericTitleProfile.*?profile\.SwitchTouchAim = false;',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("mira por arraste: a janela passa o perfil de título e o toque só mira com ele ligado",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'window\.GetWidth\(\), window\.GetHeight\(\),\s+switchTouchAim && config\.TouchAimEnabled\},',
+          forbid=r'window\.GetHeight\(\), config\.TouchAimEnabled\}'),
+    Guard("mira por arraste: o PollNativeA32Input recebe titleProfile.SwitchTouchAim",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'titleProfile\.SwitchConsoleMotion,\s*titleProfile\.SwitchTouchAim,'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

@@ -917,6 +917,7 @@ bool NativeA32WindowSession::RunFrame() {
                          guestRefreshesDue != 0U,
                          nativeControlPollingState,
                          titleProfile.SwitchConsoleMotion,
+                         titleProfile.SwitchTouchAim,
                          lastTopScreenPrimitivesBySubsystem[static_cast<
                              std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
                          WidescreenMenuCornersActive(),

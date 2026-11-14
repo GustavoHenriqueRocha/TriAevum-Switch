@@ -33,7 +33,9 @@ arrastando e mexer no menu L3+R3, sem mudar o OoT3D com o controle nem os outros
   (PiP da tela de baixo do SM3DL) seguem com o mapeamento deles, que tem precedência.
 - A mira por arraste soma às taxas virtuais da fonte de mira (Automatic, Mouse, RightStick,
   DigitalLook) sem tomar a posse; desliga em `aim.touch_enabled` (`oot3d_controls.json` ou
-  L3+R3 → Controls → Aiming), sensibilidade em `aim.touch_degrees_per_pixel` (padrão 0,14).
+  L3+R3 → Controls → Aiming), sensibilidade em `aim.touch_degrees_per_pixel` (padrão 0,14). Só
+  no OoT3D: o perfil de título (`CtrTitleProfile::SwitchTouchAim`, como o `SwitchConsoleMotion`
+  do giroscópio) a desliga nos títulos genéricos.
 
 ## Alternativas rejeitadas
 - Eventos de dedo do SDL: não chegam sem janela (era o caminho antes do deko3d).

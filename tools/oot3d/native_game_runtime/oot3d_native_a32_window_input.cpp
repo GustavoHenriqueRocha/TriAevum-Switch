@@ -204,6 +204,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
                    [[maybe_unused]] bool switchConsoleMotion,
+                   [[maybe_unused]] bool switchTouchAim,
                    [[maybe_unused]] std::span<const oot3d::ui::UiPrimitive>
                        topScreenHudPrimitives,
                    bool widescreenMenuCorners,
@@ -459,10 +460,13 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
           : TopScreenHudTouchTargets{};
   auto &touchScreen = SwitchTouch();
   ObserveSwitchTouchScreen(touchScreen);
+  // A mira por arraste só vale no título cujo perfil a liga
+  // (CtrTitleProfile::SwitchTouchAim); fora dele um arraste não mira.
   const auto switchTouch = ResolveTopScreenTouchPoll(
       touchScreen.Tracker,
       {nativeFrontendTouchEnabled, hostGuiVisible, &hudTargets,
-       window.GetWidth(), window.GetHeight(), config.TouchAimEnabled},
+       window.GetWidth(), window.GetHeight(),
+       switchTouchAim && config.TouchAimEnabled},
       guestRefreshWillConsume);
   FeedHostMenuTouch(touchScreen.MenuGesture, switchTouch);
   // Um arrasto mira pelas fontes de mira nativas, junto com o analógico direito e

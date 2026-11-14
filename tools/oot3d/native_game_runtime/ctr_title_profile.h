@@ -83,6 +83,10 @@ struct CtrTitleProfile {
     // devkitPro não informa. Só testado no OoT3D; em outro título o sensor
     // fica desligado e o movimento segue só o que o SDL informar.
     bool SwitchConsoleMotion = true;
+    // Mira por arraste na tela de toque do Switch (aim.touch_enabled): o dedo
+    // vira taxa de mira do giroscópio virtual. Só testado no OoT3D; em outro
+    // título um arraste não mira.
+    bool SwitchTouchAim = true;
     // Fronteira de quadro: no OoT3D, pelos PCs de sempre (Zelda não muda).
     CtrFrameBoundarySource FrameBoundary =
         CtrFrameBoundarySource::Oot3dGuestPcs;
@@ -127,6 +131,7 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.SubRectDisplayTransfers = true;
     profile.LcdScreenCrop = true;
     profile.SwitchConsoleMotion = false;
+    profile.SwitchTouchAim = false;
     return profile;
 }
 

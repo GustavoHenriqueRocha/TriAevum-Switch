@@ -709,6 +709,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
                    bool switchConsoleMotion,
+                   // Mira por arraste (CtrTitleProfile::SwitchTouchAim).
+                   bool switchTouchAim,
                    // O HUD de jogo desenhado no último quadro (tela de 400x240):
                    // no Switch, toques nos seus controles os pressionam.
                    std::span<const oot3d::ui::UiPrimitive>
