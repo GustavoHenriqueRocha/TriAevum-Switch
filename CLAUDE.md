@@ -149,6 +149,12 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   `rsync -a --bwlimit=9500 --rsync-path='wsl rsync'`, `scp -l 76000`, preservando
   `.ninja_log`/`.ninja_deps`. RAM já teve bit flips: confira md5 depois do relink. O WSL desliga
   quando a última sessão `wsl.exe` fecha: mantenha o `ssh ryzen wsl ...` aberto durante o build.
+- **Título do conversor (MK7, SM3DL) sem draws ou travado** → sem `--complete-gpu-work` o MK7 faz 12
+  draws em 600 vblanks (com ele, 6588). → Use sempre `--complete-gpu-work` fora do OoT3D
+  (docs/pesquisas/2026-11-10-mk7-zero-draws.md).
+- **Rodada da janela "sai limpa" no meio** → rodada em segundo plano do agente sem timeout explícito morre
+  aos 120 s (SIGTERM vira SDL_QUIT). Bench na ws2 com VSync ligado e janela escondida segura o ritmo. →
+  Timeout explícito e bench só com VSync desligado (docs/pesquisas/2026-11-06-sm3dl-*.md).
 - **MTP não sobrescreve** → `gio copy` falha em arquivo existente. → `gio remove` antes, ou use o
   FTP (`curl -T` sobrescreve).
 
