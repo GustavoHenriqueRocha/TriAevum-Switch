@@ -25,7 +25,8 @@ recompilação: o PS4 já é x86-64, então o código roda nativo. Útil como re
 por serviço e de cache de binds, não como código para copiar (CPU diferente do 3DS).
 
 ## Decisão
-Só referência. Os pacotes e o dump do PS4 no Ryzen saem por pedido do Gustavo (16/11); o port não é usado.
+Só referência. No Ryzen saíram o Mortal Kombat 11 (3 arquivos, ~72 GB) e D:\PS2-PS4 (16/11, pedido do Gustavo).
+O SotC-PC fica, com o .pkg e o dump extraído do SotC (o port precisa do dump, não de ISO).
 
 ## Em aberto
 - Nada.
