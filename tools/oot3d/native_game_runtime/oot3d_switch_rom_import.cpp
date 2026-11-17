@@ -21,6 +21,8 @@ namespace {
 namespace fs = std::filesystem;
 namespace ri = RomImport;
 
+constexpr const char* kQuitLine = "\nAperte + para sair.\n";
+
 constexpr const char* kRoot = "sdmc:/switch/oot3dre";
 constexpr const char* kGame = "sdmc:/switch/oot3dre/game";
 // A file here turns the import off: the boot reads game/ as before.
@@ -75,7 +77,7 @@ bool RunSwitchRomImport() {
 
     SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - importação dos dados do jogo\nPort para Switch por Gustavo Henrique Rocha");
     if (sources.empty()) {
-        screen.Show("Os dados do jogo não foram encontrados.\n\n" + Where() + "\nAperte + para sair.\n");
+        screen.Show("Os dados do jogo não foram encontrados.\n\n" + Where() + kQuitLine);
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
@@ -100,7 +102,7 @@ bool RunSwitchRomImport() {
             const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_Plus);
             return button && (*button & HidNpadButton_A);
         }
-        screen.Show(message + "\nAperte + para sair.\n");
+        screen.Show(message + kQuitLine);
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
@@ -146,7 +148,7 @@ bool RunSwitchRomImport() {
             const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_Plus);
             return button && (*button & HidNpadButton_A);
         }
-        screen.Show(message + "\nAperte + para sair.\n");
+        screen.Show(message + kQuitLine);
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }

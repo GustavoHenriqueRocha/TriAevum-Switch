@@ -12,6 +12,12 @@
 
 namespace Oot3dNativeGame::SwitchNetwork {
 
+// Shared by the updater, its panel and the TopScreen download (start-up
+// screens and L3+R3 > Atualizações); the panel recognises a cancelled
+// download by this exact message.
+inline constexpr const char *kNoNetworkMessage = "Sem rede: conecte o console à internet e tente de novo.";
+inline constexpr const char *kDownloadCancelled = "Download cancelado.";
+
 // Sockets and libcurl for one check or download. curl_global_init opens
 // the console's SSL service (devkitPro's libcurl uses libnx's TLS backend:
 // certificates are checked by the system against its trusted CAs); both

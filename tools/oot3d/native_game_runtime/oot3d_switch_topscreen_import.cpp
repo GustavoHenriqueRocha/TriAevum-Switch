@@ -154,7 +154,7 @@ void RunDownload(const ts::Archive& archive, const fs::path& path, Download& sta
     };
     SwitchNetwork::NetworkSession network;
     if (!network.Ready()) {
-        finish(false, "Sem rede: conecte o console à internet e tente de novo.");
+        finish(false, SwitchNetwork::kNoNetworkMessage);
         return;
     }
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> out(std::fopen(path.c_str(), "wb"), &std::fclose);
@@ -183,7 +183,7 @@ void RunDownload(const ts::Archive& archive, const fs::path& path, Download& sta
         std::to_string(transfer.Received) + " bytes, sha256 " + digest + (error.empty() ? "" : ", " + error));
     if (result == SwitchNetwork::GetResult::Cancelled) {
         state.Cancelled = true;
-        finish(false, "Download cancelado.");
+        finish(false, SwitchNetwork::kDownloadCancelled);
     } else if (result == SwitchNetwork::GetResult::Failed) {
         finish(false, "O download do GameBanana falhou: " + error + ".");
     } else if (!closed) {
@@ -383,7 +383,7 @@ bool RunSwitchTopScreenImport() {
             return false;
         case Outcome::Cancelled:
             Log("download cancelled");
-            notice = "Download cancelado.\n\n";
+            notice = std::string(SwitchNetwork::kDownloadCancelled) + "\n\n";
             continue;
         case Outcome::Failed:
             break;

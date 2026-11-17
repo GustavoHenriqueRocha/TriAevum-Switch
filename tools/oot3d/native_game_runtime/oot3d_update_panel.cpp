@@ -3,6 +3,7 @@
 #include "fast/oot3d/debug_menu.h"
 #include "fast/oot3d/graphics_settings_window.h"
 #include "oot3d_build_version.h"
+#include "oot3d_switch_network.h"
 #include "oot3d_switch_updater.h"
 #include "oot3d_topscreen_import.h"
 #include "oot3d_roll_dash.h"
@@ -27,6 +28,8 @@ constexpr const char *kRepositoryFile = "update_repo";
 constexpr const char *kTokenFile = "update_token";
 // Present = no check at launch (on by default).
 constexpr const char *kNoLaunchCheckFile = "no_update_check";
+
+void SaveFailed(const char *configFile) { ImGui::TextWrapped("Não foi possível gravar config/%s.", configFile); }
 
 std::string ReadTrimmed(const std::filesystem::path &path) {
   std::ifstream file(path);
@@ -134,7 +137,7 @@ private:
       mChannelError = !file;
     }
     ImGui::EndDisabled();
-    if (mChannelError) ImGui::TextWrapped("Não foi possível gravar config/%s.", kChannelFile);
+    if (mChannelError) SaveFailed(kChannelFile);
   }
 
   // config/no_update_check: read at launch, so a change applies at the next one.
@@ -152,7 +155,7 @@ private:
     }
     ImGui::SameLine();
     ImGui::TextDisabled("(avisa quando sai uma versão nova)");
-    if (mLaunchCheckError) ImGui::TextWrapped("Não foi possível gravar config/%s.", kNoLaunchCheckFile);
+    if (mLaunchCheckError) SaveFailed(kNoLaunchCheckFile);
   }
 
   void DrawChecked(const SwitchUpdater::Status &status) {
@@ -178,7 +181,7 @@ private:
       action = "Instalar esta versão mais antiga";
       break;
     }
-    if (status.Message.rfind("Download cancelado", 0) == 0) ImGui::TextDisabled("%s", status.Message.c_str());
+    if (status.Message == SwitchNetwork::kDownloadCancelled) ImGui::TextDisabled("%s", status.Message.c_str());
     if (ImGui::Button(action)) mUpdater.Install();
     ImGui::SameLine();
     if (ImGui::Button("Procurar de novo")) mUpdater.Check(mChannel);
@@ -273,7 +276,7 @@ private:
       if (mHudOfferRequested) mHudOffer = TopScreenImport::OfferSetting::Ask;
       mHudOfferError = !file;
     }
-    if (mHudOfferError) ImGui::TextWrapped("Não foi possível gravar config/%s.", TopScreenImport::kOfferSettingName);
+    if (mHudOfferError) SaveFailed(TopScreenImport::kOfferSettingName);
   }
 
   std::filesystem::path mRoot;

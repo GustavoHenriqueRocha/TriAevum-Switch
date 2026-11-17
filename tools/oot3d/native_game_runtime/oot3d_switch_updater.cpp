@@ -179,7 +179,7 @@ void SwitchUpdater::RunCheck() {
 void SwitchUpdater::RunCheckSteps() {
   NetworkSession network;
   if (!network.Ready()) {
-    Finish(Phase::Failed, "Sem rede: conecte o console à internet e tente de novo.");
+    Finish(Phase::Failed, SwitchNetwork::kNoNetworkMessage);
     return;
   }
   std::string listing;
@@ -258,7 +258,7 @@ void SwitchUpdater::RunInstall() {
   }
   NetworkSession network;
   if (!network.Ready()) {
-    fail(Phase::Failed, "Sem rede: conecte o console à internet e tente de novo.");
+    fail(Phase::Failed, SwitchNetwork::kNoNetworkMessage);
     return;
   }
   Log("installing " + release.Release.Tag + " (build " + std::to_string(manifest.Build) + ")");
@@ -300,7 +300,7 @@ void SwitchUpdater::RunInstall() {
     mbedtls_sha256_free(&sha);
     const bool closed = std::fclose(out.release()) == 0;
     if (result == GetResult::Cancelled) {
-      fail(Phase::Checked, "Download cancelado.");
+      fail(Phase::Checked, SwitchNetwork::kDownloadCancelled);
       return;
     }
     if (result == GetResult::Failed) {
@@ -327,7 +327,7 @@ void SwitchUpdater::RunInstall() {
     return;
   }
   if (mCancel.load()) {
-    fail(Phase::Checked, "Download cancelado.");
+    fail(Phase::Checked, SwitchNetwork::kDownloadCancelled);
     return;
   }
   if (!CommitStagedRelease(mRoot, manifest, &error)) {
