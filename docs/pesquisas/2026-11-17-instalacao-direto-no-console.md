@@ -36,8 +36,25 @@ tradução PT-BR, o nome dele e update só estável e testado, vindo do nosso pr
 - Fora do zip: `game/`, saves, `no_rom_import`, `update_token` e o que vem do TopScreen
   (CC BY-NC-ND), que o console gera sozinho.
 
+## Travamento das 11:49 (olhado à tarde)
+Fim de `spikes.txt`/`hitches.txt` da sessão (bytes até 23247953 / 14716509, o tamanho às
+11:49): os últimos ~3 s são quadros estáveis de 33–36 ms, `cause=logic`, guest 26–27 ms,
+GPU 8 ms, 0 textura/programa/shader novo, em hidan (cena 0x04). Nada cresce antes: o
+registro para de uma vez. Sem crash report, sem `hang.txt`. Um evento só, com sys-clk
+desligado; não dá para culpar o port nem a importação. Se repetir: anotar a cena e a hora,
+puxar `atmosphere/crash_reports` e `fatal_errors` e o fim dos dois logs.
+
+## TopScreen no console + PT-BR como mod (achado)
+O passo 3 já existe (código do John mesclado): sem o pack, o console oferece baixar o
+TopScreen do GameBanana e monta o atlas. Mas `TopScreenImport::Build` lê só
+`game/romfs.bin` (`oot3d_switch_topscreen_import.cpp:189`), e o mod PT-BR entra depois,
+como overlay. Numa instalação nova pelo zip o atlas casa o `menu_top_parts00` original
+e o HUD mostra o PT-BR: é o defeito de 30/10 (ícones soltos), corrigido no PC por
+d9359b8f (`--extra-romfs-image`). O Switch do Gustavo não tem o problema (o romfs dele é PT-BR).
+
 ## Em aberto
-- Causa do travamento total do console no teste das 11:49.
+- Atlas do TopScreen no console sem enxergar o mod PT-BR (acima).
+- Causa do travamento total do console no teste das 11:49 (um evento).
 - Passo 3 (TopScreen baixado no console) e o levantamento de código morto que o Gustavo pediu.
 
 ## Promoção (17/11, tarde)
