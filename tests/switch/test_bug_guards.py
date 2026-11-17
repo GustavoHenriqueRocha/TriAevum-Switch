@@ -1086,6 +1086,83 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
           r'if \(!failure\.empty\(\)\) \{.*?return false;\s+\}.*?if \(\*button & HidNpadButton_Y\) \{\s+try \{\s+ri::RemoveSource\(plan->Input\);',
           forbid=r'RemoveSource\((?!plan->Input\);)'),
+    # --- 05/11: toque no inventário uma casa ao lado (pausa Itens/Equip./Mapa, TopScreen) ---
+    # O toque reduzia a tela de cima de 400 de largura à tela de toque de 320,
+    # mas o TopScreen desenha a página pixel por pixel em X + 40 (a grade da
+    # página Itens alargada em X + 63, a sexta coluna em X + 80): um toque na
+    # primeira coluna de Itens caía na segunda.
+    Guard("tocar num item do inventário da pausa selecionava o bloco à direita (lado esquerdo da página)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp",
+          r'MapPresentationPointToTouch\(\s+TopScreenPresentedToPageX\(topScreen\.X, layout\), topScreen\.Y,',
+          "oot3d_native_a32_input_tests (TestSwitchPageTouchLandsOnTheTappedElement)",
+          forbid=r'TopScreen400x240'),
+    Guard("toque no inventário: a página Itens alargada mapeia com o próprio layout (grade X + 63, sexta coluna X + 80)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'ReadTopScreenWidePageState\(memory, &page\) &&\s+page\.ItemsActive\s+'
+          r'\? NativeA32TouchPresentation::TopScreenWideItemsPage'),
+    # --- 04/11: tela de toque do Switch no deko3d (HUD, mira por arraste, menu L3+R3) ---
+    # Sem janela SDL (deko3d) o driver do SDL do Switch não reporta dedos: o toque
+    # vem do HID da libnx, cada dedo ganha dono quando encosta (página nativa,
+    # controle do HUD, mira, menu) e só o perfil TopScreen tem toque no HUD.
+    Guard("toque do Switch morto no deko3d: o SDL sem janela não reporta dedos (ler o HID da libnx)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'hidGetTouchScreenStates\(states\.data\(\), states\.size\(\)\)',
+          "oot3d_top_screen_hud_touch_tests (TestTracker)",
+          forbid=r'SDL_AddEventWatch\(&ObserveSwitchTouchEvent'),
+    Guard("o toque que abriu o app (histórico do HID anterior ao início) virava aperto",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'touch\.Started = true;\s+while \(const auto \*state = nextSample\(\)\)\s+'
+          r'touch\.LastSample = state->sampling_number;\s+return;'),
+    Guard("toque no HUD fora do perfil TopScreen (título genérico, SM3DL) ou com página/menu aberto",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'const bool hudTouchEligible =\s+topScreenUiProfile && !nativeFrontendTouchEnabled && !hostGuiVisible;'
+          r'.*?frame\.Hid\.Buttons \|= switchTouch\.HudButtons;'),
+    Guard("toque no HUD testado contra o HUD do quadro anterior (primitivas GameplayHud)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'lastTopScreenPrimitivesBySubsystem\[static_cast<\s+std::size_t>\(oot3d::ui::UiSubsystem::GameplayHud\)\],'
+          r'\s+WidescreenMenuCornersActive\(\),'),
+    Guard("dono do dedo decidido ao encostar: dedo fora de controle não aperta, dedo do HUD não mira, uma mira só",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
+          r'if \(!finger\.Active \|\| finger\.Owner != TopScreenTouchOwner::Unassigned\) \{\s+continue;\s+\}'
+          r'.*?if \(finger\.Control != TopScreenHudTouchControl::None\) \{\s+finger\.Owner = TopScreenTouchOwner::Hud;'
+          r'.*?\} else if \(context\.AimEnabled && !aimOwned\) \{',
+          "oot3d_top_screen_hud_touch_tests (TestAimOwnership, TestMenuOwnership)"),
+    Guard("mira por arraste tomando a posse da mira (no Automatic o giroscópio físico continua a base, o toque só soma)",
+          "tools/three_ds/input/three_ds_input.cpp",
+          r'const float pitch = result\.Gyroscope\[0\] \+ touch\.PitchDegreesPerSecond;\s+'
+          r'const float yaw = result\.Gyroscope\[1\] \+ touch\.YawDegreesPerSecond;',
+          "oot3d_top_screen_hud_touch_tests (TestAimThroughMotionSources)"),
+    Guard("oot3d_controls.json antigo (sem aim.touch_*) não carregava: as chaves novas são opcionais",
+          "tools/oot3d/native_game_runtime/oot3d_native_control_config.cpp",
+          r'aim\.value\("touch_enabled", parsed\.TouchAimEnabled\);.*?'
+          r'aim\.value\("touch_degrees_per_pixel", parsed\.TouchAimDegreesPerPixel\);',
+          "oot3d_native_a32_input_tests"),
+    Guard("menu L3+R3 sem toque no deko3d (ImGui sem backend de plataforma): o dedo do menu é mouse de toque",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'FeedHostMenuTouch\(touchScreen\.MenuGesture, switchTouch\);',
+          "oot3d_host_menu_touch_tests"),
+    Guard("X da barra de título (17 px) não fechava o menu por toque: folga de toque 16 px e ímã de 24 px em 720p",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'sample\.TapSlop = 16\.0F \* unit;.*?sample\.SnapRadius = 24\.0F \* unit;',
+          "oot3d_host_menu_touch_tests (TestQuickTap, TestTapOnCloseButton)"),
+    Guard("fechar o menu L3+R3 pelo X deixava a navegação do ImGui pelo controle ligada",
+          "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
+          r'Oot3d::DebugMenuOpenFlag\(\)\.store\(false, std::memory_order_relaxed\);\s+'
+          r'io\.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;'),
+    # --- 13/11: mira por arraste pelo perfil de título (revisão do #6) ---
+    # A mira por arraste valia em qualquer título; como o giroscópio do console
+    # (SwitchConsoleMotion), só o perfil do OoT3D a liga.
+    Guard("mira por arraste só no OoT3D (perfil de título); genérico desligado",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool SwitchTouchAim = true;.*?GenericTitleProfile.*?profile\.SwitchTouchAim = false;',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("mira por arraste: a janela passa o perfil de título e o toque só mira com ele ligado",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'window\.GetWidth\(\), window\.GetHeight\(\),\s+switchTouchAim && config\.TouchAimEnabled\},',
+          forbid=r'window\.GetHeight\(\), config\.TouchAimEnabled\}'),
+    Guard("mira por arraste: o PollNativeA32Input recebe titleProfile.SwitchTouchAim",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'titleProfile\.SwitchConsoleMotion,\s*titleProfile\.SwitchTouchAim,'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

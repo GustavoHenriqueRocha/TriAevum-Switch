@@ -1217,6 +1217,9 @@ void TestWindowProfileGatesOot3dHooks() {
         // Mira por giroscópio no Switch: o sensor de seis eixos do console.
         Require(profile.SwitchConsoleMotion,
                 "the OoT3D window lost the Switch six-axis sensor (gyro aiming)");
+        // Mira por arraste na tela de toque do Switch.
+        Require(profile.SwitchTouchAim,
+                "the OoT3D window lost the Switch touch-screen drag aiming");
     }
     // Super Mario 3D Land (EUR) e um title id qualquer.
     for (const uint64_t titleId : {0x0004000000053F00ULL, 0x0004000000123400ULL}) {
@@ -1234,6 +1237,9 @@ void TestWindowProfileGatesOot3dHooks() {
         // Não testado nos outros títulos: o sensor do console fica desligado.
         Require(!profile.SwitchConsoleMotion,
                 "a generic title window must not start the Switch six-axis sensor");
+        // Idem para a mira por arraste: um arraste não mira.
+        Require(!profile.SwitchTouchAim,
+                "a generic title window must not aim by dragging on the Switch touch screen");
     }
 }
 

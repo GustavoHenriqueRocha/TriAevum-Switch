@@ -388,6 +388,10 @@ struct PhysicalInputState {
     double SamplePeriodSeconds = 1.0 / 60.0;
     MotionObservation ControllerMotion;
     NormalizedTouch ControllerTouch;
+    // Mira por arrasto na tela sensível: o movimento do dedo de mira desde o último
+    // poll consumido, em pixels do painel de toque (1280x720 no Switch).
+    float TouchAimDeltaX = 0.0F;
+    float TouchAimDeltaY = 0.0F;
 };
 
 struct MappingConfig {
@@ -405,6 +409,7 @@ struct MappingConfig {
     bool NativeMotionInvertY = false;
     std::array<float, 3> GyroscopeBiasDegreesPerSecond{};
     std::array<float, 3> AccelerometerNeutral{0.0F, -1.0F, 0.0F};
+    float TouchMotionDegreesPerPixel = 0.14F;
 };
 
 struct AimTransform {
@@ -507,6 +512,20 @@ InputFrame ResolveInput(const MappingConfig& config,
                         CStickFilterState* cStickFilter = nullptr,
                         bool advanceCStickFilter = true,
                         VirtualMotionState* virtualMotion = nullptr) noexcept;
+
+struct AimRates {
+    float PitchDegreesPerSecond = 0.0F;
+    float YawDegreesPerSecond = 0.0F;
+};
+
+// Um arrasto de toque como taxas virtuais de pitch/yaw no período da amostra, com
+// a convenção do mouse (arrastar para a direita vira à direita, arrastar para baixo
+// olha para baixo) e a inversão de mira. As fontes de mira nativas o somam às suas
+// próprias taxas virtuais (Automatic, Mouse, RightStick, DigitalLook); uma fonte
+// só de sensores físicos o ignora.
+[[nodiscard]] AimRates ResolveTouchAimRates(const MappingConfig& config,
+                                            float deltaX, float deltaY,
+                                            double samplePeriodSeconds) noexcept;
 
 std::int16_t ConvertHostAxisToNative(std::int16_t value,
                                      std::int32_t deadZonePercent) noexcept;

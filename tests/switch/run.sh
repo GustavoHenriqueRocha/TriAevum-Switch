@@ -48,10 +48,13 @@ UNIT_TESTS=(
     oot3d_pica_texture_predecode_tests
     oot3d_switch_motion_tests
     oot3d_rom_import_tests
+    oot3d_host_menu_touch_tests
     oot3d_switch_thread_layout_tests
+    oot3d_top_screen_hud_touch_tests
     oot3d_top_screen_mod_profile_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
+    oot3d_top_screen_wide_items_runtime_tests
     triaevum_audio_service_tests
     three_ds_recomp_input_tests
 )

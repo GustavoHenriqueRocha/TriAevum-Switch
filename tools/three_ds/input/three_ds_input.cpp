@@ -512,6 +512,8 @@ ResolvedMotion ResolveMotion(const MappingConfig& config,
         std::clamp(physical.SamplePeriodSeconds, 1.0 / 1000.0, 0.25);
     const float invertX = config.NativeMotionInvertX ? -1.0F : 1.0F;
     const float invertY = config.NativeMotionInvertY ? -1.0F : 1.0F;
+    const AimRates touch = ResolveTouchAimRates(
+        config, physical.TouchAimDeltaX, physical.TouchAimDeltaY, seconds);
     const auto useMouse = [&]() {
         result.Gyroscope[0] =
             static_cast<float>(physical.MouseDeltaY) *
@@ -628,7 +630,10 @@ ResolvedMotion ResolveMotion(const MappingConfig& config,
 
             const bool controller = owner == VirtualMotionState::Owner::Controller;
             if (controller) useCStick(); else useMouse();
-            const float pitch = result.Gyroscope[0], yaw = result.Gyroscope[1];
+            // Um arrasto de toque soma às taxas virtuais de qualquer dono e nunca
+            // assume a posse: o giroscópio físico continua sendo a base.
+            const float pitch = result.Gyroscope[0] + touch.PitchDegreesPerSecond;
+            const float yaw = result.Gyroscope[1] + touch.YawDegreesPerSecond;
             result = {};
             if (controller) {
                 useControllerGyroscope();
@@ -651,6 +656,8 @@ ResolvedMotion ResolveMotion(const MappingConfig& config,
         }
     }
     if (synthetic) {
+        result.Gyroscope[0] += touch.PitchDegreesPerSecond;
+        result.Gyroscope[1] += touch.YawDegreesPerSecond;
         constexpr double radiansPerDegree = 3.14159265358979323846 / 180.0;
         const double pitch = virtualMotion != nullptr ? virtualMotion->PitchRadians : 0.0;
         const double delta = advanceState ? result.Gyroscope[0] * seconds * radiansPerDegree : 0.0;
@@ -1030,6 +1037,23 @@ std::int16_t ConvertHostAxisToNative(std::int16_t value,
         static_cast<std::int32_t>(kNativeStickMaximum) /
         (kHostAxisMaximum - threshold);
     return static_cast<std::int16_t>(signedValue < 0 ? -scaled : scaled);
+}
+
+AimRates ResolveTouchAimRates(const MappingConfig& config, float deltaX,
+                              float deltaY,
+                              double samplePeriodSeconds) noexcept {
+    if (!std::isfinite(deltaX) || !std::isfinite(deltaY) ||
+        !std::isfinite(config.TouchMotionDegreesPerPixel)) {
+        return {};
+    }
+    // O mesmo período sobre o qual ResolveMotion integra, então um arrasto de N pixels
+    // gira N * TouchMotionDegreesPerPixel graus.
+    const float seconds = static_cast<float>(
+        std::clamp(samplePeriodSeconds, 1.0 / 1000.0, 0.25));
+    const float invertX = config.NativeMotionInvertX ? -1.0F : 1.0F;
+    const float invertY = config.NativeMotionInvertY ? -1.0F : 1.0F;
+    return {deltaY * config.TouchMotionDegreesPerPixel / seconds * invertY,
+            -deltaX * config.TouchMotionDegreesPerPixel / seconds * invertX};
 }
 
 InputFrame ResolveInput(const MappingConfig& config,
