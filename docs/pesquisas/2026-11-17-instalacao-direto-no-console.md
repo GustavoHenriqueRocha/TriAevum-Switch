@@ -39,3 +39,9 @@ tradução PT-BR, o nome dele e update só estável e testado, vindo do nosso pr
 ## Em aberto
 - Causa do travamento total do console no teste das 11:49.
 - Passo 3 (TopScreen baixado no console) e o levantamento de código morto que o Gustavo pediu.
+
+## Promoção (17/11, tarde)
+O Gustavo confirmou no console: textos em PT-BR e aba Updates certa. A v1.0.0 virou
+stable (`switch_release.py promover`): pré-release desligado, release.json com
+`"channel": "stable"`, lido pelo token só-leitura como o console lê
+(1.0.0, build 1, stable). O console com a 1.0.0 vê "mesma build" e não oferece nada.
