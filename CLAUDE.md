@@ -155,8 +155,8 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   DOCP. **Desde 13/11 (3 desligamentos com o build -j 12, BSODs 0x1A/0xEF): WSL com 6 GB/4 núcleos e
   `JOBS=3 SHARDS=1 bash /root/agentes/deko3d/build.sh build`** (248 shards em 33,6 min; fonte em
   `src/`, build em `build/`, montados por `mount --bind` nos caminhos do notebook). Transferência
-  até 10 MB/s nos dois sentidos (ida e volta; o Wi-Fi ainda falha, regra de 10/11):
-  `rsync -a --bwlimit=9500 --rsync-path='wsl rsync'`, `scp -l 76000`, preservando
+  pela regra do Wi-Fi de casa (5 MB/s se uma ponta estiver nele, senão sem limite; 17/11):
+  `rsync -a [--bwlimit=5000] --rsync-path='wsl rsync'`, `scp [-l 40000]`, preservando
   `.ninja_log`/`.ninja_deps`. RAM já teve bit flips: confira md5 depois do relink. O WSL desliga
   quando a última sessão `wsl.exe` fecha: mantenha o `ssh ryzen wsl ...` aberto durante o build.
 - **Configure do NRO falha com "block count mismatch" ou link sem `Oot3dWholeAotHookGates` (12/11)** → desde a
