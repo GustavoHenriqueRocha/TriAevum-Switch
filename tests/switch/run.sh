@@ -126,6 +126,9 @@ result test_backup_saves "$code"
 (cd "$here/../.." && python3 -m unittest tools.triaevum_release.test_topscreen_30_pack) > /tmp/switch-topscreen.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-topscreen.$$ | sed 's/^/  /'; rm -f /tmp/switch-topscreen.$$
 result test_topscreen_30_pack "$code"
+python3 -m unittest "$here/../../tools/oot3d/test_switch_release.py" > /tmp/switch-release.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-release.$$ | sed 's/^/  /'; rm -f /tmp/switch-release.$$
+result test_switch_release "$code"
 python3 "$here/test_perpixel_lighting.py" > /tmp/switch-perpixel.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-perpixel.$$ | sed 's/^/  /'; rm -f /tmp/switch-perpixel.$$
 result test_perpixel_lighting "$code"
