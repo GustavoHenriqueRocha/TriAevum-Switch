@@ -142,8 +142,10 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   (`--extra-romfs-image`, commits d9359b8f/789e9a62, teste `test_topscreen_30_pack.py`).
 - **FTP do Sphaira some** → ele fecha com o jogo aberto. → Comandos durante o jogo vão por
   `lab/script.jsonl` (lido na abertura) com a op `gameplay`; FTP só com o jogo fechado.
-- **Wi-Fi caiu durante envio (25/10)** → tráfego acima de 5 MB/s no total. → Um envio por vez:
-  `curl --limit-rate 5M`, `scp -l 40000`, `rsync --bwlimit=5000`.
+- **Wi-Fi caiu durante envio (25/10)** → tráfego acima de 5 MB/s no total, no Wi-Fi de casa (o Tenda
+  reinicia sob carga). → Com o notebook no Wi-Fi de casa (192.168.100.x), um envio por vez:
+  `curl --limit-rate 5M`, `scp -l 40000`, `rsync --bwlimit=5000`. No cabo de casa e na fábrica
+  (192.168.3.x) vai sem limite (Gustavo, 17/11).
 - **Notebook a 96–99 °C** → builds com 3 jobs ou mais de um agente compilando; o `build-local.sh`
   (SIGSTOP a 85 °C, retoma a 75 °C) não segura picos curtos. → No notebook só
   `~/oot3d-work/build-local.sh` com 2 jobs e `LIMITE=80`, um build por vez. Ver
