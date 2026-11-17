@@ -368,6 +368,8 @@ std::vector<ReleaseCandidate> SelectCandidates(std::string_view listingJson,
   }
   const std::string downloads =
       "https://github.com/" + std::string(repository) + "/releases/download/";
+  const std::string apiAssets =
+      Lower("https://api.github.com/repos/" + std::string(repository) + "/releases/assets/");
   for (const Json &release : listing) {
     if (!release.is_object() || BoolMember(release, "draft")) continue;
     ReleaseCandidate candidate;
@@ -400,6 +402,11 @@ std::vector<ReleaseCandidate> SelectCandidates(std::string_view listingJson,
       asset.Name = *name;
       asset.Size = *size;
       asset.Url = *url;
+      if (const auto api = StringMember(entry, "url");
+          api && api->size() > apiAssets.size() && Lower(api->substr(0, apiAssets.size())) == apiAssets &&
+          std::all_of(api->begin() + static_cast<std::ptrdiff_t>(apiAssets.size()), api->end(),
+                      [](char c) { return c >= '0' && c <= '9'; }))
+        asset.ApiUrl = *api;
       if (const auto digest = StringMember(entry, "digest");
           digest && digest->compare(0, 7, "sha256:") == 0 && IsSha256Hex(digest->substr(7)))
         asset.Sha256 = digest->substr(7);
@@ -414,6 +421,22 @@ std::vector<ReleaseCandidate> SelectCandidates(std::string_view listingJson,
                      return CompareSemVer(a.ParsedVersion, b.ParsedVersion) > 0;
                    });
   return candidates;
+}
+
+bool IsAccessToken(std::string_view text) {
+  return !text.empty() && text.size() <= 255U && std::all_of(text.begin(), text.end(), [](char c) {
+    return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+  });
+}
+
+bool SendsToken(std::string_view url) { return url.substr(0, 23) == "https://api.github.com/"; }
+
+const std::string &DownloadUrl(const ReleaseAsset &asset, bool withToken) {
+  return withToken && !asset.ApiUrl.empty() ? asset.ApiUrl : asset.Url;
+}
+
+bool CanCheck(std::string_view repository, bool withToken) {
+  return withToken || Lower(repository) != Lower(kDefaultRepository);
 }
 
 std::uint64_t QualifiedRelease::TotalBytes() const {

@@ -49,7 +49,8 @@ inline constexpr std::string_view kManifestAsset = "release.json";
 inline constexpr std::uint64_t kManifestMaxBytes = 64U << 10U;
 // The runtime itself; every release carries it.
 inline constexpr std::string_view kNroPath = "oot3d_native_game.nro";
-inline constexpr std::string_view kDefaultRepository = "JohnUzoka/TriAevum-Switch";
+// This project's releases (private: checked only with config/update_token).
+inline constexpr std::string_view kDefaultRepository = "GustavoHenriqueRocha/oot3dre-pessoal";
 
 struct ReleaseFile {
   std::string Path;   // relative to sdmc:/switch/oot3dre/, '/'-separated
@@ -84,6 +85,7 @@ struct ReleaseAsset {
   std::string Name;
   std::uint64_t Size = 0;
   std::string Url;    // browser_download_url (redirects to GitHub's CDN)
+  std::string ApiUrl; // the API's asset URL (needs a token on a private repository), else empty
   std::string Sha256; // from GitHub's "digest" when it lists one, else empty
 };
 
@@ -107,6 +109,17 @@ std::vector<ReleaseCandidate> SelectCandidates(std::string_view listingJson,
                                                std::string *error);
 // A valid repository name, "owner/name".
 bool IsRepositoryName(std::string_view text);
+
+// --- Private repository ---------------------------------------------------
+// config/update_token: a read-only GitHub token, one line of [A-Za-z0-9_].
+bool IsAccessToken(std::string_view text);
+// The token goes only to https://api.github.com/ (curl drops it on the
+// redirect to GitHub's CDN, another host).
+bool SendsToken(std::string_view url);
+// Where an asset downloads from: the API with a token, else the public URL.
+const std::string &DownloadUrl(const ReleaseAsset &asset, bool withToken);
+// Whether a check can ask `repository`: the default one is private.
+bool CanCheck(std::string_view repository, bool withToken);
 
 struct QualifiedRelease {
   ReleaseCandidate Release;

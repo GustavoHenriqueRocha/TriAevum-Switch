@@ -4534,6 +4534,7 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   Updates"; nothing downloads, and the tab shows the offer. The same or an older build, no
   network or a failed check: no notice (the tab and `logs/update.txt` say why). Cost: the listing
   and one `release.json` per launch.
+- Our releases (2026-11-17): the default repository is `GustavoHenriqueRocha/oot3dre-pessoal`, private. A read-only token in `config/update_token` (one line, `[A-Za-z0-9_]`) goes as `Authorization: Bearer` only to `https://api.github.com/` (curl drops it on the redirect to the CDN); with it, assets download through the API's asset URL. Without a token the default repository is never asked (no launch check, the tab says why): the game works the same, and `config/update_repo` can name a public repository. Stable = a GitHub release that is not a pre-release, promoted only after a console test.
 - `release.json`: `{"format": "oot3dre_switch_release_v1", "version", "build" (> 0), "channel"
   ("stable" for a full release, "test" for a pre-release), "files": [{"path", "size", "sha256"}]}`.
   Paths are relative to `sdmc:/switch/oot3dre/`, `[A-Za-z0-9._-]` components, never under

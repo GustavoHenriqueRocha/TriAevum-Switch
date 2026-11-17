@@ -33,8 +33,10 @@ public:
     bool Cancelling = false;
   };
 
-  // `root` is sdmc:/switch/oot3dre; `installedBuild` this build's number.
-  SwitchUpdater(std::filesystem::path root, std::string repository, std::uint64_t installedBuild);
+  // `root` is sdmc:/switch/oot3dre; `installedBuild` this build's number;
+  // `token` (may be empty) reads a private repository.
+  SwitchUpdater(std::filesystem::path root, std::string repository, std::string token,
+                std::uint64_t installedBuild);
   // Cancels what is running and waits for the thread.
   ~SwitchUpdater();
   SwitchUpdater(const SwitchUpdater &) = delete;
@@ -50,6 +52,7 @@ public:
   Status Snapshot() const;
   bool Busy() const;
   const std::string &Repository() const { return mRepository; }
+  bool HasToken() const { return !mToken.empty(); }
 
 private:
   bool Start(Phase phase, void (SwitchUpdater::*job)());
@@ -61,6 +64,7 @@ private:
 
   std::filesystem::path mRoot;
   std::string mRepository;
+  std::string mToken;
   std::uint64_t mInstalledBuild;
   Update::Channel mChannel = Update::Channel::Stable;
   std::function<void(const Status &)> mCheckDone; // set by Check while no worker runs

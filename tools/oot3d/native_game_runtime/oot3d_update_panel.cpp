@@ -23,6 +23,8 @@ using namespace Update;
 
 constexpr const char *kChannelFile = "update_channel";
 constexpr const char *kRepositoryFile = "update_repo";
+// A read-only GitHub token for the default (private) repository.
+constexpr const char *kTokenFile = "update_token";
 // Present = no check at launch (on by default).
 constexpr const char *kNoLaunchCheckFile = "no_update_check";
 
@@ -40,6 +42,12 @@ std::string LoadRepository(const std::filesystem::path &config) {
   return IsRepositoryName(text) ? text : std::string(kDefaultRepository);
 }
 
+// config/update_token when it holds a token; else none (public repositories only).
+std::string LoadToken(const std::filesystem::path &config) {
+  std::string text = ReadTrimmed(config / kTokenFile);
+  return IsAccessToken(text) ? text : std::string();
+}
+
 std::string Megabytes(std::uint64_t bytes) {
   char text[32];
   std::snprintf(text, sizeof(text), "%.1f MB", static_cast<double>(bytes) / 1e6);
@@ -50,7 +58,7 @@ class UpdatePanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
 public:
   explicit UpdatePanel(std::filesystem::path root)
       : mRoot(std::move(root)), mConfig(mRoot / "config"),
-        mUpdater(mRoot, LoadRepository(mConfig), BuildNumber()) {
+        mUpdater(mRoot, LoadRepository(mConfig), LoadToken(mConfig), BuildNumber()) {
     const auto saved = ParseChannel(ReadTrimmed(mConfig / kChannelFile));
     mChannel = saved.value_or(DefaultChannelFor(BuildVersion()));
     std::error_code ignored;
@@ -61,7 +69,7 @@ public:
     // At launch (this tab is made once the game starts): a notice when a
     // newer version is out. Nothing downloads until the player chooses to.
     mLaunchCheck = !std::filesystem::exists(mConfig / kNoLaunchCheckFile, ignored);
-    if (mLaunchCheck)
+    if (mLaunchCheck && CanCheck(mUpdater.Repository(), mUpdater.HasToken()))
       mUpdater.Check(mChannel, [](const SwitchUpdater::Status &status) {
         if (status.Offer && status.Kind == OfferKind::Update)
           Fast::Oot3d::PostHostNotice("Version " + status.Offer->Manifest.Version +
@@ -81,7 +89,12 @@ public:
     const auto status = mUpdater.Snapshot();
     switch (status.State) {
     case SwitchUpdater::Phase::Idle:
-      if (ImGui::Button("Check for updates")) mUpdater.Check(mChannel);
+      if (!CanCheck(mUpdater.Repository(), mUpdater.HasToken()))
+        ImGui::TextWrapped("This project's releases are private: put a read-only token in config/%s, or "
+                           "name a public repository in config/%s.",
+                           kTokenFile, kRepositoryFile);
+      else if (ImGui::Button("Check for updates"))
+        mUpdater.Check(mChannel);
       break;
     case SwitchUpdater::Phase::Checking:
       ImGui::TextUnformatted(status.Cancelling ? "Cancelling..." : "Checking GitHub...");

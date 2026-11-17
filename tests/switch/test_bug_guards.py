@@ -1930,7 +1930,7 @@ GUARDS = [
           r'devoptab_list\[STD_OUT\] = console;'),
     Guard("game data import hands over to the HUD texture offer on the same console (no screen of its own)",
           "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
-          r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - game data import"\);',
+          r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - game data import(\\n[^"]*)?"\);',
           forbid=r'SwitchConsoleScreen screen\('),
     Guard("HUD texture offer reuses the start-up console the import opened",
           "tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp",

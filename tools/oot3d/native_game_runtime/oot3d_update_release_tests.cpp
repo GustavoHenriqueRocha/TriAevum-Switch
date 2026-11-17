@@ -373,6 +373,55 @@ void TestInstall() {
 }
 } // namespace
 
+void TestPrivateRepository() {
+  // A private repository's assets only download through the API with a token:
+  // GitHub's "url" is kept when it is this repository's asset endpoint.
+  const char *kOwn = "GustavoHenriqueRocha/oot3dre-pessoal";
+  const std::string api = std::string("https://api.github.com/repos/") + kOwn + "/releases/assets/";
+  auto withUrl = [&](const char *name, const std::string &url) {
+    std::string text = Asset("v1.0.0", name, 400, nullptr, kOwn);
+    text.pop_back();
+    return text + R"(,"url":")" + url + "\"}";
+  };
+  const std::string listing =
+      "[" + Release("v1.0.0", false,
+                    withUrl("release.json", api + "11") + "," +
+                        withUrl("oot3d_native_game.nro", "https://api.github.com/repos/someone/else/releases/assets/12") +
+                        "," + withUrl("deko3d.pack", api + "13x") + "," +
+                        withUrl("resources.o2r", "https://evil.example/repos/" + std::string(kOwn) +
+                                                     "/releases/assets/14")) +
+      "]";
+  std::string error;
+  const auto candidates = SelectCandidates(listing, kOwn, Channel::Stable, &error);
+  Require(candidates.size() == 1U, "a private repository's release is listed");
+  if (candidates.size() == 1U) {
+    const auto &assets = candidates[0].Assets;
+    Require(assets.size() == 4U && assets[0].ApiUrl == api + "11", "the API asset URL is kept");
+    Require(assets.size() == 4U && assets[1].ApiUrl.empty() && assets[2].ApiUrl.empty() &&
+                assets[3].ApiUrl.empty(),
+            "an API URL of another repository, id or host is dropped");
+    Require(DownloadUrl(assets[0], true) == assets[0].ApiUrl, "with a token, download through the API");
+    Require(DownloadUrl(assets[0], false) == assets[0].Url, "without a token, the public download URL");
+    Require(DownloadUrl(assets[1], true) == assets[1].Url, "no API URL: the public download URL");
+  }
+  Require(SendsToken("https://api.github.com/repos/a/b/releases?per_page=30") &&
+              !SendsToken("https://github.com/a/b/releases/download/v1/x") &&
+              !SendsToken("https://api.github.com.evil.example/repos") &&
+              !SendsToken("http://api.github.com/repos") && !SendsToken("https://api.github.com"),
+          "the token only goes to GitHub's API over HTTPS");
+  Require(IsAccessToken("github_pat_11ABC_def0") && IsAccessToken("ghp_abc123") && !IsAccessToken("") &&
+              !IsAccessToken("ghp_abc\r\nX-Other: 1") && !IsAccessToken("a b") &&
+              !IsAccessToken(std::string(256, 'a')),
+          "a token is one line of letters, digits and _");
+  // Without a token the default (private) repository is not asked: the game
+  // works the same, and config/update_repo can name a public one.
+  Require(!CanCheck(kDefaultRepository, false) && CanCheck(kDefaultRepository, true) &&
+              CanCheck("JohnUzoka/TriAevum-Switch", false) && CanCheck("gustavohenriquerocha/OOT3DRE-pessoal", true) &&
+              !CanCheck("gustavohenriquerocha/OOT3DRE-pessoal", false),
+          "check the private repository only with a token");
+  Require(kDefaultRepository == kOwn, "updates come from this project by default");
+}
+
 int main() {
   TestVersions();
   TestChannels();
@@ -380,6 +429,7 @@ int main() {
   TestManifest();
   TestSelection();
   TestQualify();
+  TestPrivateRepository();
   TestInstall();
   if (gFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", gFailures);

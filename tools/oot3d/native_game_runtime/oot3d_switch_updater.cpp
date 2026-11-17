@@ -30,10 +30,12 @@ constexpr size_t kWriteBuffer = 1U << 20U;
 
 // HTTPS GET from GitHub's API or a release asset (which redirects to
 // GitHub's CDN), explaining GitHub's rate limit.
-GetResult HttpGet(const std::string &url, const char *accept, Transfer &transfer, std::string *error) {
+GetResult HttpGet(const std::string &url, const char *accept, const std::string &token, Transfer &transfer,
+                  std::string *error) {
   long status = 0;
-  const GetResult result = SwitchNetwork::HttpGet(
-      url, {std::string("Accept: ") + accept, "X-GitHub-Api-Version: 2022-11-28"}, transfer, &status, error);
+  std::vector<std::string> headers{std::string("Accept: ") + accept, "X-GitHub-Api-Version: 2022-11-28"};
+  if (!token.empty() && SendsToken(url)) headers.push_back("Authorization: Bearer " + token);
+  const GetResult result = SwitchNetwork::HttpGet(url, headers, transfer, &status, error);
   if (result == GetResult::Failed && status >= 400) {
     *error = status == 403 || status == 429
                  ? "GitHub refused the request (HTTP " + std::to_string(status) +
@@ -43,7 +45,7 @@ GetResult HttpGet(const std::string &url, const char *accept, Transfer &transfer
   return result;
 }
 
-GetResult GetText(const std::string &url, const char *accept, std::uint64_t limit,
+GetResult GetText(const std::string &url, const char *accept, const std::string &token, std::uint64_t limit,
                   const std::atomic<bool> &cancel, std::string *text, std::string *error) {
   Transfer transfer;
   transfer.Limit = limit;
@@ -52,7 +54,7 @@ GetResult GetText(const std::string &url, const char *accept, std::uint64_t limi
     text->append(data, length);
     return true;
   };
-  return HttpGet(url, accept, transfer, error);
+  return HttpGet(url, accept, token, transfer, error);
 }
 
 std::string Hex(const unsigned char *bytes, size_t size) {
@@ -73,9 +75,10 @@ std::string Megabytes(std::uint64_t bytes) {
 }
 } // namespace
 
-SwitchUpdater::SwitchUpdater(std::filesystem::path root, std::string repository,
+SwitchUpdater::SwitchUpdater(std::filesystem::path root, std::string repository, std::string token,
                              std::uint64_t installedBuild)
-    : mRoot(std::move(root)), mRepository(std::move(repository)), mInstalledBuild(installedBuild) {}
+    : mRoot(std::move(root)), mRepository(std::move(repository)), mToken(std::move(token)),
+      mInstalledBuild(installedBuild) {}
 
 SwitchUpdater::~SwitchUpdater() {
   mCancel.store(true);
@@ -182,7 +185,7 @@ void SwitchUpdater::RunCheckSteps() {
   std::string listing;
   std::string error;
   const std::string url = "https://api.github.com/repos/" + mRepository + "/releases?per_page=30";
-  switch (GetText(url, "application/vnd.github+json", kListingMaxBytes, mCancel, &listing, &error)) {
+  switch (GetText(url, "application/vnd.github+json", mToken, kListingMaxBytes, mCancel, &listing, &error)) {
   case GetResult::Cancelled:
     Finish(Phase::Idle, "");
     return;
@@ -204,7 +207,7 @@ void SwitchUpdater::RunCheckSteps() {
     const auto &candidate = candidates[index];
     const ReleaseAsset *manifestAsset = candidate.FindAsset(kManifestAsset);
     std::string manifest;
-    switch (GetText(manifestAsset->Url, "application/octet-stream", kManifestMaxBytes, mCancel, &manifest,
+    switch (GetText(DownloadUrl(*manifestAsset, HasToken()), "application/octet-stream", mToken, kManifestMaxBytes, mCancel, &manifest,
                     &error)) {
     case GetResult::Cancelled:
       Finish(Phase::Idle, "");
@@ -290,7 +293,8 @@ void SwitchUpdater::RunInstall() {
       return true;
     };
     std::string error;
-    const GetResult result = HttpGet(release.Downloads[index].Url, "application/octet-stream", transfer, &error);
+    const GetResult result = HttpGet(DownloadUrl(release.Downloads[index], HasToken()), "application/octet-stream",
+                                     mToken, transfer, &error);
     std::array<unsigned char, 32> digest{};
     mbedtls_sha256_finish_ret(&sha, digest.data());
     mbedtls_sha256_free(&sha);

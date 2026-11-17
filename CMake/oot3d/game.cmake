@@ -863,7 +863,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         -Wl,--wrap=hidLaShowControllerSupportForSystem)
     nx_generate_nacp(oot3d_native_game.nacp
         NAME "The Legend of Zelda: Ocarina of Time 3D Recompiled"
-        AUTHOR "OoT3D Recompiled contributors"
+        AUTHOR "Gustavo Henrique Rocha & OoT3D Recompiled contributors"
         VERSION "${OOT3D_RELEASE_VERSION}")
     nx_create_nro(oot3d_native_game
         NACP oot3d_native_game.nacp
