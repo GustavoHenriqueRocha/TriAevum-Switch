@@ -38,9 +38,9 @@ GetResult HttpGet(const std::string &url, const char *accept, const std::string 
   const GetResult result = SwitchNetwork::HttpGet(url, headers, transfer, &status, error);
   if (result == GetResult::Failed && status >= 400) {
     *error = status == 403 || status == 429
-                 ? "GitHub refused the request (HTTP " + std::to_string(status) +
-                       "): it allows 60 checks an hour per internet address; try again later"
-                 : "GitHub answered HTTP " + std::to_string(status);
+                 ? "O GitHub recusou o pedido (HTTP " + std::to_string(status) +
+                       "): ele aceita 60 checagens por hora por endereço; tente mais tarde"
+                 : "O GitHub respondeu HTTP " + std::to_string(status);
   }
   return result;
 }
@@ -107,7 +107,7 @@ bool SwitchUpdater::Start(Phase phase, void (SwitchUpdater::*job)()) {
     mWorker = std::thread([this, job] { (this->*job)(); });
   } catch (const std::exception &exception) {
     mRunning.store(false);
-    Finish(Phase::Failed, std::string("cannot start the update thread: ") + exception.what());
+    Finish(Phase::Failed, std::string("não foi possível iniciar a thread de atualização: ") + exception.what());
     return false;
   }
   return true;
@@ -179,7 +179,7 @@ void SwitchUpdater::RunCheck() {
 void SwitchUpdater::RunCheckSteps() {
   NetworkSession network;
   if (!network.Ready()) {
-    Finish(Phase::Failed, "No network: connect the console to the internet and try again.");
+    Finish(Phase::Failed, "Sem rede: conecte o console à internet e tente de novo.");
     return;
   }
   std::string listing;
@@ -190,15 +190,15 @@ void SwitchUpdater::RunCheckSteps() {
     Finish(Phase::Idle, "");
     return;
   case GetResult::Failed:
-    Finish(Phase::Failed, "Could not read the releases of " + mRepository + ": " + error);
+    Finish(Phase::Failed, "Não foi possível ler os releases de " + mRepository + ": " + error);
     return;
   case GetResult::Ok:
     break;
   }
   const auto candidates = SelectCandidates(listing, mRepository, mChannel, &error);
   if (candidates.empty()) {
-    Finish(Phase::Checked, error.empty() ? std::string("No release on the ") + ChannelName(mChannel) +
-                                               " channel yet."
+    Finish(Phase::Checked, error.empty() ? std::string("Ainda não há release no canal ") + ChannelName(mChannel) +
+                                               "."
                                          : error);
     return;
   }
@@ -231,11 +231,11 @@ void SwitchUpdater::RunCheckSteps() {
       mStatus.BytesTotal = mStatus.Offer->TotalBytes();
     }
     Log(rejected);
-    Finish(Phase::Checked, "Found " + candidate.Tag);
+    Finish(Phase::Checked, "Encontrada " + candidate.Tag);
     return;
   }
-  Finish(Phase::Checked, "No complete release on the " + std::string(ChannelName(mChannel)) +
-                             " channel:\n" + rejected);
+  Finish(Phase::Checked, "Nenhum release completo no canal " + std::string(ChannelName(mChannel)) +
+                             ":\n" + rejected);
 }
 
 void SwitchUpdater::RunInstall() {
@@ -252,13 +252,13 @@ void SwitchUpdater::RunInstall() {
   std::error_code spaceError;
   const auto space = std::filesystem::space(mRoot, spaceError);
   if (!spaceError && space.available < release.TotalBytes() + kSpareBytes) {
-    fail(Phase::Failed, "Not enough space on the SD card: " + Megabytes(release.TotalBytes() + kSpareBytes) +
+    fail(Phase::Failed, "Falta espaço no cartão SD: " + Megabytes(release.TotalBytes() + kSpareBytes) +
                             " needed, " + Megabytes(space.available) + " free.");
     return;
   }
   NetworkSession network;
   if (!network.Ready()) {
-    fail(Phase::Failed, "No network: connect the console to the internet and try again.");
+    fail(Phase::Failed, "Sem rede: conecte o console à internet e tente de novo.");
     return;
   }
   Log("installing " + release.Release.Tag + " (build " + std::to_string(manifest.Build) + ")");
@@ -276,7 +276,7 @@ void SwitchUpdater::RunInstall() {
     std::filesystem::create_directories(staged.parent_path(), ignored);
     std::unique_ptr<std::FILE, int (*)(std::FILE *)> out(std::fopen(staged.c_str(), "wb"), &std::fclose);
     if (!out) {
-      fail(Phase::Failed, "Cannot write " + staged.string());
+      fail(Phase::Failed, "Não foi possível gravar " + staged.string());
       return;
     }
     std::setvbuf(out.get(), buffer.data(), _IOFBF, buffer.size());
@@ -300,20 +300,20 @@ void SwitchUpdater::RunInstall() {
     mbedtls_sha256_free(&sha);
     const bool closed = std::fclose(out.release()) == 0;
     if (result == GetResult::Cancelled) {
-      fail(Phase::Checked, "Download cancelled.");
+      fail(Phase::Checked, "Download cancelado.");
       return;
     }
     if (result == GetResult::Failed) {
-      fail(Phase::Failed, "Download of " + file.Path + " failed: " + error);
+      fail(Phase::Failed, "O download de " + file.Path + " falhou: " + error);
       return;
     }
     if (!closed || transfer.Received != file.Size) {
-      fail(Phase::Failed, "Download of " + file.Path + " is incomplete (" + std::to_string(transfer.Received) +
+      fail(Phase::Failed, "O download de " + file.Path + " veio incompleto (" + std::to_string(transfer.Received) +
                               " of " + std::to_string(file.Size) + " bytes).");
       return;
     }
     if (Hex(digest.data(), digest.size()) != file.Sha256) {
-      fail(Phase::Failed, "Download of " + file.Path + " is damaged (SHA-256 mismatch).");
+      fail(Phase::Failed, "O download de " + file.Path + " veio danificado (SHA-256 não confere).");
       return;
     }
     doneBefore += file.Size;
@@ -322,20 +322,20 @@ void SwitchUpdater::RunInstall() {
   std::string error;
   const auto nroVersion = ReadNroDisplayVersion(StagedPath(mRoot / kNroPath), &error);
   if (!nroVersion || *nroVersion != manifest.Version) {
-    fail(Phase::Failed, "The downloaded NRO is not version " + manifest.Version + ": " +
-                            (nroVersion ? "it says " + *nroVersion : error));
+    fail(Phase::Failed, "O NRO baixado não é da versão " + manifest.Version + ": " +
+                            (nroVersion ? "ele diz " + *nroVersion : error));
     return;
   }
   if (mCancel.load()) {
-    fail(Phase::Checked, "Download cancelled.");
+    fail(Phase::Checked, "Download cancelado.");
     return;
   }
   if (!CommitStagedRelease(mRoot, manifest, &error)) {
     // CommitStagedRelease already removed the staged files.
-    Finish(Phase::Failed, "Could not install: " + error + ". The installed version is unchanged.");
+    Finish(Phase::Failed, "Não foi possível instalar: " + error + ". A versão instalada continua a mesma.");
     return;
   }
-  Finish(Phase::Installed, "Installed " + release.Release.Tag + ". It starts with the next launch.");
+  Finish(Phase::Installed, "Instalada a " + release.Release.Tag + ". Ela entra na próxima vez que o jogo abrir.");
 }
 
 } // namespace Oot3dNativeGame

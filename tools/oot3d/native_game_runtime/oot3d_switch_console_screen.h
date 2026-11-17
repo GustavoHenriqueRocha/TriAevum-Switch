@@ -5,6 +5,7 @@
 // over to the HUD texture offer without the screen going away in between.
 #if defined(__SWITCH__)
 
+#include "oot3d_console_text.h"
 #include <switch.h>
 #include <sys/iosupport.h>
 
@@ -46,7 +47,7 @@ public:
 
     void Show(const std::string& body) {
         consoleClear();
-        std::printf("\x1b[1;1H\x1b[36m%s\x1b[0m\n\n%s", mTitle.c_str(), body.c_str());
+        std::printf("\x1b[1;1H\x1b[36m%s\x1b[0m\n\n%s", ToConsoleText(mTitle).c_str(), ToConsoleText(body).c_str());
         consoleUpdate(nullptr);
     }
 

@@ -453,6 +453,13 @@ target_link_libraries(oot3d_input_bench_tests PRIVATE
     oot3d_native_a32_input)
 oot3d_target_defaults(oot3d_input_bench_tests FOLDER Tests)
 
+# PT-BR start-up screens on libnx's console font (code page 437).
+add_executable(oot3d_console_text_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_console_text_tests.cpp
+)
+target_compile_features(oot3d_console_text_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_console_text_tests FOLDER Tests)
+
 # OTA updater rules: versions, channels, release.json, release selection and
 # the install/rollback steps (oot3d_update_release.h).
 add_executable(oot3d_update_release_tests EXCLUDE_FROM_ALL

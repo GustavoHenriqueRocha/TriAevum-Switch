@@ -72,33 +72,33 @@ public:
     if (mLaunchCheck && CanCheck(mUpdater.Repository(), mUpdater.HasToken()))
       mUpdater.Check(mChannel, [](const SwitchUpdater::Status &status) {
         if (status.Offer && status.Kind == OfferKind::Update)
-          Fast::Oot3d::PostHostNotice("Version " + status.Offer->Manifest.Version +
-                                          " is available: L3+R3 > Updates",
+          Fast::Oot3d::PostHostNotice("Versão " + status.Offer->Manifest.Version +
+                                          " disponível: L3+R3 > Atualizações",
                                       false, std::chrono::seconds(10));
       });
   }
 
-  const char *Label() const noexcept override { return "Updates"; }
+  const char *Label() const noexcept override { return "Atualizações"; }
 
   void Draw() override {
-    ImGui::Text("Installed: %s", BuildVersion());
+    ImGui::Text("Instalada: %s", BuildVersion());
     DrawChannel();
     DrawLaunchCheck();
-    ImGui::TextDisabled("Releases from github.com/%s", mUpdater.Repository().c_str());
+    ImGui::TextDisabled("Releases de github.com/%s", mUpdater.Repository().c_str());
     ImGui::Separator();
     const auto status = mUpdater.Snapshot();
     switch (status.State) {
     case SwitchUpdater::Phase::Idle:
       if (!CanCheck(mUpdater.Repository(), mUpdater.HasToken()))
-        ImGui::TextWrapped("This project's releases are private: put a read-only token in config/%s, or "
-                           "name a public repository in config/%s.",
+        ImGui::TextWrapped("Os releases deste projeto são privados: ponha um token só-leitura em config/%s, ou "
+                           "o nome de um repositório público em config/%s.",
                            kTokenFile, kRepositoryFile);
-      else if (ImGui::Button("Check for updates"))
+      else if (ImGui::Button("Procurar atualização"))
         mUpdater.Check(mChannel);
       break;
     case SwitchUpdater::Phase::Checking:
-      ImGui::TextUnformatted(status.Cancelling ? "Cancelling..." : "Checking GitHub...");
-      if (!status.Cancelling && ImGui::Button("Cancel")) mUpdater.Cancel();
+      ImGui::TextUnformatted(status.Cancelling ? "Cancelando..." : "Consultando o GitHub...");
+      if (!status.Cancelling && ImGui::Button("Cancelar")) mUpdater.Cancel();
       break;
     case SwitchUpdater::Phase::Checked:
       DrawChecked(status);
@@ -113,7 +113,7 @@ public:
       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.45F, 0.4F, 1.0F));
       ImGui::TextWrapped("%s", status.Message.c_str());
       ImGui::PopStyleColor();
-      if (ImGui::Button("Check again")) mUpdater.Check(mChannel);
+      if (ImGui::Button("Procurar de novo")) mUpdater.Check(mChannel);
       break;
     }
     DrawHudTextures();
@@ -121,10 +121,10 @@ public:
 
 private:
   void DrawChannel() {
-    const char *const channels[] = {"Stable (releases only)", "Test (also pre-releases)"};
+    const char *const channels[] = {"Estável (só versões testadas)", "Teste (também pré-releases)"};
     int channel = mChannel == Channel::Test ? 1 : 0;
     ImGui::BeginDisabled(mUpdater.Busy());
-    if (ImGui::Combo("Channel", &channel, channels, 2)) {
+    if (ImGui::Combo("Canal", &channel, channels, 2)) {
       mChannel = channel == 1 ? Channel::Test : Channel::Stable;
       mUpdater.Reset(); // an offer from the other channel no longer applies
       std::error_code ignored;
@@ -134,12 +134,12 @@ private:
       mChannelError = !file;
     }
     ImGui::EndDisabled();
-    if (mChannelError) ImGui::TextWrapped("Could not write config/%s.", kChannelFile);
+    if (mChannelError) ImGui::TextWrapped("Não foi possível gravar config/%s.", kChannelFile);
   }
 
   // config/no_update_check: read at launch, so a change applies at the next one.
   void DrawLaunchCheck() {
-    if (ImGui::Checkbox("Check at launch", &mLaunchCheck)) {
+    if (ImGui::Checkbox("Procurar ao abrir o jogo", &mLaunchCheck)) {
       std::error_code error;
       if (mLaunchCheck) {
         std::filesystem::remove(mConfig / kNoLaunchCheckFile, error);
@@ -151,41 +151,41 @@ private:
       mLaunchCheckError = static_cast<bool>(error);
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("(a notice when a newer version is out)");
-    if (mLaunchCheckError) ImGui::TextWrapped("Could not write config/%s.", kNoLaunchCheckFile);
+    ImGui::TextDisabled("(avisa quando sai uma versão nova)");
+    if (mLaunchCheckError) ImGui::TextWrapped("Não foi possível gravar config/%s.", kNoLaunchCheckFile);
   }
 
   void DrawChecked(const SwitchUpdater::Status &status) {
     if (!status.Offer) {
       ImGui::TextWrapped("%s", status.Message.c_str());
-      if (ImGui::Button("Check again")) mUpdater.Check(mChannel);
+      if (ImGui::Button("Procurar de novo")) mUpdater.Check(mChannel);
       return;
     }
     const auto &offer = *status.Offer;
-    ImGui::Text("Latest on %s: %s, %s", ChannelName(mChannel), offer.Manifest.Version.c_str(),
+    ImGui::Text("Mais recente no canal %s: %s, %s", ChannelName(mChannel), offer.Manifest.Version.c_str(),
                 Megabytes(offer.TotalBytes()).c_str());
-    const char *action = "Download and install";
+    const char *action = "Baixar e instalar";
     switch (status.Kind) {
     case OfferKind::Update:
-      ImGui::TextUnformatted("A newer version is available.");
+      ImGui::TextUnformatted("Há uma versão mais nova.");
       break;
     case OfferKind::Reinstall:
-      ImGui::TextUnformatted("You have this version. Reinstall it to repair damaged or missing files.");
-      action = "Reinstall (repair)";
+      ImGui::TextUnformatted("Você já tem esta versão. Reinstale para consertar arquivos danificados ou faltando.");
+      action = "Reinstalar (consertar)";
       break;
     case OfferKind::Older:
-      ImGui::TextUnformatted("This version is older than the installed one (e.g. a newer test version).");
-      action = "Install this older version";
+      ImGui::TextUnformatted("Esta versão é mais antiga que a instalada (por exemplo, você está numa versão de teste mais nova).");
+      action = "Instalar esta versão mais antiga";
       break;
     }
-    if (status.Message.rfind("Download cancelled", 0) == 0) ImGui::TextDisabled("%s", status.Message.c_str());
+    if (status.Message.rfind("Download cancelado", 0) == 0) ImGui::TextDisabled("%s", status.Message.c_str());
     if (ImGui::Button(action)) mUpdater.Install();
     ImGui::SameLine();
-    if (ImGui::Button("Check again")) mUpdater.Check(mChannel);
-    ImGui::SeparatorText("Release notes");
+    if (ImGui::Button("Procurar de novo")) mUpdater.Check(mChannel);
+    ImGui::SeparatorText("Notas da versão");
     const float height = ImGui::GetTextLineHeightWithSpacing() * 10.0F;
     if (ImGui::BeginChild("##ReleaseNotes", ImVec2(0.0F, height), true)) {
-      ImGui::TextWrapped("%s", offer.Release.Notes.empty() ? "(none)" : offer.Release.Notes.c_str());
+      ImGui::TextWrapped("%s", offer.Release.Notes.empty() ? "(nenhuma)" : offer.Release.Notes.c_str());
     }
     ImGui::EndChild();
   }
@@ -198,10 +198,10 @@ private:
     const std::string overlay = Megabytes(status.BytesDone) + " / " + Megabytes(status.BytesTotal);
     ImGui::TextUnformatted(status.CurrentFile.c_str());
     ImGui::ProgressBar(fraction, ImVec2(-1.0F, 0.0F), overlay.c_str());
-    ImGui::TextDisabled("You can keep playing; the game is not changed until the download is verified.");
+    ImGui::TextDisabled("Pode continuar jogando; nada muda no jogo até o download ser conferido.");
     if (status.Cancelling) {
-      ImGui::TextUnformatted("Cancelling...");
-    } else if (ImGui::Button("Cancel")) {
+      ImGui::TextUnformatted("Cancelando...");
+    } else if (ImGui::Button("Cancelar")) {
       mUpdater.Cancel();
     }
   }
@@ -209,22 +209,22 @@ private:
   // Exit game ends the application (oot3d_native_game.cpp): the homebrew loader
   // cannot start the new NRO from here, so the player starts it again.
   void DrawInstalled(const SwitchUpdater::Status &status) {
-    constexpr const char *kConfirm = "Close the game?";
+    constexpr const char *kConfirm = "Fechar o jogo?";
     ImGui::TextWrapped("%s", status.Message.c_str());
-    ImGui::TextWrapped("Close the game and start it again to play the new version.");
-    if (ImGui::Button("Close game")) ImGui::OpenPopup(kConfirm);
+    ImGui::TextWrapped("Feche o jogo e abra de novo para jogar a versão nova.");
+    if (ImGui::Button("Fechar o jogo")) ImGui::OpenPopup(kConfirm);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
     if (ImGui::BeginPopupModal(kConfirm, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                                    ImGuiWindowFlags_NoMove)) {
       ImGui::SetWindowFontScale(std::max(1.0F, ImGui::GetMainViewport()->WorkSize.y / 540.0F));
-      ImGui::TextUnformatted("Progress since your last save will be lost.");
-      if (ImGui::Button("Close game")) {
+      ImGui::TextUnformatted("O progresso desde o último save será perdido.");
+      if (ImGui::Button("Fechar o jogo")) {
         Fast::Oot3d::RequestExitGame();
         ImGui::CloseCurrentPopup();
       }
       ImGui::SameLine();
-      if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+      if (ImGui::Button("Cancelar")) ImGui::CloseCurrentPopup();
       ImGui::SetItemDefaultFocus();
       ImGui::EndPopup();
     }
@@ -234,37 +234,37 @@ private:
   // start-up from the mod downloaded from GameBanana. A player who skipped
   // the offer turns it back on here; it shows at the next start.
   void DrawHudTextures() {
-    ImGui::SeparatorText("HUD textures");
-    ImGui::TextWrapped("Art from the mod \"%s\" by %s (%s, %s).", TopScreenImport::kModName,
+    ImGui::SeparatorText("Texturas do HUD");
+    ImGui::TextWrapped("Arte do mod \"%s\" de %s (%s, %s).", TopScreenImport::kModName,
                        TopScreenImport::kModAuthor, TopScreenImport::kModPage, TopScreenImport::kModLicense);
     // Roll dash (oot3d_roll_dash.h) with the HUD built before the import
     // extracted Link's dash animations: the start-up offer adds them.
     const bool dashAnimationsMissing =
         RollDashEnabled().load(std::memory_order_relaxed) && !mDashAnimationsInstalled;
     if (mHudInstalled && mHudArtInstalled && !dashAnimationsMissing) {
-      ImGui::TextUnformatted("Installed, with the HD HUD art.");
+      ImGui::TextUnformatted("Instaladas, com a arte HD do HUD.");
       return;
     }
     if (mHudInstalled && mHudArtInstalled)
-      ImGui::TextWrapped("Installed, with the HD HUD art, but without Link's dash animations for Roll dash "
-                         "(L3+R3 > Game > Gameplay). The console downloads the mod again from GameBanana (%s) "
-                         "at start-up to add them.",
+      ImGui::TextWrapped("Instaladas, com a arte HD do HUD, mas sem as animações de arrancada do Link para o Roll dash "
+                         "(L3+R3 > Game > Gameplay). O console baixa o mod de novo do GameBanana (%s) "
+                         "ao abrir o jogo para adicioná-las.",
                          Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
     else if (mHudInstalled)
-      ImGui::TextWrapped("Installed without all of the HD HUD art (built by an earlier version). The console downloads "
-                         "the mod again from GameBanana (%s) at start-up to add it.",
+      ImGui::TextWrapped("Instaladas sem toda a arte HD do HUD (montadas por uma versão anterior). O console baixa "
+                         "o mod de novo do GameBanana (%s) ao abrir o jogo para completá-la.",
                          Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
     else
-      ImGui::TextWrapped("Not installed. The console downloads the mod from GameBanana (%s) at start-up and builds "
-                         "the textures from your game data.",
+      ImGui::TextWrapped("Não instaladas. O console baixa o mod do GameBanana (%s) ao abrir o jogo e monta "
+                         "as texturas a partir dos seus dados do jogo.",
                          Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
     if (mHudOfferRequested) {
-      ImGui::TextWrapped("The next start offers the download. Close the game and start it again.");
+      ImGui::TextWrapped("A próxima abertura oferece o download. Feche o jogo e abra de novo.");
       return;
     }
     if (mHudOffer == TopScreenImport::OfferSetting::Never)
-      ImGui::TextDisabled("You chose not to be asked at start-up.");
-    if (ImGui::Button("Offer the download at the next start")) {
+      ImGui::TextDisabled("Você escolheu não ser perguntado ao abrir o jogo.");
+    if (ImGui::Button("Oferecer o download na próxima abertura")) {
       std::error_code ignored;
       std::filesystem::create_directories(mConfig, ignored);
       std::ofstream file(mConfig / TopScreenImport::kOfferSettingName, std::ios::trunc);
@@ -273,7 +273,7 @@ private:
       if (mHudOfferRequested) mHudOffer = TopScreenImport::OfferSetting::Ask;
       mHudOfferError = !file;
     }
-    if (mHudOfferError) ImGui::TextWrapped("Could not write config/%s.", TopScreenImport::kOfferSettingName);
+    if (mHudOfferError) ImGui::TextWrapped("Não foi possível gravar config/%s.", TopScreenImport::kOfferSettingName);
   }
 
   std::filesystem::path mRoot;

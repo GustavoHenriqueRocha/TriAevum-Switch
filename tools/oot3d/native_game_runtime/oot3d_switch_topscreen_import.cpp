@@ -6,6 +6,7 @@
 #include "oot3d_switch_console_screen.h"
 #include "oot3d_switch_network.h"
 #include "oot3d_roll_dash.h"
+#include "oot3d_romfs_mods.h"
 #include "oot3d_topscreen_import.h"
 
 #include <switch.h>
@@ -20,6 +21,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +40,25 @@ constexpr std::size_t kWriteBuffer = 1U << 20U;
 
 fs::path Root() { return kRoot; }
 fs::path Config() { return Root() / "config"; }
+
+// The RomFS mods the game will load (oot3d_romfs_mods.h): a texture they
+// replace gets a pack entry too (the PT-BR mod redraws menu_top_parts00).
+// Folder name order, the last one wins, like the overlay.
+ts::RomFsOverride ModFiles() {
+    if (!ReadRomFsModsEnabled(Config())) return {};
+    std::vector<fs::path> folders;
+    std::error_code error;
+    for (fs::directory_iterator it(Root() / "mods", error), end; !error && it != end; it.increment(error))
+        if (it->is_directory(error)) folders.push_back(it->path() / "romfs");
+    std::sort(folders.begin(), folders.end());
+    return [folders](std::string_view path) -> std::optional<ts::Bytes> {
+        for (auto folder = folders.rbegin(); folder != folders.rend(); ++folder) {
+            std::ifstream file(*folder / std::string(path), std::ios::binary);
+            if (file) return ts::Bytes(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+        return std::nullopt;
+    };
+}
 
 void Log(const std::string& line) {
     std::error_code error;
@@ -78,10 +99,10 @@ std::string Bar(std::uint64_t done, std::uint64_t total) {
 }
 
 std::string Attribution(const ts::Archive& archive) {
-    return std::string("The HUD and menu art of this port comes from the mod\n  ") + ts::kModName + " " +
-           archive.Version + " by " + ts::kModAuthor + "\n  " + ts::kModPage +
-           "\nIts license (" + ts::kModLicense + ") lets you download and install\n"
-           "it, but not share it, so it is not included with this game.\n\n";
+    return std::string("A arte do HUD e dos menus deste port vem do mod\n  ") + ts::kModName + " " +
+           archive.Version + " de " + ts::kModAuthor + "\n  " + ts::kModPage +
+           "\nA licença dele (" + ts::kModLicense + ") permite baixar e instalar,\n"
+           "mas não redistribuir; por isso ele não vem junto com o jogo.\n\n";
 }
 
 // `packExists` / `hdArtExists`: what is already installed; with both, the
@@ -92,27 +113,26 @@ std::string Offer(bool packExists, bool hdArtExists) {
     const std::string size = std::to_string((archive.Bytes + 500'000) / 1'000'000) + " MB";
     const std::string what =
         packExists && hdArtExists
-            ? "Roll dash (L3+R3 > Game > Gameplay) is on: Link dashes with the mod's\n"
-              "dash animations, which your HUD textures were built without. The\n"
-              "console can download the mod from GameBanana (" + size + ") and build them\n"
-              "again with the animations. Nothing else from the mod is installed, and\n"
-              "the download is deleted afterwards. Without them, Link dashes with his\n"
-              "normal run animation.\n\n"
+            ? "O Roll dash (L3+R3 > Game > Gameplay) está ligado: o Link usa as animações\n"
+              "de arrancada do mod, e suas texturas do HUD foram montadas sem elas. O\n"
+              "console pode baixar o mod do GameBanana (" + size + ") e montá-las de novo\n"
+              "com as animações. Nada mais do mod é instalado, e o download é apagado\n"
+              "depois. Sem elas, o Link arranca com a corrida normal.\n\n"
         : packExists
-            ? "Your HUD textures were built by an earlier version. This one also\n"
-              "builds the mod's HD HUD art (sharp buttons, D-pad, labels, hearts\n"
-              "and cursor at 720p), which needs the mod again: the console can download it\n"
-              "from GameBanana (" + size + ") and rebuild the textures from your own\n"
-              "game data. Nothing else from the mod is installed, and the download\n"
-              "is deleted afterwards. Without it, the HUD keeps its current art.\n\n"
-            : "The console can download it from GameBanana (" + size + ") and build the\n"
-              "textures, the HD HUD art and the HD text font from your own game data.\n"
-              "Nothing else from the mod is installed, and the download is deleted\n"
-              "afterwards. Without them, parts of the HUD may be missing.\n\n";
+            ? "Suas texturas do HUD foram montadas por uma versão anterior. Esta também\n"
+              "monta a arte HD do HUD (botões, direcional, rótulos, corações e cursor\n"
+              "nítidos em 720p), que precisa do mod de novo: o console pode baixá-lo\n"
+              "do GameBanana (" + size + ") e remontar as texturas a partir dos seus\n"
+              "dados do jogo. Nada mais do mod é instalado, e o download é apagado\n"
+              "depois. Sem ele, o HUD continua com a arte atual.\n\n"
+            : "O console pode baixá-lo do GameBanana (" + size + ") e montar as texturas,\n"
+              "a arte HD do HUD e a fonte HD dos textos a partir dos seus dados do jogo.\n"
+              "Nada mais do mod é instalado, e o download é apagado depois.\n"
+              "Sem eles, partes do HUD podem faltar.\n\n";
     return Attribution(archive) + what +
-           "  A  Download (" + size + ") and start the game\n"
-           "  B  Not now (ask again at the next start)\n"
-           "  X  Never ask again (L3+R3 > Updates can turn this back on)\n";
+           "  A  Baixar (" + size + ") e abrir o jogo\n"
+           "  B  Agora não (perguntar de novo na próxima vez)\n"
+           "  X  Não perguntar mais (dá para religar em L3+R3 > Atualizações)\n";
 }
 
 struct Download {
@@ -134,12 +154,12 @@ void RunDownload(const ts::Archive& archive, const fs::path& path, Download& sta
     };
     SwitchNetwork::NetworkSession network;
     if (!network.Ready()) {
-        finish(false, "No network: connect the console to the internet and try again.");
+        finish(false, "Sem rede: conecte o console à internet e tente de novo.");
         return;
     }
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> out(std::fopen(path.c_str(), "wb"), &std::fclose);
     if (!out) {
-        finish(false, "Cannot write " + path.string() + ".");
+        finish(false, "Não foi possível gravar " + path.string() + ".");
         return;
     }
     std::vector<char> buffer(kWriteBuffer);
@@ -163,17 +183,17 @@ void RunDownload(const ts::Archive& archive, const fs::path& path, Download& sta
         std::to_string(transfer.Received) + " bytes, sha256 " + digest + (error.empty() ? "" : ", " + error));
     if (result == SwitchNetwork::GetResult::Cancelled) {
         state.Cancelled = true;
-        finish(false, "Download cancelled.");
+        finish(false, "Download cancelado.");
     } else if (result == SwitchNetwork::GetResult::Failed) {
-        finish(false, "The download from GameBanana failed: " + error + ".");
+        finish(false, "O download do GameBanana falhou: " + error + ".");
     } else if (!closed) {
-        finish(false, "Cannot write " + path.string() + " (SD card full?).");
+        finish(false, "Não foi possível gravar " + path.string() + " (cartão SD cheio?).");
     } else if (transfer.Received != archive.Bytes || digest != archive.Sha256) {
-        finish(false, "GameBanana sent a different file than the " + std::string(archive.Version) +
-                          " release this\ngame knows (" + std::to_string(transfer.Received) +
+        finish(false, "O GameBanana mandou um arquivo diferente da versão " + std::string(archive.Version) +
+                          " que\neste jogo conhece (" + std::to_string(transfer.Received) +
                           " bytes, SHA-256\n" + digest + ").\n"
-                          "The mod may have been updated; a later version of this game will\n"
-                          "support it. Nothing was installed.");
+                          "O mod pode ter sido atualizado; uma versão futura do jogo vai aceitá-lo.\n"
+                          "Nada foi instalado.");
     } else {
         finish(true, {});
     }
@@ -184,9 +204,9 @@ enum class Outcome { Installed, Failed, Cancelled, Left };
 // Builds and installs from a verified archive.
 Outcome BuildFrom(SwitchConsoleScreen& screen, const fs::path& archivePath, const ts::Archive& archive,
                   const std::string& header, std::string* failure) {
-    screen.Show(header + "Building the textures from game/romfs.bin...\n");
+    screen.Show(header + "Montando as texturas a partir de game/romfs.bin...\n");
     try {
-        const ts::Outputs outputs = ts::Build(archivePath, archive, Root() / "game" / "romfs.bin");
+        const ts::Outputs outputs = ts::Build(archivePath, archive, Root() / "game" / "romfs.bin", ModFiles());
         ts::Install(outputs, Config());
         Log("installed " + std::string(ts::kPackName) + " (" + std::to_string(outputs.Pack.size()) +
             " bytes), " + ts::kFontPackName + " (" + std::to_string(outputs.Fonts.size()) + " bytes) and " +
@@ -201,7 +221,7 @@ Outcome BuildFrom(SwitchConsoleScreen& screen, const fs::path& archivePath, cons
             " from " + archivePath.filename().string() + " " + archive.Version);
         return Outcome::Installed;
     } catch (const std::exception& error) {
-        *failure = std::string("Could not build the textures: ") + error.what() + ".";
+        *failure = std::string("Não foi possível montar as texturas: ") + error.what() + ".";
         return Outcome::Failed;
     }
 }
@@ -212,8 +232,8 @@ Outcome DownloadAndBuild(SwitchConsoleScreen& screen, std::string* failure) {
     std::error_code error;
     const auto space = fs::space(Root(), error);
     if (!error && space.available < archive.Bytes + kSpareBytes) {
-        *failure = "Not enough space on the SD card: " + Megabytes(archive.Bytes + kSpareBytes) + " needed, " +
-                   Megabytes(space.available) + " free.";
+        *failure = "Falta espaço no cartão SD: precisa de " + Megabytes(archive.Bytes + kSpareBytes) + ", tem " +
+                   Megabytes(space.available) + " livres.";
         return Outcome::Failed;
     }
     fs::path partial = Root() / archive.FileName;
@@ -246,9 +266,9 @@ Outcome DownloadAndBuild(SwitchConsoleScreen& screen, std::string* failure) {
         if (percent != shownPercent || cancelling != shownCancel) {
             shownPercent = percent;
             shownCancel = cancelling;
-            screen.Show(header + "Downloading " + archive.FileName + " from GameBanana...\n" +
+            screen.Show(header + "Baixando " + archive.FileName + " do GameBanana...\n" +
                         Bar(done, archive.Bytes) + "  " + Megabytes(done) + " / " + Megabytes(archive.Bytes) +
-                        (cancelling ? "\n\nCancelling...\n" : "\n\n  B  Cancel\n"));
+                        (cancelling ? "\n\nCancelando...\n" : "\n\n  B  Cancelar\n"));
         }
     }
     worker.join();
@@ -305,16 +325,16 @@ bool RunSwitchTopScreenImport() {
     if (dashAnimationsMissing)
         Log("Roll dash is on without Link's dash animations (" + std::string(kRollDashAnimationsName) + ")");
 
-    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - HUD textures");
+    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - texturas do HUD");
     std::string notice;
     if (local) {
         const fs::path& localPath = local->first;
         // The player copied the archive here: build from it without asking.
-        screen.Show("Checking " + localPath.filename().string() + "...\n");
+        screen.Show("Conferindo " + localPath.filename().string() + "...\n");
         std::string reason;
         const ts::Archive* archive = ts::IdentifyArchiveFile(localPath, &reason, [&](std::uint64_t done, std::uint64_t total) {
             if (done % (8U << 20U) < (1U << 20U) || done == total)
-                screen.Show("Checking " + localPath.filename().string() + "...\n" + Bar(done, total) + "\n");
+                screen.Show("Conferindo " + localPath.filename().string() + "...\n" + Bar(done, total) + "\n");
         });
         if (archive) {
             std::string failure;
@@ -323,10 +343,10 @@ bool RunSwitchTopScreenImport() {
             notice = failure + "\n\n";
         } else {
             Log("rejected " + localPath.string() + ": " + reason);
-            notice = reason + ".\nIt was left on the SD card untouched.\n\n";
+            notice = reason + ".\nO arquivo ficou no cartão SD sem alteração.\n\n";
         }
         if (setting == ts::OfferSetting::Never) {
-            screen.Show(notice + "Press A to start the game.\n");
+            screen.Show(notice + "Aperte A para abrir o jogo.\n");
             return screen.Wait(HidNpadButton_A).has_value();
         }
     }
@@ -342,8 +362,8 @@ bool RunSwitchTopScreenImport() {
         if (*button & HidNpadButton_X) {
             Log("offer: never");
             if (!SaveOfferSetting(ts::OfferSetting::Never)) {
-                screen.Show("Could not write config/" + std::string(ts::kOfferSettingName) +
-                            ".\n\nPress A to start the game.\n");
+                screen.Show("Não foi possível gravar config/" + std::string(ts::kOfferSettingName) +
+                            ".\n\nAperte A para abrir o jogo.\n");
                 return screen.Wait(HidNpadButton_A).has_value();
             }
             return true;
@@ -356,17 +376,17 @@ bool RunSwitchTopScreenImport() {
             return false;
         case Outcome::Cancelled:
             Log("download cancelled");
-            notice = "Download cancelled.\n\n";
+            notice = "Download cancelado.\n\n";
             continue;
         case Outcome::Failed:
             break;
         }
         Log("failed: " + failure);
-        screen.Show(failure + "\n\nYou can also download " + ts::DownloadArchive().FileName + " from\n" +
-                    ts::kModPage + " on a PC and copy it to\nsdmc:/switch/oot3dre/; the next start builds from it.\n\n"
-                    "  A  Try again\n"
-                    "  B  Start the game without them (ask again next time)\n"
-                    "  X  Never ask again\n");
+        screen.Show(failure + "\n\nVocê também pode baixar " + ts::DownloadArchive().FileName + " de\n" +
+                    ts::kModPage + " num PC e copiar para\nsdmc:/switch/oot3dre/; a próxima abertura monta a partir dele.\n\n"
+                    "  A  Tentar de novo\n"
+                    "  B  Abrir o jogo sem elas (perguntar de novo na próxima vez)\n"
+                    "  X  Não perguntar mais\n");
         const auto choice = screen.Wait(HidNpadButton_A | HidNpadButton_B | HidNpadButton_X);
         if (!choice) return false;
         if (*choice & HidNpadButton_B) return true;

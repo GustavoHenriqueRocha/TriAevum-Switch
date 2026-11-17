@@ -45,7 +45,7 @@ public:
       ImGui::TextWrapped("Link's dash animations (config/%s, from the Single Screen Experience "
                          "download) are not installed, so he dashes with his normal run. With "
                          "Roll dash on, the next start offers the download (if you chose "
-                         "\"never\", L3+R3 > Updates turns the offer back on), or copy "
+                         "\"never\", L3+R3 > Atualizações turns the offer back on), or copy "
                          "singlescreen_322.zip into switch/oot3dre/.",
                          kRollDashAnimationsName);
     if (mDashError)

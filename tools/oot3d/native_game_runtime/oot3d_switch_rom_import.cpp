@@ -29,13 +29,13 @@ constexpr const char* kDisabled = "sdmc:/switch/oot3dre/config/no_rom_import";
 class ImportCancelled : public std::exception {};
 
 std::string Where() {
-    return "Copy your own decrypted cartridge dump (.3ds or .cci) to\n"
+    return "Copie a dump do SEU cartucho, descriptografada (.3ds ou .cci), para\n"
            "  sdmc:/switch/oot3dre/\n"
-           "or code.bin, exheader.bin and romfs.bin (from a decrypted dump) to\n"
+           "ou code.bin, exheader.bin e romfs.bin (de uma dump descriptografada) para\n"
            "  sdmc:/switch/oot3dre/import/\n"
-           "and start the game again.\n\n"
-           "Supported dumps:\n" + ri::SupportedRevisionsText() +
-           "\nEncrypted dumps and .cia files are not supported.\n";
+           "e abra o jogo de novo.\n\n"
+           "Dumps aceitas:\n" + ri::SupportedRevisionsText() +
+           "\nDumps criptografadas e arquivos .cia não funcionam.\n";
 }
 
 void Log(const std::string& line) {
@@ -73,9 +73,9 @@ bool RunSwitchRomImport() {
     if (sources.empty() && haveGame)
         return true;
 
-    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - game data import\nSwitch port by Gustavo Henrique Rocha");
+    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - importação dos dados do jogo\nPort para Switch por Gustavo Henrique Rocha");
     if (sources.empty()) {
-        screen.Show("No game data was found.\n\n" + Where() + "\nPress + to exit.\n");
+        screen.Show("Os dados do jogo não foram encontrados.\n\n" + Where() + "\nAperte + para sair.\n");
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
@@ -84,7 +84,7 @@ bool RunSwitchRomImport() {
     std::optional<ri::Plan> plan;
     std::string rejected;
     for (const ri::Source& source : sources) {
-        screen.Show("Checking " + source.Path.filename().string() + "...\n");
+        screen.Show("Conferindo " + source.Path.filename().string() + "...\n");
         try {
             plan = ri::Identify(source);
             break;
@@ -94,21 +94,21 @@ bool RunSwitchRomImport() {
     }
     if (!plan) {
         Log("rejected: " + rejected);
-        const std::string message = "This dump cannot be used:\n\n" + rejected + Where();
+        const std::string message = "Esta dump não pode ser usada:\n\n" + rejected + Where();
         if (haveGame) {
-            screen.Show(message + "\nPress A to start with the existing game data, + to exit.\n");
+            screen.Show(message + "\nAperte A para jogar com os dados que já existem, + para sair.\n");
             const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_Plus);
             return button && (*button & HidNpadButton_A);
         }
-        screen.Show(message + "\nPress + to exit.\n");
+        screen.Show(message + "\nAperte + para sair.\n");
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
 
-    const std::string header = "Preparing the game from " + plan->Input.Path.filename().string() +
+    const std::string header = "Preparando o jogo a partir de " + plan->Input.Path.filename().string() +
                                "\n(" + plan->Recipe->Name + ")\n\n"
-                               "This happens once and takes about a minute.\n"
-                               "Do not remove the SD card or close the app.\n\n";
+                               "Isso acontece uma vez só e leva cerca de um minuto.\n"
+                               "Não tire o cartão SD nem feche o app.\n\n";
     screen.Show(header);
     appletSetAutoSleepDisabled(true);
     const auto started = std::chrono::steady_clock::now();
@@ -140,24 +140,24 @@ bool RunSwitchRomImport() {
     const bool haveGameNow = fs::is_regular_file(game / ri::kManifestName, error);
     if (!failure.empty()) {
         Log("failed: " + failure);
-        const std::string message = "The import failed:\n\n" + failure + "\n\n" + Where();
+        const std::string message = "A importação falhou:\n\n" + failure + "\n\n" + Where();
         if (haveGameNow) {
-            screen.Show(message + "\nPress A to start with the existing game data, + to exit.\n");
+            screen.Show(message + "\nAperte A para jogar com os dados que já existem, + para sair.\n");
             const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_Plus);
             return button && (*button & HidNpadButton_A);
         }
-        screen.Show(message + "\nPress + to exit.\n");
+        screen.Show(message + "\nAperte + para sair.\n");
         (void)screen.Wait(HidNpadButton_Plus);
         return false;
     }
 
     // Keeping the dump is the default; deleting it is the player's choice.
     const bool cartridge = plan->Input.Kind == ri::SourceKind::Cartridge;
-    screen.Show(header + "Done. The game data is in sdmc:/switch/oot3dre/game/.\n\n" +
-                (cartridge ? "Keep " + plan->Input.Path.filename().string() + "?\n"
-                           : std::string("Keep the files in import/?\n")) +
-                "  A: keep it and start the game\n"
-                "  Y: delete it to free space and start the game\n");
+    screen.Show(header + "Pronto. Os dados do jogo estão em sdmc:/switch/oot3dre/game/.\n\n" +
+                (cartridge ? "Manter " + plan->Input.Path.filename().string() + "?\n"
+                           : std::string("Manter os arquivos em import/?\n")) +
+                "  A: manter e abrir o jogo\n"
+                "  Y: apagar para liberar espaço e abrir o jogo\n");
     const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_B | HidNpadButton_Plus | HidNpadButton_Y);
     if (!button)
         return false;
@@ -167,8 +167,8 @@ bool RunSwitchRomImport() {
             Log("deleted " + plan->Input.Path.string());
         } catch (const std::exception& ex) {
             Log(std::string("delete failed: ") + ex.what());
-            screen.Show(std::string("Could not delete the dump: ") + ex.what() +
-                        "\n\nPress A to start the game.\n");
+            screen.Show(std::string("Não foi possível apagar a dump: ") + ex.what() +
+                        "\n\nAperte A para abrir o jogo.\n");
             if (!screen.Wait(HidNpadButton_A))
                 return false;
         }
