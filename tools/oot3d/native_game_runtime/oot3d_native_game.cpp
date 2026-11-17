@@ -256,14 +256,7 @@ int main(int argc, char** argv) {
             const Oot3dNativeGame::RomFsModsStartupResult romFsMods = Oot3dNativeGame::PrepareRomFsMods({
                 "sdmc:/switch/oot3dre/config",
                 "sdmc:/switch/oot3dre/mods",
-                [](std::string* error) -> std::optional<Oot3dNativeGame::RomFsServiceView> {
-                    const auto manifest = Oot3dNativeGame::LoadNativeA32ProcessImageManifest(
-                        "sdmc:/switch/oot3dre/game/oot3d_native_process_manifest.json", error);
-                    if (!manifest)
-                        return std::nullopt;
-                    return Oot3dNativeGame::RomFsServiceView{
-                        manifest->RomFsImagePath, manifest->RomFsImageOffset, manifest->RomFsImageSize};
-                },
+                Oot3dNativeGame::ReadSwitchGameRomFsView,
                 "sdmc:/switch/oot3dre/game/romfs_mods.o3ro",
                 "sdmc:/switch/oot3dre/game/romfs_mods.json",
                 [] {

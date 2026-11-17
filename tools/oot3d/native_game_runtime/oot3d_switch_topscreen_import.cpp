@@ -5,6 +5,7 @@
 #include "oot3d_rom_import.h"
 #include "oot3d_switch_console_screen.h"
 #include "oot3d_switch_network.h"
+#include "oot3d_native_a32_process_image.h"
 #include "oot3d_roll_dash.h"
 #include "oot3d_romfs_mods.h"
 #include "oot3d_topscreen_import.h"
@@ -21,7 +22,6 @@
 #include <iterator>
 #include <memory>
 #include <optional>
-#include <algorithm>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,25 +41,6 @@ constexpr std::size_t kWriteBuffer = 1U << 20U;
 fs::path Root() { return kRoot; }
 fs::path Config() { return Root() / "config"; }
 
-// The RomFS mods the game will load (oot3d_romfs_mods.h): a texture they
-// replace gets a pack entry too (the PT-BR mod redraws menu_top_parts00).
-// Folder name order, the last one wins, like the overlay.
-ts::RomFsOverride ModFiles() {
-    if (!ReadRomFsModsEnabled(Config())) return {};
-    std::vector<fs::path> folders;
-    std::error_code error;
-    for (fs::directory_iterator it(Root() / "mods", error), end; !error && it != end; it.increment(error))
-        if (it->is_directory(error)) folders.push_back(it->path() / "romfs");
-    std::sort(folders.begin(), folders.end());
-    return [folders](std::string_view path) -> std::optional<ts::Bytes> {
-        for (auto folder = folders.rbegin(); folder != folders.rend(); ++folder) {
-            std::ifstream file(*folder / std::string(path), std::ios::binary);
-            if (file) return ts::Bytes(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-        }
-        return std::nullopt;
-    };
-}
-
 void Log(const std::string& line) {
     std::error_code error;
     fs::create_directories(Root() / "logs", error);
@@ -68,6 +49,25 @@ void Log(const std::string& line) {
     char stamp[32] = "";
     std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
     file << stamp << ' ' << line << '\n';
+}
+
+// The RomFS mods the game will load (oot3d_romfs_mods.h): a texture they
+// replace gets a pack entry too (the PT-BR mod redraws menu_top_parts00).
+// The overlay's own resolution (folder order, the last mod wins, USA names).
+ts::RomFsOverride ModFiles() {
+    if (!ReadRomFsModsEnabled(Config())) return {};
+    std::string error;
+    const auto view = ReadSwitchGameRomFsView(&error);
+    if (!view) {
+        Log("romfs mods not read: " + error);
+        return {};
+    }
+    try {
+        return ReadRomFsModContents(Root() / "mods", *view);
+    } catch (const std::exception& failure) {
+        Log(std::string("romfs mods not read: ") + failure.what());
+        return {};
+    }
 }
 
 std::string ReadText(const fs::path& path) {
@@ -297,6 +297,13 @@ std::optional<std::pair<fs::path, const ts::Archive*>> LocalArchive() {
 }
 
 } // namespace
+
+std::optional<RomFsServiceView> ReadSwitchGameRomFsView(std::string* error) {
+    const auto manifest = LoadNativeA32ProcessImageManifest(
+        "sdmc:/switch/oot3dre/game/oot3d_native_process_manifest.json", error);
+    if (!manifest) return std::nullopt;
+    return RomFsServiceView{manifest->RomFsImagePath, manifest->RomFsImageOffset, manifest->RomFsImageSize};
+}
 
 bool RunSwitchTopScreenImport() {
     std::error_code error;

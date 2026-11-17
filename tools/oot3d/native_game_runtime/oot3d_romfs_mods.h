@@ -118,6 +118,13 @@ struct RomFsModsReport {
 // Never throws; Failed leaves no overlay behind.
 RomFsModsReport ComposeRomFsMods(const RomFsModsRequest &request);
 
+// The bytes the game reads at a RomFS path with the mods on, or nullopt where no
+// mod replaces it: the composer's own scan and classification (folder order,
+// the last mod wins, USA names), so a reader outside the overlay sees what the
+// game sees. Writes nothing; throws when the view cannot be read.
+using RomFsModContents = std::function<std::optional<std::vector<std::uint8_t>>(std::string_view target)>;
+RomFsModContents ReadRomFsModContents(const std::filesystem::path &modsDirectory, const RomFsServiceView &view);
+
 // The name the EUR game reads for a USA mod's path (relative to romfs/): the
 // import's renames (message/us, misc/us, us.qm, three hint movies) and the EU
 // menu folder of the same language; nullopt for any other path.

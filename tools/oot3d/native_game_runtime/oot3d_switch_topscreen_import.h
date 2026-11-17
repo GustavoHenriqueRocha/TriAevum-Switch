@@ -1,5 +1,10 @@
 #pragma once
 
+#include "oot3d_romfs_mods.h"
+
+#include <optional>
+#include <string>
+
 namespace Oot3dNativeGame {
 
 // At start-up, after the game data import and before the launch arguments
@@ -19,5 +24,9 @@ namespace Oot3dNativeGame {
 // (with a pack already there, only a release that carries what is missing).
 // Returns false only when the player leaves the app.
 bool RunSwitchTopScreenImport();
+
+// The RomFS view game/oot3d_native_process_manifest.json names (game/romfs.bin
+// and its Level-3 offset): the RomFS mods step and the HUD pack read the same one.
+std::optional<RomFsServiceView> ReadSwitchGameRomFsView(std::string* error);
 
 } // namespace Oot3dNativeGame

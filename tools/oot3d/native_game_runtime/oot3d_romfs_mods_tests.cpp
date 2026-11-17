@@ -583,12 +583,42 @@ void TestStartup(const fs::path &root) {
 
 } // namespace
 
+// 17/11: the console's TopScreen build read mods/<name>/romfs/<path> by itself
+// and missed the USA names, so a mod with only the US menu folder left the HUD
+// without its art. ReadRomFsModContents is the composer's own resolution: what
+// it returns is what the composed view holds, and nothing is written.
+void TestModContents(const fs::path &root) {
+  std::map<std::string, Bytes> game = GameFiles();
+  game["menu/01_US_ENGLISH/menu_top_parts00.ctxb"] = Filled(32, 7);
+  game["menu/02_EU_ENGLISH/menu_top_parts00.ctxb"] = Filled(32, 7);
+  const Fixture fixture = MakeFixture(root, game, true);
+  const Bytes topUs = Filled(32, 62), later = Filled(20, 30);
+  WriteFile(fixture.Mods / "a_first/romfs/menu/01_US_ENGLISH/menu_top_parts00.ctxb", topUs);
+  WriteFile(fixture.Mods / "a_first/romfs/actor/zelda_keep.zar", Filled(10, 20));
+  WriteFile(fixture.Mods / "b_second/romfs/actor/zelda_keep.zar", later);
+  WriteFile(fixture.Mods / "b_second/romfs/message/us/us.qm", MakeQm({{1, "en"}, {5, "fr"}, {7, "es"}}, 2U));
+  const RomFsModContents contents = ReadRomFsModContents(fixture.Mods, fixture.View);
+  CHECK(!fs::exists(fixture.Root / "game/romfs_mods.o3ro"));
+  CHECK(contents("menu/02_EU_ENGLISH/menu_top_parts00.ctxb") == topUs);
+  CHECK(contents("actor/zelda_keep.zar") == later);
+  CHECK(!contents("misc/menu_link.zar") && !contents("menu/01_US_ENGLISH/menu_top_parts00.ctxb"));
+  CHECK(ComposeRomFsMods(fixture.Request()).Outcome == RomFsModsOutcome::Built);
+  const auto view = ComposedView(fixture);
+  CHECK(view.has_value());
+  if (view)
+    for (const char *path : {"menu/02_EU_ENGLISH/menu_top_parts00.ctxb", "actor/zelda_keep.zar", "message/eu/eu.qm"})
+      CHECK(contents(path) == ReadPath(*view, path));
+  // No mods folder: nothing replaces anything.
+  CHECK(!ReadRomFsModContents(fixture.Root / "missing", fixture.View)("actor/zelda_keep.zar"));
+}
+
 int main() {
   const fs::path root = fs::temp_directory_path() / "oot3d_romfs_mods_tests";
   TestUsaPathMapping();
   TestReplace(root, false);
   TestReplace(root, true);
   TestTwoModsSameFile(root);
+  TestModContents(root);
   TestUsaPaths(root);
   TestIgnored(root);
   TestUnread(root);

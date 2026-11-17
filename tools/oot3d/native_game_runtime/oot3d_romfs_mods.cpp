@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -596,6 +597,23 @@ std::optional<std::string> UsaConvertedRomFsPath(std::string_view path) {
   for (const auto &[from, to] : kDirectories)
     if (path.starts_with(from)) return std::string(to) + std::string(path.substr(from.size()));
   return std::nullopt;
+}
+
+RomFsModContents ReadRomFsModContents(const fs::path &modsDirectory, const RomFsServiceView &view) {
+  const ModsScan scan = ScanMods(modsDirectory);
+  if (scan.Files.empty()) return [](std::string_view) { return std::optional<std::vector<std::uint8_t>>(); };
+  auto targets = std::make_shared<const std::map<std::string, Target>>(Classify(scan.Files, ReadRomFsTable(view)).Targets);
+  return [targets](std::string_view path) -> std::optional<std::vector<std::uint8_t>> {
+    const auto found = targets->find(std::string(path));
+    if (found == targets->end()) return std::nullopt;
+    const Target &target = found->second;
+    std::ifstream file(target.Source, std::ios::binary);
+    std::vector<std::uint8_t> bytes(target.File.Size);
+    if (!file.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+      return std::nullopt;
+    std::copy(target.Prefix.begin(), target.Prefix.end(), bytes.begin());
+    return bytes;
+  };
 }
 
 RomFsModsReport ComposeRomFsMods(const RomFsModsRequest &request) {
