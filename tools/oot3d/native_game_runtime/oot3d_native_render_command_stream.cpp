@@ -82,11 +82,6 @@ bool NativeRenderCommandStream::InSynchronousCommand() const noexcept {
     return tInCommand && tSynchronous;
 }
 
-uint64_t NativeRenderCommandStream::ExecutedCommands() const noexcept {
-    std::lock_guard lock(mMutex);
-    return mExecuted;
-}
-
 NativeRenderCommandStream::WaitStats
 NativeRenderCommandStream::GetWaitStats() const noexcept {
     std::lock_guard lock(mMutex);

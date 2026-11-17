@@ -103,13 +103,6 @@ CollectNativeActorInteractions(const NativeA32Memory &memory,
   return actors;
 }
 
-void PublishNativeActorInteractions(const NativeA32Memory &memory,
-                                    uint32_t playState, uint64_t sourceFrame) {
-  Fast::Oot3d::GrassInteractionBridge::Instance().PublishFrame(
-      sourceFrame,
-      CollectNativeActorInteractions(memory, playState, sourceFrame));
-}
-
 std::vector<Fast::Oot3d::GrassInteractor>
 CollectNativeGrassColliders(const NativeA32Memory &memory, uint32_t playState,
                             uint64_t sourceFrame) {

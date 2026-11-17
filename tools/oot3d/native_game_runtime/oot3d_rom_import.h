@@ -86,7 +86,6 @@ struct Revision {
     Adaptation Adapt;
 };
 
-[[nodiscard]] std::span<const Revision> SupportedRevisions();
 // One line per supported revision, for error screens.
 [[nodiscard]] std::string SupportedRevisionsText();
 

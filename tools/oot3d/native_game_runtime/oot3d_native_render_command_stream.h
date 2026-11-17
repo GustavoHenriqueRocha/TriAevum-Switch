@@ -106,7 +106,6 @@ class NativeRenderCommandStream final {
     // True while a command runs and its submitter waits for it: every inline
     // command, and a Run command in worker mode.
     [[nodiscard]] bool InSynchronousCommand() const noexcept;
-    [[nodiscard]] uint64_t ExecutedCommands() const noexcept;
 
     // Time spent blocked on the stream, cumulative (logs/perf.txt keeps the
     // previous copy and prints the difference). Clocks are read only when a

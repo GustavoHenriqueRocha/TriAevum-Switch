@@ -653,10 +653,6 @@ bool Matches(const FileIdentity& identity, std::uint64_t bytes, const Digest& di
     return identity.Bytes == bytes && Hex(digest) == identity.Sha256;
 }
 
-std::span<const Revision> SupportedRevisions() {
-    return kRevisions;
-}
-
 std::string SupportedRevisionsText() {
     std::string text;
     for (const Revision& revision : kRevisions) {

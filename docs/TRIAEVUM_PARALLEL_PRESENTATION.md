@@ -54,7 +54,7 @@ Split:
 - **Guest stage (G)**, main thread: 1 without the renderer calls, all of 2,
   and from 3 the parts that read guest state: transfer selection
   (`hostServices` framebuffer and LCD state, `displayTransfersByOutput`),
-  `FinishFrame` (the accumulator is fed by G), `PublishNativeActorInteractions`
+  `FinishFrame` (the accumulator is fed by G), `CollectNativeActorInteractions`
   (reads guest memory), UI lifecycle queries and UI primitive building, copy
   references to pin.
 - **Render stage (R)**, worker thread: every call on `api`, the execution side
