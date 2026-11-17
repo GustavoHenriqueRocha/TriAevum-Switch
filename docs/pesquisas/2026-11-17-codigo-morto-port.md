@@ -30,9 +30,13 @@ externa sobra. Das 169:
   - `RomImport::SupportedRevisions` (rom_import.cpp:656, John); `SupportedRevisionsText` é a usada.
 
 ## Decisão
-Remover só as 3, com a aprovação do Gustavo, backup `.tar.gz` antes e testes antes/depois.
+Remover só as 3: aprovado pelo Gustavo e feito em a2d91309 (backup
+`~/Documentos/triaevum-codigo-morto-20261117-1344.tar.gz`, testes de host e NRO antes e depois).
 
 ## Em aberto
 - `three_ds_recomp_runtime/` (9 414 seções descartadas) ainda não foi classificado.
-- Funções vivas no código mas nunca executadas no console (cruzamento com o PGO `.gcda`) não
-  foram medidas.
+- Funções vivas mas nunca executadas no console: **não dá para medir com os dados que existem**.
+  O PGO só instrumenta `oot3d_native_whole_aot` (os 256 shards gerados + `oot3d_native_guest_overrides`;
+  `CMake/oot3d/native_runtime.cmake:531`, `~/oot3d-work/pgo5`), nenhum arquivo escrito à mão além
+  desse. Medir exigiria um build com cobertura do runtime e um tour no console; não feito (custo alto,
+  e "não rodou no tour" não prova que é morto: menus e erros raros também não rodam).
