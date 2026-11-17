@@ -570,7 +570,7 @@ content (the Link mods on GameBanana are CC BY-NC-ND 4.0).
 - **Tests:** `oot3d_native_a32_romfs_overlay_tests` (upstream's three), `oot3d_romfs_mods_tests`
   (replace, two mods on one file, USA paths on both layouts, ignored files, receipt reuse and
   rebuild, failure, the start-up step), guards `11/09` in `tests/switch/test_bug_guards.py`.
-- **Console check:** copy Vanilla+ as above and start. The first start shows "Applying the mods..."
+- **Console check:** copy Vanilla+ as above and start. The first start shows "Aplicando os mods..." (until 1.0.1: "Applying the mods...")
   for a moment; `logs/oot3d_native_game.log` has the summary line and `overlay active (26 metadata
   patches`; Link has the new model. Restart: `overlay reused`. Turn the option off, restart: no
   `romfs mods:` overlay line and `romfs_mods=off` in `boot-status.txt`.

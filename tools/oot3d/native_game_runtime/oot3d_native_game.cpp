@@ -261,8 +261,8 @@ int main(int argc, char** argv) {
                 "sdmc:/switch/oot3dre/game/romfs_mods.json",
                 [] {
                     Oot3dNativeGame::StartupScreen("Ocarina of Time 3D - mods").Show(
-                        "Applying the mods in switch/oot3dre/mods/ to the game's files...\n"
-                        "This happens again only when a mod file changes.\n");
+                        "Aplicando os mods de switch/oot3dre/mods/ nos arquivos do jogo...\n"
+                        "Isso só se repete quando algum arquivo de mod mudar.\n");
                 }});
             for (const std::string& line : romFsMods.LogLines)
                 Oot3dNativeGame::WriteGameLog(line);
