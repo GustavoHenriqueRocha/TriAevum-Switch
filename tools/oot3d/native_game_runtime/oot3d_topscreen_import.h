@@ -221,10 +221,19 @@ struct Rgba8Image {
 
 // ---- Outputs ----
 
+// Files a RomFS mod puts over the game's (mods/<name>/romfs/, oot3d_romfs_mods.h):
+// the file at a RomFS path, or nullopt. Hash-matched textures get an entry for the
+// mod's version too, so the HUD keeps its art with the mod on or off.
+using RomFsOverride = std::function<std::optional<Bytes>(std::string_view relativePath)>;
+// The original-texture hashes the pack's native entries match, in pack order (tests).
+[[nodiscard]] std::vector<std::uint64_t> NativeOriginalHashes(std::span<const std::uint8_t> ui, std::uint32_t uiWidth,
+                                                              std::uint32_t uiHeight, const RomFsImage& romfs,
+                                                              const RomFsOverride& mods = {});
 // O3TU v2 from a 3.x archive (`root`) and the player's RomFS. `region` empty:
 // detected from the RomFS.
 [[nodiscard]] Bytes BuildTexturePack(const ZipReader& archive, const Archive& root,
-                                     const RomFsImage& romfs, std::string region = {});
+                                     const RomFsImage& romfs, std::string region = {},
+                                     const RomFsOverride& mods = {});
 
 // font_coverage.zip (manifest oot3d_qbf_coverage_v1): the archive's HD Latin
 // font paired with the RomFS's native one, by character.
@@ -271,7 +280,7 @@ struct Outputs {
 };
 // The outputs from a verified archive (`source`, see IdentifyArchiveFile).
 [[nodiscard]] Outputs Build(const std::filesystem::path& archive, const Archive& source,
-                            const std::filesystem::path& romfs);
+                            const std::filesystem::path& romfs, const RomFsOverride& mods = {});
 
 // Writes `bytes` as `path`.partial, reads it back, then replaces `path`
 // (removed first: Horizon cannot rename over a file). Throws ImportError.

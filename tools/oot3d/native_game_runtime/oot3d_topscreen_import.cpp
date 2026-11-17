@@ -339,27 +339,34 @@ Bytes SerializePack(const std::vector<PackEntry>& entries, std::span<const Profi
 // Hash-matched menu_top_parts00/menu_cursor00 replacements, in the order the
 // Python builder inserts them (first language with each distinct payload).
 std::vector<PackEntry> BuildNativeEntries(std::span<const std::uint8_t> ui, std::uint32_t uiWidth,
-                                          std::uint32_t uiHeight, const RomFsImage& romfs) {
+                                          std::uint32_t uiHeight, const RomFsImage& romfs,
+                                          const RomFsOverride& mods) {
     std::vector<PackEntry> entries;
     std::set<std::uint64_t> seen;
     for (const auto& texture : kNativeTextures) {
         int found = 0;
         for (const char* language : kLanguages) {
-            const auto original = romfs.Read(std::string("menu/") + language + "/" + texture.Name);
+            const std::string path = std::string("menu/") + language + "/" + texture.Name;
+            const auto original = romfs.Read(path);
             if (!original) continue;
             ++found;
-            const std::string label = std::string(language) + "/" + texture.Name;
-            const auto ctxb = ParseCtxb(*original);
-            if (!ctxb) throw ImportError("invalid original CTXB: " + label);
-            if (ctxb->Format != kFormatRgba4 ||
-                ctxb->Payload.size() != static_cast<std::size_t>(ctxb->Width) * ctxb->Height * 2)
-                throw ImportError("original CTXB is not RGBA4: " + label);
-            const std::uint64_t hash = Fnv1a64(ctxb->Payload);
-            if (!seen.insert(hash).second) continue;
-            Bytes replacement = ComposeNativeTexture(ctxb->Payload, ctxb->Width, ctxb->Height, ui, uiWidth,
-                                                     uiHeight, texture.Regions, label);
-            const std::uint64_t replacementHash = Fnv1a64(replacement);
-            entries.push_back({hash, replacementHash, std::move(replacement)});
+            // The game's texture, then a mod's version of it (another payload hash).
+            const auto modded = mods ? mods(path) : std::nullopt;
+            for (const Bytes* source : {&*original, modded ? &*modded : nullptr}) {
+                if (!source) continue;
+                const std::string label = std::string(source == &*original ? "" : "mod ") + language + "/" + texture.Name;
+                const auto ctxb = ParseCtxb(*source);
+                if (!ctxb) throw ImportError("invalid original CTXB: " + label);
+                if (ctxb->Format != kFormatRgba4 ||
+                    ctxb->Payload.size() != static_cast<std::size_t>(ctxb->Width) * ctxb->Height * 2)
+                    throw ImportError("original CTXB is not RGBA4: " + label);
+                const std::uint64_t hash = Fnv1a64(ctxb->Payload);
+                if (!seen.insert(hash).second) continue;
+                Bytes replacement = ComposeNativeTexture(ctxb->Payload, ctxb->Width, ctxb->Height, ui, uiWidth,
+                                                         uiHeight, texture.Regions, label);
+                const std::uint64_t replacementHash = Fnv1a64(replacement);
+                entries.push_back({hash, replacementHash, std::move(replacement)});
+            }
         }
         if (!found) throw ImportError(std::string("original RomFS has no menu/*/") + texture.Name);
     }
@@ -615,6 +622,15 @@ void Seek(std::FILE* file, std::uint64_t offset) {
 }
 
 } // namespace
+
+std::vector<std::uint64_t> NativeOriginalHashes(std::span<const std::uint8_t> ui, std::uint32_t uiWidth,
+                                                std::uint32_t uiHeight, const RomFsImage& romfs,
+                                                const RomFsOverride& mods) {
+    std::vector<std::uint64_t> hashes;
+    for (const PackEntry& entry : BuildNativeEntries(ui, uiWidth, uiHeight, romfs, mods))
+        hashes.push_back(entry.Original);
+    return hashes;
+}
 
 const Archive& DownloadArchive() { return kDownloadArchive; }
 std::span<const Archive> KnownArchives() { return kArchives; }
@@ -960,7 +976,8 @@ Bytes EncodeRgba4Tiled(std::span<const std::uint8_t> rgba, std::uint32_t width, 
 
 // ---- Outputs ----
 
-Bytes BuildTexturePack(const ZipReader& archive, const Archive& root, const RomFsImage& romfs, std::string region) {
+Bytes BuildTexturePack(const ZipReader& archive, const Archive& root, const RomFsImage& romfs, std::string region,
+                       const RomFsOverride& mods) {
     if (region.empty()) region = DetectRegion(romfs);
     const char* titleId = TitleIdFor(region);
     if (!titleId) throw ImportError("unsupported TopScreen 3.0 region: " + region);
@@ -978,7 +995,7 @@ Bytes BuildTexturePack(const ZipReader& archive, const Archive& root, const RomF
     const Bytes ui = DecodeEtc1a4(ctxb->Payload, ctxb->Width, ctxb->Height);
     const Bytes menu = EncodeRgba8Tiled(ComposeMenuAtlas(ui, ctxb->Width, ctxb->Height), kMenuAtlasWidth,
                                         kMenuAtlasHeight);
-    const auto entries = BuildNativeEntries(ui, ctxb->Width, ctxb->Height, romfs);
+    const auto entries = BuildNativeEntries(ui, ctxb->Width, ctxb->Height, romfs, mods);
     const ProfileTexture textures[] = {
         {kMenuAtlasSemantic, kMenuAtlasWidth, kMenuAtlasHeight, kFormatRgba8, menu},
         {kFontAtlasSemantic, ctxb->Width, ctxb->Height, kFormatEtc1a4, ctxb->Payload},
@@ -1305,7 +1322,8 @@ const Archive* IdentifyArchiveFile(const fs::path& path, std::string* error,
     return candidate;
 }
 
-Outputs Build(const fs::path& archivePath, const Archive& source, const fs::path& romfsPath) {
+Outputs Build(const fs::path& archivePath, const Archive& source, const fs::path& romfsPath,
+              const RomFsOverride& mods) {
     const ZipReader archive(archivePath);
     const Archive* root = FindArchiveRoot(archive);
     if (root != &source) throw ImportError("the archive is not laid out as Single Screen Experience " +
@@ -1314,7 +1332,7 @@ Outputs Build(const fs::path& archivePath, const Archive& source, const fs::path
     const std::string region = DetectRegion(romfs);
     Outputs outputs;
     outputs.Source = &source;
-    outputs.Pack = BuildTexturePack(archive, source, romfs, region);
+    outputs.Pack = BuildTexturePack(archive, source, romfs, region, mods);
     outputs.Fonts = BuildFontPack(archive, source, romfs, source.Sha256);
     if (Bytes hd = ExtractUiAtlasHd(archive, source, region); !hd.empty()) outputs.UiAtlasHd = BuildUiAtlasHd(hd);
     std::vector<Bytes> images = ExtractHdTextures(archive, source, region);

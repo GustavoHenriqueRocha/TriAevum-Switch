@@ -962,6 +962,47 @@ int RealLinkAnimations(const fs::path& path) {
 
 } // namespace
 
+// A RomFS mod (the PT-BR patch redraws menu_top_parts00) changes the payload
+// the game hashes: the pack must also carry an entry for the mod's texture, or
+// the HUD loses its frames with the mod on (fixed on the PC by d9359b8f).
+Bytes TransparentCtxb(std::uint32_t width, std::uint32_t height, std::uint8_t mark = 0) {
+    Bytes data(0x48 + static_cast<std::size_t>(width) * height * 2, 0);
+    std::memcpy(data.data(), "ctxb", 4);
+    const auto put16 = [&](std::size_t offset, std::uint16_t value) {
+        data[offset] = static_cast<std::uint8_t>(value);
+        data[offset + 1] = static_cast<std::uint8_t>(value >> 8);
+    };
+    put16(0x2C, static_cast<std::uint16_t>(width));
+    put16(0x2E, static_cast<std::uint16_t>(height));
+    put16(0x30, 0x6752); // RGBA4
+    put16(0x32, 0x8033);
+    data[0x48] = mark; // a colour change at texel 0, outside every region (alpha stays 0)
+    return data;
+}
+
+void TestNativeEntriesWithMods(const fs::path& directory) {
+    const fs::path romfsPath = directory / "romfs.bin";
+    const Bytes top = TransparentCtxb(512, 256), cursor = TransparentCtxb(512, 256);
+    WriteFile(romfsPath, MakeRomFs({{"menu/01_US_ENGLISH/menu_top_parts00.ctxb", top},
+                                    {"menu/01_US_ENGLISH/menu_cursor00.ctxb", cursor}}));
+    ts::RomFsImage romfs(romfsPath);
+    const Bytes ui(512U * 256U * 4U, 0);
+    const auto payloadHash = [](const Bytes& ctxb) {
+        return ts::Fnv1a64(std::span<const std::uint8_t>(ctxb).subspan(0x48));
+    };
+    const auto plain = ts::NativeOriginalHashes(ui, 512, 256, romfs);
+    CHECK(plain.size() == 1); // both textures share one payload (all zero)
+    const Bytes modded = TransparentCtxb(512, 256, 0x10);
+    const ts::RomFsOverride mods = [&](std::string_view path) -> std::optional<Bytes> {
+        if (path == "menu/01_US_ENGLISH/menu_top_parts00.ctxb") return modded;
+        if (path == "menu/01_US_ENGLISH/menu_cursor00.ctxb") return cursor; // same as the game's
+        return std::nullopt;
+    };
+    const auto withMods = ts::NativeOriginalHashes(ui, 512, 256, romfs, mods);
+    CHECK(withMods.size() == 2);
+    CHECK(withMods.size() == 2 && withMods[0] == payloadHash(top) && withMods[1] == payloadHash(modded));
+}
+
 int main(int argc, char** argv) {
     if ((argc == 6 || argc == 7) && std::string_view(argv[1]) == "--build") {
         try {
@@ -990,6 +1031,7 @@ int main(int argc, char** argv) {
         TestArchiveRoot(directory);
         TestRomFs(directory);
         TestPackRejections(directory);
+        TestNativeEntriesWithMods(directory);
         TestFontPack(directory);
         TestOffer();
         TestPng();
