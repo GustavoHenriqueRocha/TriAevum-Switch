@@ -233,5 +233,53 @@ class Mm3dPlaca(unittest.TestCase):
         self.assertEqual(freq, [3, 2])
 
 
+class Mm3dMenu(unittest.TestCase):
+    """Apagar rótulo de menu: botão em degradê com letra clara, contorno escuro e ícone ao lado (dado feito à mão)."""
+
+    def _botao(self):
+        from PIL import Image
+        im = Image.new('RGBA', (40, 12), (0, 0, 0, 0)); px = im.load()
+        for y in range(12):
+            for x in range(40): px[x, y] = (200 - 8 * y, 90, 20, 255)          # degradê vertical
+        for y in range(3, 9):                                                  # "texto": branco com borda preta
+            for x in range(12, 30): px[x, y] = (0, 0, 0, 255) if x in (12, 29) or y in (3, 8) else (255, 255, 255, 255)
+        for y in range(3, 9): px[8, y] = px[9, y] = (0, 0, 0, 255)  # ícone igual em todos os idiomas, na margem lida
+        return im
+
+    def test_apagar_botao_mantem_degrade(self):
+        from mm3d_texturas import _apagar
+        im = self._botao()
+        dif = [[12 <= x < 30 and 3 <= y < 9 for x in range(40)] for y in range(12)]
+        _apagar(im, (12, 3, 30, 9), dif, folga=0)
+        for y in range(3, 9):
+            for x in range(12, 30): self.assertEqual(im.getpixel((x, y)), (200 - 8 * y, 90, 20, 255), (x, y))
+        self.assertEqual(im.getpixel((8, 5)), (0, 0, 0, 255))                  # o ícone fora da caixa fica
+
+    def test_apagar_fundo_transparente(self):
+        from PIL import Image
+        from mm3d_texturas import _apagar
+        im = Image.new('RGBA', (20, 10), (0, 0, 0, 0)); im.paste((255, 255, 255, 255), (5, 3, 15, 7))
+        _apagar(im, (5, 3, 15, 7), [[False] * 20 for _ in range(10)], folga=0)
+        self.assertEqual(im.getbbox(), None)
+
+    def test_estilo_letra_clara_contorno_escuro(self):
+        from PIL import Image
+        from mm3d_texturas import _estilo_rotulo
+        orig = self._botao(); limpa = Image.new('RGBA', orig.size, (0, 0, 0, 0)); limpa.paste(orig)
+        lp = limpa.load()
+        for y in range(3, 9):
+            for x in range(12, 30): lp[x, y] = (200 - 8 * y, 90, 20, 255)
+        letra, cont, tem, topo, fim, traco = _estilo_rotulo(orig, limpa, (12, 3, 30, 9))
+        self.assertTrue(tem)
+        self.assertEqual(letra[:3], (255, 255, 255)); self.assertEqual(cont[:3], (0, 0, 0))
+        self.assertEqual((topo, fim), (3, 9))
+        self.assertEqual(traco, 18)                                            # linhas cheias de 18 px
+
+    def test_traco(self):
+        from mm3d_texturas import _traco
+        cheio = {(1, 0), (2, 0), (5, 0), (6, 0), (7, 0), (8, 0)}
+        self.assertEqual(_traco(lambda x, y: (x, y) in cheio, 0, 10, [0]), 3)  # sequências de 2 e 4
+
+
 if __name__ == '__main__':
     unittest.main()

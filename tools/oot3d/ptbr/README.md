@@ -42,5 +42,6 @@ Texturas com texto (102 arquivos do espanhol: mapas com placa de nome, telas de 
 `mm3d_texturas.py` (`inventario`, `extrair`, `tabela`, `gerar`, `gravar`), com `gar.py` (GAR v2 byte a byte) e
 `ctxb.codificar_blocos` (no ETC1 só recomprime os blocos 4x4 que mudaram). A transcrição do espanhol e a tabela
 es→pt ficam em `~/oot3d-work/conv/mm3d-ptbr/texturas/` (`mapas-es.json`, `tabela-es-pt.json`); com a tabela lá,
-o `mm3d.py montar` grava as texturas também. Fonte das letras: Noto Sans CJK (pacote `noto-fonts-cjk`) e Belleza.
+o `mm3d.py montar` grava as texturas também. Menus: caixa e PT de cada rótulo em `lote_menus_mm3d.py` (o mapa-múndi
+usa `mundi-es.json`). Fonte das letras: Noto Sans CJK (pacote `noto-fonts-cjk`) e Belleza.
 Detalhes: `docs/pesquisas/2026-11-23-mm3d-texturas-ptbr.md`.

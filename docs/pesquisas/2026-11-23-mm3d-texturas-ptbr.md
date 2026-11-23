@@ -48,13 +48,29 @@ aviso do HOME); `btn_return`, `menu_common_parts00/01`, `menu_popup_parts00` (S�
 - **Resultado (23/11):** 91 texturas PT-BR (84 mapas + 7 telas de dia) gravadas em `romfs-ptbr.bin` pelo
   `mm3d.py montar`; os 91 arquivos lidos de volta da romfs são iguais aos gerados. 19 794 de 349 696 blocos
   ETC1 recomprimidos (o resto é byte a byte o do jogo); ~200 blocos por mapa, só na placa.
+- **Peso da letra (pedido do Gustavo, 23/11):** calibrado desenhando o PRÓPRIO texto espanhol com a nossa fonte e
+  comparando com o original a massa de tinta e a largura (razão nossa/original; 1,00 = igual). Mapas: Noto Sans CJK
+  Black, massa 0,982 e largura 0,999 na média dos 84 (mín./máx. da massa 0,95/1,004); antes, com Bold, a massa era
+  0,86. Telas de dia (massa, largura por linha): 24/48/72 h (1,04; 0,994); first (0,984; 1,0) e (1,025; 1,016);
+  second (1,016; 1,015) e (1,025; 0,994); last (1,019; 0,996) e (1,044; 1,007); new (0,984; 1,01) e (1,003; 1,005).
+  Parâmetros em `DIAS`/`PESO_MAPA` de `mm3d_texturas.py`; comparação ampliada (original | espanhol nosso | PT) em
+  `texturas/comparacao_peso.png`.
+- **Menus (23/11):** 20 texturas (19 do `lote_menus_mm3d.LOTE`, 115 rótulos, mais o mapa-múndi com 35 nomes),
+  pelo método do `lote_menus.py` do OoT3D: caixa de cada rótulo + PT. O fundo sai do que é igual nos 6 idiomas
+  (`regioes.mascara_dif`); em botão (o fundo muda por idioma) sai da cor mais comum de luma média de cada linha, o que
+  mantém o degradê. Cor da letra/contorno, altura-x e espessura do traço são medidas no espanhol; o peso da Noto Sans
+  CJK (Medium/Bold/Black) é o de traço mais parecido. Onde a medida erra (logos com brilho, botões pequenos com
+  ícone, "¡Nuevo!" de contorno duplo) a entrada do lote leva `xh`/`base`/`cores`/`camadas`/`fundo` medidos à mão no
+  espanhol (mapa ASCII da textura). Gravados pelo `mm3d.py montar`: 101 arquivos, 111 texturas (91 + 20) lidas de
+  volta da romfs iguais às geradas. Amostras (ES à esquerda, PT à direita) em `texturas/amostra_menu_*.png`.
 - Tabela es→pt dos mapas sai das próprias falas: o nome espanhol da placa é igual ao de uma fala de nome de área
   (ids 0x100–0x1a0) e o PT é o dessa fala no `eus-ptbr.gmsg`, então placa e falas dizem a mesma coisa. 26 de 28
   nomes saíram assim; à mão: "Ciudad Reloj" → "Cidade do Relógio" (glossário), "Camino al pantano del sur" →
   "Rumo ao Pântano do Sul" (ver Em aberto).
 
 ## Decisão
-- Fonte das letras: **Noto Sans CJK** (OFL; Bold nas placas, Black nas telas de dia grandes) e **Belleza** (OFL, já
+- Fonte das letras: **Noto Sans CJK** (OFL; Black nas placas e nas telas de dia, peso escolhido pelo traço nos menus,
+  Regular nas opções e no "APERTE START", que são finos no original) e **Belleza** (OFL, já
   usada no OoT3D) no "- Restam N horas -". Escolhida comparando 10 fontes livres lado a lado com o original
   (`texturas/fontes_cand.png`): o latim da Noto Sans CJK é o mais parecido com o das placas e dos amanheceres.
 - Texto PT das telas de dia segue as falas e o glossário: "- Restam 24 horas -" (falas 0x1bb2: "Restam  horas"),
@@ -64,7 +80,16 @@ aviso do HOME); `btn_return`, `menu_common_parts00/01`, `menu_popup_parts00` (S�
 - Dados do jogo fora do repositório: transcrição do espanhol (`mapas-es.json`), tabela (`tabela-es-pt.json`), placa
   limpa, PNG e CTXB ficam em `~/oot3d-work/conv/mm3d-ptbr/texturas/`. No repo só código e teste sintético.
 
+- Texto PT dos menus: das falas/glossário quando existe (nomes do mapa-múndi pela tabela dos mapas; Equipo →
+  "Inventário", Inventario → "Itens", Alarma → "Alarme", Pista → "Dica", Taya → "Tatl"); verbos do HUD pelo
+  glossário do OoT3D. Ficam sem troca: os ordinais (1.°/2.°, iguais em PT), o `menu_common_parts01` (só ordinais),
+  o aviso "Pulsa HOME…" da tela de início e os rótulos iguais em PT (Mapa, Máscaras, Final, Normal, Alto, Copiar…).
+
 ## Alternativas rejeitadas
+- **Detectar a caixa de cada rótulo sozinho** (diferença entre idiomas + cortes XY): juntava linhas da grade do HUD e
+  pegava os ícones dos botões; ficou a caixa explícita por rótulo, como no OoT3D.
+- **Mesma altura-x para todos os rótulos da textura:** os menus misturam três ou quatro tamanhos; a mediana é por grupo
+  (`grade`) e o resto mede o próprio rótulo.
 - **Recortar letras das texturas dos 6 idiomas** (fonte do próprio jogo): as letras estão em ETC1 (artefato de bloco
   que dobraria ao recomprimir), cada tela de dia tem estilo próprio e faltam letras ("h" e "P"/"D" maiúsculos não
   existem nos amanheceres em espanhol). A fonte do jogo `ltn16.gzf` é a das falas, outro desenho.
@@ -75,13 +100,14 @@ aviso do HOME); `btn_return`, `menu_common_parts00/01`, `menu_popup_parts00` (S�
   de "Este de Ciudad Reloj".
 
 ## Em aberto
-- **Menus (21 texturas em 10 GAR):** leitura/escrita prontas, mas falta a tabela de regiões (caixa de cada rótulo) e o
-  PT de cada uma, como o `lote_menus.py` do OoT3D. É o maior pedaço (~150 rótulos, o HUD de ação sozinho tem ~35).
+- **Menus para o Gustavo decidir:** termos novos sem fala correspondente ("Para onde voar?", "Dica em vídeo/foto",
+  "Sem fotos", "T" no lugar de "PB" do mapa, "Já!", "Feito!", "APERTE START", "Canção do Tempo Duplo", "Info" para
+  Detalles, "Esmagar" para Machacar); "PERFEITO!" e "Já!" em cor lisa (o original tem degradê/brilho); ordinais e o
+  aviso HOME ficaram em espanhol.
 - **Conferir no jogo:** nada foi visto no console ainda. As telas de dia são máscaras (ETC1 sem alfa, branco sobre
   preto; o `daytelop_new` é preto sobre branco com borda amarelada): repeti o esquema, mas o efeito final só no jogo.
 - **"Road to Southern Swamp":** a fala 0x14c está "Ao Pântano do Sul", as irmãs 0x14d–0x150 "Rumo à/a …". A placa usa
   "Rumo ao Pântano do Sul"; a fala não foi mexida (decisão do Gustavo).
 - **"Amanhecer de um Novo Dia"** (maiúsculas) e o 000 em japonês (ficou como está) esperam o Gustavo.
-- A letra PT nas placas ficou um pouco mais fina que a original; dá para engrossar (`contorno` em `mascara`).
 - Os mapas `genbamap` de alguns idiomas têm arquivo de 0 byte na romfs (5 do holandês: 006, 065, 067, 068, 074);
   não afeta o espanhol.
