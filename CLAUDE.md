@@ -143,12 +143,18 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   `docs/pesquisas/2026-10-17-temperatura-builds.md`.
 - **Ryzen travou (26/10)** → RAM do Windows esgotada por WSL + build + PowerShells órfãos (teto de
   3 GB/-j 1 na época). → Desde 05/11 à noite o Gustavo liberou o Ryzen a 100% com RAM em 2400 sem
-  DOCP: WSL com 12 GB, `JOBS=12 SHARDS=1 bash /root/agentes/deko3d/build.sh build` (fonte em
+  DOCP; depois dos BSODs de 13/11 o teto é WSL 6 GB e `JOBS=3 SHARDS=1 bash /root/agentes/deko3d/build.sh build`
+  (soma dos `-j` no WSL ≤ 3; o Gustavo não religa o Ryzen de longe) (fonte em
   `src/`, build em `build/`, montados por `mount --bind` nos caminhos do notebook). Transferência
   até 10 MB/s nos dois sentidos (ida e volta; o Wi-Fi ainda falha, regra de 10/11):
   `rsync -a --bwlimit=9500 --rsync-path='wsl rsync'`, `scp -l 76000`, preservando
   `.ninja_log`/`.ninja_deps`. RAM já teve bit flips: confira md5 depois do relink. O WSL desliga
   quando a última sessão `wsl.exe` fecha: mantenha o `ssh ryzen wsl ...` aberto durante o build.
+- **Dois `ninja -j 3` no mesmo build do Ryzen (23/11)** → agente relançou o build sem ver que o primeiro
+  seguia vivo: 6 jobs no WSL de 6 GB e `.ninja_log` corrompido. → Antes de lançar, quadro de ocupação
+  `/root/agentes/QUADRO` + `ps -eo pid,etimes,args`; se já roda o mesmo alvo, juntar (parar e recomeçar com as
+  duas mudanças) ou deixar terminar e rodar incremental, o que repetir menos
+  (`~/projetos/ai-memory/global/procedimentos/trabalho-pesado.md`).
 - **Título do conversor (MK7, SM3DL) sem draws ou travado** → sem `--complete-gpu-work` o MK7 faz 12
   draws em 600 vblanks (com ele, 6588). → Use sempre `--complete-gpu-work` fora do OoT3D
   (docs/pesquisas/2026-11-10-mk7-zero-draws.md).
