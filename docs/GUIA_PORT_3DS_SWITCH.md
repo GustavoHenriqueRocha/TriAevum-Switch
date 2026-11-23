@@ -1012,6 +1012,10 @@ GLSL no console: os shaders vão prontos (DKSH, do `uam` do devkitPro) num pacot
   emprestadas do OoT3D cobrem pouco a luz de fragmento (88 % dos materiais do MM3D usam): capture as
   cenas do próprio título (`.src` do GL no PC) e preveja de novo. Ver
   `docs/pesquisas/2026-11-23-mm3d-shaders.md`.
+- **Vertex sem captura:** o texto do vertex só depende do SHBIN (programa, swizzles, entrada) e do
+  mapa de saída, que o motor programa a partir da tabela de saída do DVLE. `oot3d_deko3d_vertex_glsl_dump
+  <dir> <títulos>/*.shbin` gera `vert_<chave>.glsl` para `--glsl`; no OoT3D o `CmbVShader` dá a mesma
+  chave do vertex capturado no console. DVLE de geometria fica de fora (o deko3d não tem esse estágio).
 
 ### 4.12 deko3d: trocar o GL por deko3d sem mudar os shaders (alvos, estado, scanout)
 

@@ -103,6 +103,21 @@ add_executable(oot3d_deko3d_register_glsl_dump EXCLUDE_FROM_ALL
 target_compile_features(oot3d_deko3d_register_glsl_dump PRIVATE cxx_std_20)
 target_link_libraries(oot3d_deko3d_register_glsl_dump PRIVATE oot3d_native_pica_frontend)
 
+# deko3d: GLSL 4.3 dos vertex de cada DVLE dos SHBIN de um título (sem captura).
+add_executable(oot3d_deko3d_vertex_glsl_dump EXCLUDE_FROM_ALL
+    tools/oot3d/deko3d_vertex_glsl_dump.cpp
+    tools/oot3d/native_pica_frontend/oot3d_native_shbin.cpp
+    runtime/three_ds_recomp/src/fast/renderer3ds/pica_gl_shader_dialect.cpp)
+target_compile_features(oot3d_deko3d_vertex_glsl_dump PRIVATE cxx_std_20)
+target_link_libraries(oot3d_deko3d_vertex_glsl_dump PRIVATE oot3d_native_pica_frontend)
+
+add_executable(oot3d_native_shbin_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_pica_frontend/oot3d_native_shbin.cpp
+    tools/oot3d/native_pica_frontend/oot3d_native_shbin_tests.cpp)
+target_compile_features(oot3d_native_shbin_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_native_shbin_tests PRIVATE oot3d_native_pica_frontend)
+set_property(TARGET oot3d_native_shbin_tests PROPERTY FOLDER Tests)
+
 add_executable(oot3d_deko3d_parametric_glsl_dump EXCLUDE_FROM_ALL
     tools/oot3d/deko3d_parametric_glsl_dump.cpp
     runtime/three_ds_recomp/src/fast/renderer3ds/pica_gl_shader_dialect.cpp)

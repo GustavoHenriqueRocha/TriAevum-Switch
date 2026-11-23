@@ -158,6 +158,76 @@ então as partes de cena do OoT3D casam com os blocos de material gerados hoje.
 - **Copiar os 343 conhecidos do OoT3D para o pack do MM3D (como o v8 fazia):** são cena e material do
   OoT3D; os 337 que o MM3D pode usar já saem da previsão pelos materiais em comum.
 
+## Vertex: os 5 SHBIN do MM3D direto no pack (sem captura)
+
+Pergunta: o pack previsto só tinha fragment; como o OoT3D fez o vertex e dá para fazer o do MM3D
+offline?
+
+**Como o OoT3D faz (conferido).** O backend deko3d (`gfx_deko3d.cpp:ResolvePicaStage`) traduz o
+texto canônico do draw com `TranslatePicaShaderToOpenGl43` e procura o DKSH pela chave do texto; o
+canônico vem de `GenerateOot3dPicaVertexShader` (`oot3d_native_pica_shader_gen.cpp`): corpo do
+decompilador do Citra/Azahar (programa + swizzles + ponto de entrada) e um `main()` que só depende
+do mapa de saída (registradores 0x4F–0x56, máscara 0x2BD). O pack v9 e o v10 têm **1 vertex**
+(`4334ae90203c6570`), que veio do `.src` capturado no PC. A ferramenta do upstream
+`tools/renderer/tev_program/build_vertex_artifacts.cpp` já montava esse pacote de draw a partir da
+tabela de saída do DVLE (sem captura), mas só para SPIR-V e rejeitando DVLE de geometria.
+
+**O que entrou.** `ReadOot3dShbinEntries` (`native_pica_frontend/oot3d_native_shbin.{h,cpp}`) é a
+mesma regra do `build_vertex_artifacts` (bases de semântica, máscara, mapa empacotado), com pacote
+próprio por DVLE e DVLE de geometria listado em vez de abortar.
+`tools/oot3d/deko3d_vertex_glsl_dump.cpp` (alvo `oot3d_deko3d_vertex_glsl_dump`) gera o canônico,
+traduz para GL 4.3 e grava `vert_<chave>.glsl`; recusa texto que mude com a memória de programa além
+do SHBIN preenchida com END/0xFFFFFFFF (a guarda do `export_vertex_programs.cpp`).
+
+**Prova no OoT3D:** `CmbVShader.shbin` → `vert_4334ae90203c6570`, a mesma chave do único vertex do
+v9/v10 (FNV-1a 64 do texto inteiro: o texto offline é igual byte a byte ao capturado no console).
+
+| SHBIN | sha256 (16) | DVLE | palavras / swizzles | chave deko3d | no OoT3D? |
+|---|---|---|---|---|---|
+| OoT3D `CmbVShader` | 1125cfb9193e6c60 | 1 vtx | 310 / 54 | 4334ae90203c6570 | no pack v9 |
+| OoT3D `profile` | d5267731fde1a33d | 2 vtx | 25 / 5 | 5a088decaec017e7, 685fe99c9af7f8f8 | nunca capturado |
+| MM3D `DebugShader` | d25ddcdb9e6faa8c | 2 vtx (0, 13) | 25 / 5 | 4aaa591f06c74a5b, 2b1c6e60cba47b9c | não (*) |
+| MM3D `DummyShader` | 7b254c77f8f8eaa3 | 1 vtx | 4 / 1 | ffb4c5d97ec964ee | não |
+| MM3D `GzwShader` | a8a32a61cf8aa0bf | 1 vtx | 507 / 75 | 04f83c1e9c8cb279 | não |
+| MM3D `LayoutShader` | d049fe483f1b9a02 | 1 vtx | 67 / 32 | 791de18248c759be | não |
+| MM3D `LineShader` | d4a3638e2bbdaa2d | 1 vtx (9) + 1 geo (13) | 169 / 36 | a13948546f0f182e; geo sem tradução | não |
+
+(*) `DebugShader` é o `profile.shbin` do OoT3D com 2 palavras (8 e 21: `mov o1, v1` → `mul` pela
+constante c8) e 1 swizzle diferentes; o `GzwShader` tem a mesma tabela de saída do `CmbVShader`
+(8 saídas) mas outro programa (507 palavras, nenhum prefixo igual). Nenhum dos 5 SHBIN nem dos 6
+textos é igual a um do OoT3D. Os hashes batem com os do `titles/mm3d/tools/vertex_family.json` do
+upstream.
+
+**Pack:** os 6 vertex compilados com o uam (`-j 1`, `cc1plus` = 0) somados ao previsto:
+`deko3d.mm3d-previsto.pack` = **5602 DKSH (6 vertex + 5596 fragment), 0 falhas, 28 497 KiB
+(27,8 MiB)**; o anterior ficou como `deko3d.mm3d-previsto.v1.pack` (5596, 28 372 KiB). Vertex:
+GzwShader 105,5 KiB de DKSH (48 GPRs), os outros 1–7,5 KiB; scratch por warp 0 nos 6.
+Scratch do pack inteiro, conferido agora pelo cabeçalho do DKSH (`DkshPerWarpScratchBytes`):
+5588 com 0, 4 com 6144 e 4 com 10 240 B; os 8 acima de 0 são as 8 bases paramétricas do v9 (as
+mesmas do pack do OoT3D) e os 4 de 10 240 B passam do `kPerWarpScratchBytes` (8 KiB), então o
+`ShaderStore` também os recusa no OoT3D hoje (pelo código, `gfx_deko3d_shaders.cpp:86`); nenhum previsto do MM3D passa do limite.
+
+Reproduzir (M=`~/oot3d-work/conv/mm3d-shaders`):
+
+```sh
+oot3d_deko3d_vertex_glsl_dump $M/mm3dvert $M/romfs/shaders/*.shbin > $M/vert.idx
+python3 -I tools/oot3d/deko3d_shader_pack.py --pack $M/deko3d.mm3d-previsto.v1.pack \
+    --glsl $M/mm3dvert -o $M/deko3d.mm3d-previsto.pack -j 1
+```
+
+Teste de host com DVLB montado à mão (`oot3d_native_shbin_tests`, em `tests/switch/run.sh`):
+mapa de saída de posição/cor/UV0, texto com `gl_Position` e UV0 lidos dos registradores certos,
+DVLE de geometria listado, cada DVLE com o próprio mapa (sem herdar o do anterior), e entradas
+inválidas (truncado, não DVLB, entrada fora do programa, semânticas sobrepostas, semântica
+reservada, estágio desconhecido). Contra o stub sem implementação: 6 falhas pelo motivo certo.
+
+Alternativas rejeitadas: **capturar o vertex no console** (como o OoT3D fez) — desnecessário, o
+texto sai do SHBIN e a chave do OoT3D prova a equivalência; **usar o `mm3d_native_vertex.spvpack`
+do upstream** — SPIR-V de outro invólucro, não a chave do nosso texto GL 4.3; **mudar o
+`build_vertex_artifacts`** para chamar a função nova — depende do shaderc e do pacote SPIR-V do
+upstream, que este ramo não compila no notebook; a duplicação fica anotada para extrair quando
+aquele alvo voltar a ser compilado aqui.
+
 ## Em aberto
 
 - **Partes de cena do MM3D.** As 8 cenas são do OoT3D (luz, fog, w-buffer, sombra configurados como o
@@ -166,12 +236,23 @@ então as partes de cena do OoT3D casam com os blocos de material gerados hoje.
   os 4088 previstos com luz são os de menor confiança. Precisa de captura real do MM3D (GL no PC:
   os `.src` do `shadercache` são o mesmo texto do deko3d; ou `logs/deko3d_shaders/` no console) e
   rodar de novo a previsão com essas cenas em `--conhecidos`.
-- **Vertex.** O pack previsto não tem vertex do MM3D: o único vertex dos packs do OoT3D é do
-  `CmbVShader.shbin`. O MM3D tem 5 SHBIN próprios; o texto GL 4.3 deles também vem da captura (ou de
-  uma ferramenta de host que gere o vertex a partir do SHBIN, que não existe hoje). O DVLE de
-  geometria do `LineShader` não tem caminho no deko3d (ver `2026-11-10-mk7-geometry-shader.md`).
+- **Vertex (resolvido offline, seção acima; falta confirmar no console):** os 6 vertex dos 5 SHBIN
+  estão no pack. Só o jogo rodando diz (1) se o motor do MM3D programa o mapa de saída como o DVLE
+  manda (no OoT3D sim: chave igual), (2) quais SHBIN aparecem de fato (`DebugShader`/`DummyShader`
+  podem nunca desenhar) e (3) se o `LineShader` desenha em jogo: o DVLE de geometria dele não tem
+  caminho no deko3d (ver `2026-11-10-mk7-geometry-shader.md`), e esses draws seriam pulados.
+  Vertex que faltar aparece em `logs/deko3d_shaders/vert_*.glsl`.
+- **Cenas a capturar** (GL no PC: `.src` do `shadercache`; ou `logs/deko3d_shaders/` no console),
+  escolhidas pelo que cobrem: título e seleção de arquivo, menu de pausa/mapa/caderno dos Bombers
+  (`LayoutShader` e fragment de UI); Cidade do Relógio de dia, à noite e com chuva (luz de fragmento,
+  fog, ciclo de hora); um interior (Stock Pot Inn: luz de interior); Pântano do Sul (fog denso);
+  Snowhead (neve, fog claro); Great Bay debaixo d'água (Zora, fog de água); Ikana/Stone Tower
+  invertida; as três transformações (Deku, Goron, Zora) e a Fierce Deity (materiais próprios);
+  Lente da Verdade e a Canção do Tempo (efeitos de tela); a Lua. Com essas cenas em `--conhecidos`,
+  refazer a previsão de fragment (as 4088 com luz são as de menor confiança).
 - Dos 13 conhecidos do OoT3D que a previsão não reproduz (342 de 355), 12 são as bases paramétricas
   de `deko3d-pack-v10/bases` (nenhuma tem o bloco `color_output_0`); o 13º não foi olhado.
-- Scratch por warp dos 5596 DKSH não foi conferido offline (o `deko3d_shader_pack.py` deste ramo não
-  mede; o `ShaderStore` recusa no console o que passar de `kPerWarpScratchBytes`).
+- Scratch por warp: conferido (seção do vertex); só as 4 bases paramétricas de 10 240 B passam do
+  limite, igual no pack do OoT3D. Por que o `ShaderStore` as recusa sem efeito visível no OoT3D não
+  foi olhado.
 - Holdout (`deko3d_shader_predict_holdout.py`) continua com caminhos do OoT3D (v7); não foi usado.
