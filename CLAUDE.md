@@ -109,6 +109,10 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   e foram recriados `deko3d`/`mk7`/`ctr-discover` e 14 `resgate/*` (backup do que estava fora do git em
   ~/Documentos/backup-triaevum-worktrees-2026-11-12.tar.gz).
 
+- **`test_ptbr.py` falha com "No module named 'etcpak'"** → rodou com o python do sistema; Pillow e
+  etcpak estão só no venv do projeto. → Rode as ferramentas e testes de `tools/oot3d/ptbr/` com
+  `~/.venvs/triaevum/bin/python` (28/28 em 23/11).
+
 - **Crash com "Function not implemented" (p6x)** → `std::thread::detach()` lança
   `std::system_error`: a newlib do devkitA64 não tem `pthread_detach` (ENOSYS). → Nunca `detach()`
   no Switch; guarde a thread num objeto que nunca é destruído (p6y).
