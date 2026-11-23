@@ -96,6 +96,9 @@ void TestDkshScratch() {
   Require(DkshPerWarpScratchBytes(dksh) == 4096U, "lê per_warp_scratch_sz");
   Require(kPerWarpScratchBytes >= 4096U && kPerWarpScratchBytes % 0x200U == 0U,
           "a fila cobre os shaders do pacote (múltiplo de 0x200)");
+  // 23/11: 4 bases paramétricas do pack v9 (538f292b..., 9360ef3f..., 9a9b7571...,
+  // b673d614...) pedem 10240 bytes; com a fila de 8 KiB o ShaderStore as recusava.
+  Require(kPerWarpScratchBytes >= 10240U, "a fila cobre as bases de 10 KiB do pack v9");
   Put32(dksh, 20, 0);
   Require(!DkshPerWarpScratchBytes(dksh).has_value(), "sem programas reprova");
   Put32(dksh, 20, 1);

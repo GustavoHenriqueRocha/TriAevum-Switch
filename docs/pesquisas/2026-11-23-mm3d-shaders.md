@@ -207,6 +207,13 @@ Scratch do pack inteiro, conferido agora pelo cabeçalho do DKSH (`DkshPerWarpSc
 mesmas do pack do OoT3D) e os 4 de 10 240 B passam do `kPerWarpScratchBytes` (8 KiB), então o
 `ShaderStore` também os recusa no OoT3D hoje (pelo código, `gfx_deko3d_shaders.cpp:86`); nenhum previsto do MM3D passa do limite.
 
+**Corrigido (23/11, tarde):** medido no `deko3d-pack-v9/deko3d.pack` em uso no Switch (2195 DKSH): 2184 com 0,
+3 com 4096, 4 com 6144 e 4 com 10 240 B (538f292b…, 9360ef3f…, 9a9b7571…, b673d614…, as mesmas no v10 e no
+previsto do MM3D). `kPerWarpScratchBytes` passou de 8 para 10 KiB (múltiplo de 0x200); custo ≈ 128 warps × 2 KiB
+= 256 KiB a mais de scratch. Teste `TestDkshScratch` (oot3d_deko3d_backend_tests) falhava antes. Nenhum log do
+Switch em ~/oot3d-work tem a linha `scratch per warp ... refused`: se essas bases chegaram a ser pedidas no jogo
+não se sabe (o efeito, quando pedidas, era cair no programa uber).
+
 Reproduzir (M=`~/oot3d-work/conv/mm3d-shaders`):
 
 ```sh
