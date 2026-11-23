@@ -37,3 +37,10 @@ Formato diferente do OoT3D: um `message/eu/eu?.gmsg` por idioma (6152 mensagens)
 3. Traduzir em `traducao.json` (glossário do OoT3D + `glossario-mm3d.json`); `python -I mm3d.py montar` →
    `eus-ptbr.gmsg` e `romfs-ptbr.bin` (no lugar; o arquivo novo não pode passar dos 808028 bytes do espanhol).
 Detalhes: `docs/pesquisas/2026-11-23-mm3d-ptbr.md`.
+
+Texturas com texto (102 arquivos do espanhol: mapas com placa de nome, telas de dia, menus dentro de GAR):
+`mm3d_texturas.py` (`inventario`, `extrair`, `tabela`, `gerar`, `gravar`), com `gar.py` (GAR v2 byte a byte) e
+`ctxb.codificar_blocos` (no ETC1 só recomprime os blocos 4x4 que mudaram). A transcrição do espanhol e a tabela
+es→pt ficam em `~/oot3d-work/conv/mm3d-ptbr/texturas/` (`mapas-es.json`, `tabela-es-pt.json`); com a tabela lá,
+o `mm3d.py montar` grava as texturas também. Fonte das letras: Noto Sans CJK (pacote `noto-fonts-cjk`) e Belleza.
+Detalhes: `docs/pesquisas/2026-11-23-mm3d-texturas-ptbr.md`.

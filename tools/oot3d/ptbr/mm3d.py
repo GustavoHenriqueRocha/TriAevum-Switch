@@ -2,7 +2,8 @@
 
     python -I mm3d.py exportar   # eue.gmsg → TRABALHO/pendentes.json (textos únicos em inglês, códigos como ⟦..⟧)
     python -I mm3d.py conferir   # os 6 .gmsg: texto → arquivo → texto, byte a byte igual ao original
-    python -I mm3d.py montar     # TRABALHO/traducao.json → eus-ptbr.gmsg e romfs-ptbr.bin (corrigida no lugar)
+    python -I mm3d.py montar     # TRABALHO/traducao.json → eus-ptbr.gmsg e romfs-ptbr.bin (corrigida no lugar);
+                                 # com texturas/tabela-es-pt.json, também as texturas com texto (mm3d_texturas.py)
 
 TRABALHO = ~/oot3d-work/conv/mm3d-ptbr (TRIAEVUM_PTBR); romfs original = TRABALHO/romfs/romfs.bin (TRIAEVUM_ROMFS),
 extraída com tools/ctr/ncch_extract.py. traducao.json: {"0x0002": "texto PT-BR", ...}; a tradução de um id vale
@@ -101,6 +102,9 @@ def montar():
         raise SystemExit(f'ida e volta falhou: {iguais} intactas, {voltam} traduzidas voltam ao texto')
     print(f'eus.gmsg PT-BR: {len(novo)} de {tam} bytes; {len(trocados)} mensagens trocadas, '
           f'{iguais} intactas de {len(ents) - len(trocados)}; {voltam} voltam ao texto PT-BR igual')
+    if (TRABALHO / 'texturas' / 'tabela-es-pt.json').exists():       # texturas com texto (mm3d_texturas.py)
+        import mm3d_texturas
+        print(mm3d_texturas.gravar(ROMFS_PTBR), 'arquivos de textura do espanhol trocados pelo PT-BR')
 
 
 def exportar():

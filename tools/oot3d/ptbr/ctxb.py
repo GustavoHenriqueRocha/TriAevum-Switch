@@ -36,6 +36,7 @@ def decodificar(data):
         rgba = decode_etc1a4(b''.join(b'\xff' * 8 + p[i:i + 8] for i in range(0, w * h // 2, 8)), w, h)
     elif fmt == 0: rgba = _tiled(p, w, h, 4, lambda b: bytes((b[3], b[2], b[1], b[0])))
     elif fmt == 5: rgba = _tiled(p, w, h, 2, lambda b: bytes((b[1], b[1], b[1], b[0])))   # LA8: byte 0 = alfa
+    elif fmt == 7: rgba = _tiled(p, w, h, 1, lambda b: bytes((b[0], b[0], b[0], 255)))   # L8
     elif fmt == 3:
         def px(b):
             v = b[0] | b[1] << 8
@@ -103,6 +104,49 @@ def codificar_ctxb(original, im):
                 i = _tiled_pixel(x, y, w); j = (y * w + x) * 2
                 p[i * 2], p[i * 2 + 1] = la[j + 1], la[j]
         p = bytes(p)
+    elif fmt == 7:
+        r = rgba[0::4]; p = bytearray(w * h)
+        for y in range(h):
+            for x in range(w):
+                p[_tiled_pixel(x, y, w)] = r[y * w + x]
+        p = bytes(p)
     else: raise ValueError(f'codificação do formato {fmt} não feita')
     assert len(p) == len(original) - CTXB_HEADER_SIZE
     return original[:CTXB_HEADER_SIZE] + p
+
+
+def ordem_blocos(w, h):
+    """Canto (x, y) de cada bloco 4x4 de ETC1/ETC1A4 na ordem do payload PICA (ladrilhos 8x8, Z dentro deles)."""
+    return [(tx + bx, ty + by) for ty in range(0, h, 8) for tx in range(0, w, 8)
+            for bx, by in ((0, 0), (4, 0), (0, 4), (4, 4))]
+
+
+def bloco_etc(pix, alfa):
+    """16 pixels RGBA (4x4 em ordem de linha) → bloco PICA: ETC1 (8 bytes) ou, com `alfa`, ETC1A4 (16)."""
+    import etcpak
+    cor = struct.pack('<Q', int.from_bytes(etcpak.compress_etc1_rgb(pix, 4, 4), ORDEM_ETC))
+    if not alfa: return cor
+    a = 0
+    for x in range(4):
+        for y in range(4):
+            a |= ((pix[(y * 4 + x) * 4 + 3] * 15 + 127) // 255) << (4 * (x * 4 + y))
+    return struct.pack('<Q', a) + cor
+
+
+def codificar_blocos(original, im, conhecidos=None):
+    """Como codificar_ctxb, mas no ETC1/ETC1A4 só recomprime os blocos 4x4 cujos pixels mudaram: o resto fica com
+    os bytes do original (imagem sem mudança → mesmo arquivo). `conhecidos` ({pixels RGBA do bloco: bytes}) dá
+    blocos prontos, ex.: os da placa limpa, para não recomprimir o que já existe no jogo."""
+    w, h, fmt = cabecalho(original); assert im.size == (w, h)
+    if fmt not in (12, 13):
+        return codificar_ctxb(original, im)
+    novo, velho = im.convert('RGBA'), decodificar(original)
+    passo = 8 if fmt == 12 else 16
+    p = bytearray(original[CTXB_HEADER_SIZE:])
+    for k, (x, y) in enumerate(ordem_blocos(w, h)):
+        pix = novo.crop((x, y, x + 4, y + 4)).tobytes()
+        if pix == velho.crop((x, y, x + 4, y + 4)).tobytes(): continue
+        b = (conhecidos or {}).get(pix) or bloco_etc(pix, fmt == 13)
+        assert len(b) == passo
+        p[k * passo:(k + 1) * passo] = b
+    return original[:CTXB_HEADER_SIZE] + bytes(p)

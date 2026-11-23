@@ -1,5 +1,5 @@
 """Regressões do patch PT-BR (dados sintéticos, sem nada do jogo): python -I test_ptbr.py"""
-import sys, unittest
+import struct, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conv import converter
@@ -121,6 +121,116 @@ class Mm3dGmsg(unittest.TestCase):
         d[:4] = b'GZFX'; struct.pack_into('<III', d, 0x0c, 12, 1, 2)
         struct.pack_into('<I', d, 0x38, 0x20); struct.pack_into('<I', d, 0x38 + 12, 0xe3)
         self.assertEqual(gmsg.glifos_gzf(bytes(d)), {0x20, 0xe3})
+
+
+def _gar_feito_a_mao():
+    """GAR v2 com dois tipos ('unknown' vazio e 'ctxb') e dois membros de 5 e 8 bytes, montado campo a campo."""
+    import struct
+    b = bytearray(0xA0)
+    struct.pack_into('<4sIHHIII8s', b, 0, b'GAR\x02', 0xA0, 2, 2, 0x20, 0x58, 0x88, b'jenkins')
+    struct.pack_into('<IIII', b, 0x20, 0, 0xFFFFFFFF, 0x40, 0xFFFFFFFF)      # 'unknown': nenhum membro
+    struct.pack_into('<IIII', b, 0x30, 2, 0x48, 0x50, 0xFFFFFFFF)            # 'ctxb': índices 0 e 1
+    b[0x40:0x48] = b'unknown\0'; struct.pack_into('<II', b, 0x48, 0, 1); b[0x50:0x55] = b'ctxb\0'
+    struct.pack_into('<III', b, 0x58, 5, 0x77, 0x70)                          # tamanho, raiz, nome inteiro
+    struct.pack_into('<III', b, 0x64, 8, 0x84, 0x7C)
+    b[0x70:0x77] = b'a.ctxb\0'; b[0x77:0x79] = b'a\0'; b[0x7C:0x84] = b'bb.ctxb\0'; b[0x84:0x87] = b'bb\0'
+    struct.pack_into('<II', b, 0x88, 0x90, 0x98)
+    b[0x90:0x95] = b'AAAAA'; b[0x98:0xA0] = b'BBBBBBBB'
+    return bytes(b)
+
+
+def _ctxb_feito_a_mao(w, h, fmt, tipo, payload):
+    """CTXB com uma textura: cabeçalho de 0x48 bytes como o das texturas do MM3D."""
+    import struct
+    c = bytearray(0x48)
+    struct.pack_into('<4sIIIII', c, 0, b'ctxb', 0x48 + len(payload), 1, 0, 0x18, 0x48)
+    struct.pack_into('<4sIII', c, 0x18, b'tex ', 0x30, 1, len(payload))
+    struct.pack_into('<HHHHHHI', c, 0x28, 1, 1, w, h, fmt, tipo, 0)
+    return bytes(c) + payload
+
+
+# 4 blocos ETC1 (modo individual, tabela 0): cores-base 4 bits diferentes por bloco, índices variados
+_ETC1_8x8 = b''.join(struct.pack('<Q', c << 60 | c << 56 | c << 52 | c << 48 | c << 44 | c << 40 | idx)
+                     for c, idx in ((0x2, 0x0000FFFF), (0x5, 0x12345678), (0x9, 0xFFFF0000), (0xC, 0x0F0F0F0F)))
+
+
+class Mm3dGar(unittest.TestCase):
+    def test_le_e_remonta_igual(self):
+        import gar
+        b = _gar_feito_a_mao(); m = gar.ler(b)
+        self.assertEqual(m['membros'], [('a.ctxb', b'AAAAA'), ('bb.ctxb', b'BBBBBBBB')])
+        self.assertEqual(gar.montar(m), b)
+
+    def test_troca_mesmo_tamanho_muda_so_o_membro(self):
+        import gar
+        b = _gar_feito_a_mao(); m = gar.ler(b)
+        novo = gar.montar(dict(m, membros=[m['membros'][0], ('bb.ctxb', b'CCCCCCCC')]))
+        self.assertEqual(len(novo), len(b))
+        self.assertEqual([i for i in range(len(b)) if b[i] != novo[i]], list(range(0x98, 0xA0)))
+
+    def test_recusa_fora_do_padrao(self):
+        import gar
+        b = bytearray(_gar_feito_a_mao()); b[0x95] = 1                 # lixo no enchimento: não remonta igual
+        with self.assertRaises(ValueError):
+            gar.ler(bytes(b))
+
+
+class Mm3dCtxb(unittest.TestCase):
+    def test_etc1_sem_mudanca_volta_igual(self):
+        from ctxb import codificar_blocos, decodificar
+        orig = _ctxb_feito_a_mao(8, 8, 0x675A, 0, _ETC1_8x8)
+        self.assertEqual(codificar_blocos(orig, decodificar(orig)), orig)
+
+    def test_etc1_so_o_bloco_mexido_muda(self):
+        from ctxb import codificar_blocos, decodificar
+        orig = _ctxb_feito_a_mao(8, 8, 0x675A, 0, _ETC1_8x8)
+        im = decodificar(orig); im.paste((200, 30, 30, 255), (4, 4, 8, 8))   # bloco (4,4) = 4º na ordem PICA
+        novo = codificar_blocos(orig, im)
+        self.assertEqual(novo[:0x48 + 24], orig[:0x48 + 24])
+        self.assertNotEqual(novo[0x48 + 24:], orig[0x48 + 24:])
+        # o teste pega troca de canal, de ordem de bytes ou de bloco (erro > 100); a cor exata não: ETC1 tem base
+        # de 5 bits e modificador (nunca zero) igual nos 3 canais, e o etcpak (rápido) erra até 8 neste bloco liso
+        px = decodificar(novo).getpixel((6, 6))
+        self.assertTrue(all(abs(a - b) <= 10 for a, b in zip(px, (200, 30, 30, 255))), px)
+
+    def test_bloco_conhecido_reaproveita_bytes(self):
+        from ctxb import codificar_blocos, decodificar
+        orig = _ctxb_feito_a_mao(8, 8, 0x675A, 0, _ETC1_8x8)
+        dono = decodificar(_ctxb_feito_a_mao(8, 8, 0x675A, 0, _ETC1_8x8[8:16] * 4))   # o bloco 2 em todo lugar
+        im = decodificar(orig); im.paste(dono.crop((0, 0, 4, 4)), (0, 0))
+        conhecidos = {dono.crop((0, 0, 4, 4)).tobytes(): _ETC1_8x8[8:16]}
+        novo = codificar_blocos(orig, im, conhecidos)
+        self.assertEqual(novo[0x48:0x50], _ETC1_8x8[8:16])
+        self.assertEqual(novo[0x50:], orig[0x50:])
+
+    def test_etc1a4_alfa_e_volta(self):
+        import struct
+        from ctxb import codificar_blocos, decodificar
+        p = b''.join(struct.pack('<Q', 0xFEDCBA9876543210 >> k | 0xF) + _ETC1_8x8[k // 4 * 8:k // 4 * 8 + 8]
+                     for k in (0, 4, 8, 12))
+        orig = _ctxb_feito_a_mao(8, 8, 0x675B, 0, p)
+        self.assertEqual(codificar_blocos(orig, decodificar(orig)), orig)
+
+    def test_l8_ida_e_volta(self):
+        from ctxb import codificar_blocos, decodificar
+        orig = _ctxb_feito_a_mao(8, 8, 0x6757, 0x1401, bytes(range(0, 256, 4)))
+        im = decodificar(orig)
+        self.assertEqual(im.getpixel((0, 0)), (0, 0, 0, 255))
+        self.assertEqual(codificar_blocos(orig, im), orig)
+
+    def test_rgba4_ida_e_volta(self):
+        from ctxb import codificar_blocos, decodificar
+        orig = _ctxb_feito_a_mao(8, 8, 0x6752, 0x8033, bytes((i * 37) % 256 for i in range(128)))
+        self.assertEqual(codificar_blocos(orig, decodificar(orig)), orig)
+
+
+class Mm3dPlaca(unittest.TestCase):
+    def test_bloco_modal(self):
+        from mm3d_texturas import blocos_modais
+        a, b, c = (bytes([k]) * 8 for k in (1, 2, 3))
+        moda, freq = blocos_modais([a + b, a + c, a + b], 8)
+        self.assertEqual(moda, [a, b])
+        self.assertEqual(freq, [3, 2])
 
 
 if __name__ == '__main__':
