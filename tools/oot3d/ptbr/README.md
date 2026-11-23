@@ -26,4 +26,14 @@ original vem de `TRIAEVUM_ROMFS` (veja `caminhos.py`).
 
 Dependências: `mpyq`, `Pillow`, `etcpak`; fontes M PLUS Rounded 1c e Belleza (OFL) em `$TRIAEVUM_PTBR/fontes`.
 
-Teste: `python -I test_ptbr.py`.
+Teste: `python -I test_ptbr.py` (OoT3D e MM3D, dado sintético; o teste LA8 precisa do Pillow).
+
+## Majora's Mask 3D (EUR Rev 1)
+Formato diferente do OoT3D: um `message/eu/eu?.gmsg` por idioma (6152 mensagens) e a fonte `message/ltn16.gzf`
+(já tem todo o Latin-1, ã/õ inclusive). `gmsg.py` lê e escreve o formato; `mm3d.py` faz o resto, no slot do espanhol
+(`eus.gmsg`). Pasta: `~/oot3d-work/conv/mm3d-ptbr` (romfs em `romfs/romfs.bin`, de `tools/ctr/ncch_extract.py`).
+1. `python -I mm3d.py conferir` → os 6 `.gmsg` passam texto → arquivo → texto byte a byte iguais.
+2. `python -I mm3d.py exportar` → `pendentes.json` (5888 textos únicos em inglês).
+3. Traduzir em `traducao.json` (glossário do OoT3D + `glossario-mm3d.json`); `python -I mm3d.py montar` →
+   `eus-ptbr.gmsg` e `romfs-ptbr.bin` (no lugar; o arquivo novo não pode passar dos 808028 bytes do espanhol).
+Detalhes: `docs/pesquisas/2026-11-23-mm3d-ptbr.md`.
