@@ -262,6 +262,18 @@ class Mm3dMenu(unittest.TestCase):
         _apagar(im, (5, 3, 15, 7), [[False] * 20 for _ in range(10)], folga=0)
         self.assertEqual(im.getbbox(), None)
 
+    def test_apagar_transparente_com_rotulo_vizinho(self):
+        # "Visões" encostado em "Canção do Tempo Duplo", entre dois frisos: o que decide é o fundo das linhas do texto,
+        # fora a letra do vizinho (que muda por idioma)
+        from PIL import Image
+        from mm3d_texturas import _apagar
+        im = Image.new('RGBA', (30, 10), (0, 0, 0, 0))
+        im.paste((255, 255, 255, 255), (0, 1, 12, 9)); im.paste((255, 255, 255, 255), (14, 3, 24, 7))
+        im.paste((49, 49, 15, 255), (0, 0, 30, 1)); im.paste((49, 49, 15, 255), (0, 9, 30, 10))  # frisos de cima e de baixo
+        dif = [[(x < 12 and 1 <= y < 9) or (14 <= x < 24 and 3 <= y < 7) for x in range(30)] for y in range(10)]
+        _apagar(im, (14, 3, 24, 7), dif, folga=1)
+        self.assertEqual(im.crop((13, 2, 25, 8)).getbbox(), None)
+
     def test_estilo_letra_clara_contorno_escuro(self):
         from PIL import Image
         from mm3d_texturas import _estilo_rotulo

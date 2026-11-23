@@ -264,7 +264,12 @@ def _apagar(im, caixa, dif, folga=2):
     x0, y0, x1, y1 = max(0, caixa[0] - folga), max(0, caixa[1] - folga), min(w, caixa[2] + folga), min(h, caixa[3] + folga)
     anel = [px[x, y] for x in range(max(0, x0 - 2), min(w, x1 + 2)) for y in (max(0, y0 - 2), min(h - 1, y1 + 1))] + \
            [px[x, y] for y in range(y0, y1) for x in (max(0, x0 - 2), min(w - 1, x1 + 1))]
-    if sum(p[3] < 60 for p in anel) * 2 > len(anel):
+    # transparente se o anel em volta é, ou se os lados da caixa nas linhas do texto, fora o que muda por idioma, são
+    # (o anel engana com frisos em cima/embaixo e a letra de um rótulo vizinho; os lados, com um ícone ao lado)
+    lados = [px[x, y] for y in range(y0, y1) for x in [*range(max(0, x0 - 6), x0), *range(x1, min(w, x1 + 6))]
+             if not dif[y][x]]
+    vazio = lambda l: len(l) >= 4 and sum(p[3] < 60 for p in l) * 2 > len(l)
+    if vazio(anel) or vazio(lados):
         im.paste((0, 0, 0, 0), (x0, y0, x1, y1)); return
     refs = {}; luma = lambda p: (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
     for y in range(y0, y1):

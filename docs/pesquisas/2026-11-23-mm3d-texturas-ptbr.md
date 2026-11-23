@@ -63,6 +63,11 @@ aviso do HOME); `btn_return`, `menu_common_parts00/01`, `menu_popup_parts00` (S�
   ícone, "¡Nuevo!" de contorno duplo) a entrada do lote leva `xh`/`base`/`cores`/`camadas`/`fundo` medidos à mão no
   espanhol (mapa ASCII da textura). Gravados pelo `mm3d.py montar`: 101 arquivos, 111 texturas (91 + 20) lidas de
   volta da romfs iguais às geradas. Amostras (ES à esquerda, PT à direita) em `texturas/amostra_menu_*.png`.
+- **Correções depois da 1ª revisão (23/11):** o fundo transparente de "Visões" virava um retângulo cinza porque o
+  anel em volta tinha frisos e a letra de "Canção do Tempo Duplo" (opacos); agora vale também o fundo dos lados da
+  caixa nas linhas do texto, fora o que muda por idioma (teste `test_apagar_transparente_com_rotulo_vizinho`, visto
+  falhar antes). "Itens" do HUD ganhou fundo azul liso e o tamanho/peso de "Máscaras"; "Canção do Tempo Duplo" em
+  Medium sem esmagar; HUD "Olhar" → "Mirar" (glossário: L-Targeting = "Apontar com Mira").
 - Tabela es→pt dos mapas sai das próprias falas: o nome espanhol da placa é igual ao de uma fala de nome de área
   (ids 0x100–0x1a0) e o PT é o dessa fala no `eus-ptbr.gmsg`, então placa e falas dizem a mesma coisa. 26 de 28
   nomes saíram assim; à mão: "Ciudad Reloj" → "Cidade do Relógio" (glossário), "Camino al pantano del sur" →

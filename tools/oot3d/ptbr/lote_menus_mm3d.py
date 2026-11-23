@@ -14,7 +14,7 @@ os ordinais (1.°, 2.°: decisão na pesquisa) e o aviso do botão HOME da tela 
 # HUD do botão de ação: grade de 64 x 18 px a partir de y=93 (como o hud_all00 do OoT3D); colunas na ordem das
 # células do inglês (Attack, Check, Barrier, ...), que é a mesma do espanhol
 HUD_ACAO = [
-    ['Atacar', 'Olhar', 'Barreira', 'Voltar', 'Abrir', 'Pular', 'Escolher', 'Mergulhar', 'Galopar'],
+    ['Atacar', 'Mirar', 'Barreira', 'Voltar', 'Abrir', 'Pular', 'Escolher', 'Mergulhar', 'Galopar'],
     ['Lançar', 'Rolar', 'Subir', 'Soltar', 'Descer', 'Salvar', 'Falar', 'Próximo', 'Agarrar'],
     ['Cancelar', 'Guardar', 'Recolher', 'Info', 'Voar', 'Foto', 'Explodir', 'Dançar', 'Marchar'],
     ['Enrolar', 'Emergir', 'Nadar', 'Socar', 'Esmagar', None, 'Atirar', None, None],
@@ -40,7 +40,7 @@ LOTE = {
         (443, 123, 501, 138, 'Apagar', {'livre': (432, 510)})],
     'btn_return.ctxb': [(10, 49, 61, 63, 'Voltar', {'livre': (6, 62), 'grade': 'b'}), (66, 49, 118, 63, 'Sair', {'livre': (66, 124), 'grade': 'b'})],
     'menu_common_parts00.ctxb': [
-        (0, 35, 143, 55, 'Canção do Tempo Duplo', {'livre': (0, 144), 'alinhar': 'esq'}), (145, 35, 220, 55, 'Visões', {'livre': (144, 280), 'grade': 'menu', 'alinhar': 'esq'}),
+        (0, 35, 143, 55, 'Canção do Tempo Duplo', {'livre': (0, 144), 'alinhar': 'esq', 'xh': 7, 'peso': 'Medium'}), (145, 35, 220, 55, 'Visões', {'livre': (144, 280), 'grade': 'menu', 'alinhar': 'esq'}),
         (28, 58, 96, 79, 'Horário', {'livre': (28, 143), 'grade': 'menu', 'alinhar': 'esq'}), (144, 58, 210, 79, 'Inventário', {'livre': (144, 286), 'grade': 'menu', 'alinhar': 'esq'}),
         (28, 82, 144, 103, 'Lista de Eventos', {'livre': (28, 144), 'grade': 'menu', 'alinhar': 'esq'}),
         (146, 107, 235, 125, 'Itens', {'livre': (144, 286), 'grade': 'menu', 'alinhar': 'esq'}), (289, 59, 371, 80, 'Opções', {'livre': (287, 432), 'grade': 'menu', 'alinhar': 'esq'}),
@@ -61,7 +61,8 @@ LOTE = {
     'hud_patrs00_action_text.ctxb': _hud() + [
         (257, 0, 306, 15, 'Tatl', {'livre': (256, 330), 'grade': 'tatl'}), (257, 16, 306, 31, 'Alarme', {'livre': (256, 330), 'grade': 'tatl'}),
         (257, 32, 292, 47, 'Dica', {'livre': (256, 330), 'grade': 'tatl'}),
-        (353, 35, 398, 50, 'Inventário', {'livre': (352, 402)}), (369, 164, 430, 180, 'Itens', {'livre': (366, 432), 'xh': 6.5, 'cores': ((240, 240, 240, 255), (20, 30, 60, 255))}),
+        (353, 35, 398, 50, 'Inventário', {'livre': (354, 399), 'xh': 6.5, 'peso': 'Bold'}), (370, 166, 428, 178, 'Itens', {'livre': (370, 428), 'fundo': (44, 66, 98, 255), 'xh': 7, 'peso': 'Black',
+                                                    'cores': ((240, 240, 240, 255), (10, 15, 20, 255))}),
         (350, 193, 435, 215, 'Sem mapa', {'livre': (346, 436), 'cores': ((205, 205, 205, 255), (0, 0, 0, 255))}), (443, 198, 490, 213, 'Voltar', {'livre': (438, 492)})],
     'menu_hint_movie_parts00.ctxb': [(460, 21, 512, 34, 'Próximo', {'livre': (456, 512), 'fundo': (255, 100, 24, 255), 'xh': 5.5, 'cores': ((250, 250, 250, 255), (60, 10, 0, 255))}),
                                      (454, 68, 505, 87, 'Feito!', {'livre': (448, 512), 'xh': 7, 'cores': ((20, 150, 30, 255), None), 'camadas': [((0, 0, 0, 255), 2.2), ((255, 255, 255, 255), 1.2)]})],
