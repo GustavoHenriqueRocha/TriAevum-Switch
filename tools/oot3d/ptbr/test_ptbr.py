@@ -114,6 +114,29 @@ class Mm3dGmsg(unittest.TestCase):
         _, _, prob = aplicar(en, es, {'0x0002': 'É a ⟦09⟧⟦22:1234⟧!', '0x0000': 'Ação⟦31:0000⟧'}, fonte)
         self.assertEqual([p[0] for p in prob], ['0x0000', '0x0001', '0x0002'])   # o 1 herda a do 0
 
+    def test_tela_unica_confere_so_o_fluxo(self):
+        # Os textos da tela única (dekui) trocam o ícone de toque pelos botões: só nos ids da lista explícita
+        # o ícone (0x25) e a cor ficam livres; caixas e esperas seguem o inglês ou o espanhol. Fora dela, nada muda.
+        import gmsg
+        import mm3d
+        self.assertEqual(mm3d.TELA_UNICA, frozenset({0x003e, 0x0043, 0x0078, 0x00ff, 0x026b, 0x0270, 0x033f, 0x0e9b,
+                                                     0x1bae, 0x1d18, 0x2056, 0x575b}))
+        ids = [0x0010, 0x003e, 0x0043]
+        en = _gmsg_arquivo([gmsg.para_bytes(t) for t in
+                            ['Tap ⟦25:002e⟧ here.⟦31:0000⟧', 'Tap ⟦25:002e⟧ to view.⟦31:0001⟧⟦02⟧More.⟦31:0000⟧',
+                             'Tap ⟦25:0020⟧ to look.⟦31:0000⟧']], idioma=0x10, ids=ids)
+        es = _gmsg_arquivo([gmsg.para_bytes(t) for t in
+                            ['Toca ⟦25:002e⟧ aquí.⟦31:0000⟧', 'Toca ⟦25:002e⟧.⟦31:0001⟧⟦02⟧Más.⟦31:0000⟧',
+                             'Toca ⟦25:0020⟧.⟦31:0000⟧']], ids=ids)
+        fonte = {ord(c) for c in 'AperteSELCTZMisaqu./ ⟦⟧0123456789'}
+        trad = {'0x0010': 'Aperte ⟦25:0005⟧ aqui.⟦31:0000⟧',
+                '0x003e': 'Aperte SELECT e ⟦25:0005⟧/⟦25:0006⟧.⟦31:0001⟧⟦02⟧Mais.⟦31:0000⟧',
+                '0x0043': 'Aperte ZL.'}
+        _, trocados, prob = mm3d.aplicar(en, es, trad, fonte)
+        self.assertEqual(sorted(trocados), [0x003e])
+        self.assertEqual(prob, [('0x0010', 'códigos diferentes do inglês e do espanhol'),
+                                ('0x0043', 'códigos diferentes do inglês e do espanhol')])
+
     def test_glifos_gzf(self):
         import struct
         import gmsg

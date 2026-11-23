@@ -21,6 +21,11 @@ TRABALHO, ROMFS_ORIGINAL = pastas('mm3d')
 ROMFS_PTBR = TRABALHO / 'romfs-ptbr.bin'
 INGLES, ALVO, FONTE = 'message/eu/eue.gmsg', 'message/eu/eus.gmsg', 'message/ltn16.gzf'
 IDIOMAS = 'defgis'
+# Tela única (mm3d-dekui, titles/mm3d/dekui/setup/single-screen.json do upstream): estes textos trocam o ícone de
+# toque da tela de baixo pelos botões. Neles o ícone (0x25) e a cor ficam livres e só o fluxo do diálogo (caixas,
+# esperas, pausas) segue o inglês ou o espanhol, a regra do dekui. Os outros ids seguem a regra de sempre.
+TELA_UNICA = frozenset({0x003e, 0x0043, 0x0078, 0x00ff, 0x026b, 0x0270, 0x033f, 0x0e9b, 0x1bae, 0x1d18, 0x2056,
+                        0x575b})
 
 
 def ler_romfs(caminho, alvo):
@@ -47,7 +52,8 @@ def aplicar(ingles, alvo, trad, fonte):
     """→ (novo .gmsg do slot alvo, {id trocado: texto PT-BR}, problemas). Mensagem sem tradução fica byte a byte igual.
 
     Os códigos da tradução (fora a cor) têm de seguir os do inglês ou os do espanhol do mesmo id: o espanhol
-    reorganiza caixas, tira o plural ou usa outro sufixo de ordinal em 503 das 6152 mensagens."""
+    reorganiza caixas, tira o plural ou usa outro sufixo de ordinal em 503 das 6152 mensagens. Nos ids de
+    TELA_UNICA o ícone (0x25) também fica de fora."""
     _, ents_en, pls_en = gmsg.ler(ingles); cab, ents, pls = gmsg.ler(alvo)
     if [e[0] for e in ents] != [e[0] for e in ents_en]:
         raise gmsg.ErroGmsg('ids do inglês e do alvo diferem')
@@ -62,7 +68,8 @@ def aplicar(ingles, alvo, trad, fonte):
         mid = e[0]; k = f'{mid:#06x}'
         pt = trad.get(k) if k in trad else trad.get(por_ingles.get(en[mid], ''))
         if pt is None: continue
-        if gmsg.codigos(pt) not in (gmsg.codigos(en[mid]), gmsg.codigos(es[mid])):
+        ign = (gmsg.COR, '25') if mid in TELA_UNICA else (gmsg.COR,)
+        if gmsg.codigos(pt, ign) not in (gmsg.codigos(en[mid], ign), gmsg.codigos(es[mid], ign)):
             prob.append((k, 'códigos diferentes do inglês e do espanhol')); continue
         fora = {c for c in gmsg.visivel(pt) if c != '\n' and ord(c) not in fonte}
         if fora: prob.append((k, 'sem glifo: ' + ''.join(sorted(fora)))); continue
