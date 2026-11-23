@@ -2,9 +2,16 @@
 # conhecidos) x partes de material (bloco TEV dos CMB via oot3d_deko3d_register_glsl_dump),
 # podado pela luz. Uso: python3 tools/oot3d/deko3d_shader_predict.py <pasta com gen/, regs.txt.luz, srcglsl/>
 # 05/11: 8 cenas x 540 materiais -> 2181 fragment (v8glsl/); pack v8 = 2187 shaders, 7,5 MiB.
-import sys, re, pathlib, collections
-sys.path.insert(0, 'tools/oot3d'); import deko3d_shader_pack as p
-S = pathlib.Path(sys.argv[1]); H = pathlib.Path.home() / 'oot3d-work'
+# Outro título (23/11, MM3D): --conhecidos DIR (repetível) troca a fonte das partes de cena
+# (sem varrer ~/oot3d-work e sem copiar os conhecidos para a saída: o pack é cena x material do
+# título) e --saida NOME troca a pasta v8glsl. Ver docs/pesquisas/2026-11-23-mm3d-shaders.md.
+import sys, re, pathlib, collections, argparse, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import deko3d_shader_pack as p
+_a = argparse.ArgumentParser()
+_a.add_argument('pasta'); _a.add_argument('--conhecidos', action='append', default=[], type=pathlib.Path)
+_a.add_argument('--saida', default='v8glsl')
+ARGS = _a.parse_args()
+S = pathlib.Path(ARGS.pasta); H = pathlib.Path.home() / 'oot3d-work'
 # Parte do material: tudo entre o início do estágio 0 e o fim do estágio 5, mais o alpha test.
 TEVBLOCK = re.compile(r'(\n[^\n]*precise vec3 color_output_0 = .*?\n[^\n]*precise float alpha_output_5 = [^\n]*\n(?:[^\n]*(?:combiner_output =|combiner_buffer|next_combiner_buffer)[^\n]*\n)*(?:[^\n]*int alpha_byte = [^\n]*\n[^\n]*discard;[^\n]*\n)?)', re.S)
 ALPHA = re.compile(r'(\n[^\n]*int alpha_byte = [^\n]*\n[^\n]*discard;[^\n]*)')
@@ -14,9 +21,15 @@ def split(t):
     tev = m.group(1); rest = t[:m.start()] + '\n@@TEV@@' + t[m.end():]
     alpha = ''
     return (tev, alpha), rest
+def sources():
+    if ARGS.conhecidos:
+        return [f for d in ARGS.conhecidos for f in d.glob('frag_*.glsl')]
+    # /conv/ e /jogos/ são de outros títulos (o pack previsto do MM3D mora em conv/mm3d-shaders).
+    return [f for f in H.glob('**/frag_*.glsl') if '/conv/' not in str(f) and '/jogos/' not in str(f)] + \
+        list((S / 'srcglsl').glob('frag_*.glsl'))
 def load(exclude=()):
     texts = {}
-    for f in list(H.glob('**/frag_*.glsl')) + list((S / 'srcglsl').glob('frag_*.glsl')):
+    for f in sources():
         if 'build' in str(f) or '/spike/gen' in str(f) or f.stem[5:] in exclude: continue
         texts[f.stem[5:]] = f.read_text()
     return texts
@@ -25,7 +38,9 @@ known = load(v7)
 scenes = collections.Counter(); mats = set()
 for t in known.values():
     s = split(t)
-    if s: mats.add(s[0]); scenes[s[1]] += 1
+    if s:
+        scenes[s[1]] += 1
+        if not ARGS.conhecidos: mats.add(s[0])  # outro título: material só dos CMB dele (gen/)
 for g in (S / 'gen').glob('*.glsl'):
     s = split(g.read_text())
     if s: mats.add(s[0])
@@ -53,7 +68,7 @@ for scene in scenes:
         pruned['%016x' % p.shader_text_key(1, text.encode())] = text
 kn = set(known)
 print(f'podado: {len(pruned)}; v7 previstos: {len(v7 & set(pruned))} de 16; conhecidos: {len(kn & set(pruned))} de {len(kn)}')
-out = S / 'v8glsl'; out.mkdir(exist_ok=True)
+out = S / ARGS.saida; out.mkdir(exist_ok=True)
 for k, t in pruned.items(): (out / f'frag_{k}.glsl').write_text(t)
 flag = {l.strip() for l in open(S / 'regs.txt.luz')}
 flagged = set()
@@ -65,7 +80,7 @@ for scene in scenes:
     if 'pica_diffuse_sum' not in scene: continue
     for tev in flagged:
         text = scene.replace('\n@@TEV@@', tev); pruned['%016x' % p.shader_text_key(1, text.encode())] = text
-for k, t in load().items():
+for k, t in ({} if ARGS.conhecidos else load()).items():
     if split(t): pruned[k] = t
 print(f'final: {len(pruned)}; v7: {len(v7 & set(pruned))} de 16 (só com dados até a v6: ver acima); conhecidos: {len(kn & set(pruned))} de {len(kn)}')
 import shutil; shutil.rmtree(out); out.mkdir()

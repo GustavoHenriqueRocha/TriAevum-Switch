@@ -7,6 +7,9 @@ import os
 import struct
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cmb_layout  # noqa: E402
+
 SOURCE = {0x8577: 0, 0x6210: 1, 0x6211: 2, 0x84C0: 3, 0x84C1: 4, 0x84C2: 5, 0x84C3: 6,
           0x8579: 13, 0x8576: 14, 0x8578: 15}
 COLOR_OPERAND = {0x300: 0, 0x301: 1, 0x302: 2, 0x303: 3, 0x8580: 4, 0x8583: 5,
@@ -61,20 +64,20 @@ def scan(d: bytes, out: dict[tuple, dict[int, int]], lit: set[tuple], errors: li
     while i >= 0:
         try:
             c = d[i:i + struct.unpack_from('<I', d, i + 4)[0]]
-            mats, tex = struct.unpack_from('<2I', c, 0x28)
+            mats, tex, stride = cmb_layout.layout(c)
             if c[mats:mats + 4] == b'mats':
                 n = struct.unpack_from('<I', c, mats + 8)[0]
-                end = mats + 0xC + n * 0x15C
+                end = mats + 0xC + n * stride
                 combs = [c[end + k * 0x28:end + k * 0x28 + 0x28] for k in range((tex - end) // 0x28)]
                 for m in range(n):
                     try:
-                        regs = material_registers(c, mats + 0xC + m * 0x15C, combs)
+                        regs = material_registers(c, mats + 0xC + m * stride, combs)
                     except KeyError as missing:
                         errors.append(f'{name}: enum desconhecido 0x{missing.args[0]:x}')
                         continue
                     key = tuple(sorted(regs.items()))
                     out.setdefault(key, regs)
-                    if c[mats + 0xC + m * 0x15C]:
+                    if c[mats + 0xC + m * stride]:
                         lit.add(key)
         except struct.error:
             pass
@@ -88,9 +91,8 @@ def main() -> int:
     lit: set[tuple] = set()
     for directory, _, files in os.walk(root):
         for name in sorted(files):
-            if name.endswith(('.zar', '.zsi', '.gar', '.cmb')):
-                with open(os.path.join(directory, name), 'rb') as f:
-                    scan(f.read(), unique, lit, errors, name)
+            if name.endswith(cmb_layout.EXTENSIONS):
+                scan(cmb_layout.read(os.path.join(directory, name)), unique, lit, errors, name)
     # <saida>.luz: ids dos materiais com luz de fragmento ligada em algum CMB.
     with open(output, 'w') as f, open(output + '.luz', 'w') as luz:
         for index, (key, regs) in enumerate(unique.items()):

@@ -1005,6 +1005,13 @@ GLSL no console: os shaders vão prontos (DKSH, do `uam` do devkitPro) num pacot
   lembrada), senão um draw sem DKSH refaria a tradução de ~31 KB a cada quadro.
 - **Carregar:** o DKSH inteiro vai para a memória de código (`DkMemBlockFlags_Code`, alinhamento
   256) e `dkShaderMakerDefaults(&maker, bloco, offset)` sem ponteiro de controle separado.
+- **Pack previsto para outro título da Grezzo (MM3D, 23/11):** o CMB do MM3D é versão 10 (ponteiros
+  `mats`/`tex` em 0x2C/0x30, material de 0x16C) e metade dos modelos vem em LzS (`.zsi`, `.gar.lzs`);
+  `cmb_layout.py` + `grezzo_lzs.py` cuidam disso no censo e nos registradores. A previsão aceita
+  `--conhecidos <dir>` (partes de cena de outro título, material só do `gen/`) e `--saida`. As cenas
+  emprestadas do OoT3D cobrem pouco a luz de fragmento (88 % dos materiais do MM3D usam): capture as
+  cenas do próprio título (`.src` do GL no PC) e preveja de novo. Ver
+  `docs/pesquisas/2026-11-23-mm3d-shaders.md`.
 
 ### 4.12 deko3d: trocar o GL por deko3d sem mudar os shaders (alvos, estado, scanout)
 
