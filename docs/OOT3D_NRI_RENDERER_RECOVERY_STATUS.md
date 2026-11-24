@@ -164,11 +164,14 @@ The same renderer module now owns the inverse target-to-logical transform
 (`ac3ffbac feat(renderer): invert UI presentation coordinates`).
 TopScreen pointer input first enters the contained `400x240` presentation,
 then the native consumer converts its X coordinate back to the unchanged
-`320x240` CTR touch domain. This matches the mod's `400/320` pause projection
-without duplicating aspect or letterbox policy in input code. The default
-OoT3D profile retains direct `320x240` lower-screen mapping. Focused tests
-cover the recovered Gear, Map, and Items centers at 16:9 and 4:3 and reject
-touches in TopScreen letterbox regions.
+`320x240` CTR touch domain. That conversion first inverted a `400/320`
+scale; it now inverts the page placement TopScreen actually draws (X + 40,
+the widened Items grid X + 63 and sixth column X + 80,
+`oot3d_top_screen_page_layout.h`), without duplicating aspect or letterbox
+policy in input code. The default OoT3D profile retains direct `320x240`
+lower-screen mapping. Focused tests cover the recovered Gear, Map, and Items
+centers at 16:9 and 4:3, the Items slots on the Switch presentation, and
+reject touches in TopScreen letterbox regions.
 
 Runtime validation loaded the same HUD checkpoint for 140 presentation frames
 at `1280x720` and `1024x768`. Both runs selected the TopScreen profile,

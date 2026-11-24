@@ -906,6 +906,9 @@ bool NativeA32WindowSession::RunFrame() {
   auto physicalInputFrame =
       PollNativeA32Input(window,
                          nativeFrontendTouchEnabled || lowerScreenPictureInPicture,
+                         ResolveNativeA32TouchPresentation(
+                             process.Memory(),
+                             nativeCandidateDispatch.TopScreenUiProfile),
                          hostGuiVisible,
                          nativeCandidateDispatch.TopScreenUiProfile,
                          activeTopScreenConfig.FreeCameraEnabled,
@@ -914,6 +917,9 @@ bool NativeA32WindowSession::RunFrame() {
                          guestRefreshesDue != 0U,
                          nativeControlPollingState,
                          titleProfile.SwitchConsoleMotion,
+                         titleProfile.SwitchTouchAim,
+                         lastTopScreenPrimitivesBySubsystem[static_cast<
+                             std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
                          WidescreenMenuCornersActive(),
                          lowerScreenPictureInPicture);
   if (physicalInputFrame.Exit || devLabQuit) {

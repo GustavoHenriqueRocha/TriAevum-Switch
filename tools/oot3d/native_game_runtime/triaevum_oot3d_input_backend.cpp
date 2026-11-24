@@ -116,7 +116,7 @@ bool TriAevumOot3dInputBackend::Poll(Fast::Fast3dWindow &window,
   const auto touch = MapHostPointerToNativeA32Touch(
       pointer.x, pointer.y, window.GetWidth(), window.GetHeight(),
       window.GetMouseState(Ship::LUS_MOUSE_BTN_LEFT),
-      NativeA32TouchPresentation::TopScreen400x240);
+      NativeA32TouchPresentation::TopScreenCentredPage);
   if (!frame.Hid.TouchPressed && touch.Inside) {
     frame.Hid.TouchX = touch.X;
     frame.Hid.TouchY = touch.Y;

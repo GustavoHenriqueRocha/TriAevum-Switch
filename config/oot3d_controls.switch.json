@@ -21,7 +21,9 @@
     "gyroscope_sensitivity": 1.0,
     "accelerometer_sensitivity": 1.0,
     "invert_x": false,
-    "invert_y": false
+    "invert_y": false,
+    "touch_enabled": true,
+    "touch_degrees_per_pixel": 0.14
   },
   "free_camera": {
     "source": "right_stick",
