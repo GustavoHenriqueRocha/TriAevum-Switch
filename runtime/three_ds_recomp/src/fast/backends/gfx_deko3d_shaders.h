@@ -12,6 +12,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <vector>
 #include <memory>
 #include <span>
 #include <string_view>
@@ -27,6 +29,7 @@ struct ShaderStoreStats {
     uint64_t Missing = 0;      // distinct texts not in the pack
     uint64_t CodeBytes = 0;
     uint64_t LoadFailures = 0;
+    uint64_t PackReads = 0;    // DKSH read from the pack file on first use
 };
 
 class ShaderStore {
@@ -83,6 +86,10 @@ class ShaderStore {
     uint32_t mCodeUsed = 0;
     bool mCodeWritten = false;
     ShaderPackIndex mPack;
+    // The pack file stays open: only its index is in memory, each DKSH is read
+    // when its key first appears (the full MM3D pack is ~210 MB).
+    std::FILE* mPackFile = nullptr;
+    std::vector<uint8_t> mBlob;
     std::unordered_map<uint64_t, std::unique_ptr<Loaded>> mLoaded;
     std::unordered_set<uint64_t> mMissing;
     ShaderStoreStats mStats{};

@@ -2715,8 +2715,15 @@ GUARDS = [
     # From the fork author's a7424d3b: the pack read byte by byte delayed the boot.
     Guard("deko3d.pack read byte by byte delayed the boot (fork a7424d3b: one read)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
-          r'std::ios::binary \| std::ios::ate\);.*?file\.read\(reinterpret_cast<char\*>\(bytes\.data\(\)\)',
-          forbid=r'std::vector<uint8_t> bytes\(\(std::istreambuf_iterator'),
+          # Desde 24/11 o pack fica no SD (só o índice na RAM): o índice e cada DKSH em um fread só.
+          r'std::fread\(table\.data\(\) \+ 16, 1U, table\.size\(\) - 16U, file\).*?'
+          r'std::fread\(mBlob\.data\(\), 1U, mBlob\.size\(\), mPackFile\)',
+          forbid=r'std::istreambuf_iterator'),
+    # --- 24/11: pack completo do MM3D (41 902 shaders, ~210 MB) não cabia na RAM com o jogo (proc_used ~3185 MB) ---
+    Guard("deko3d.pack: só o índice na memória, cada DKSH lido do SD no primeiro uso",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
+          r'mPack\.ParseTable\(table, fileSize, &error\).*?const auto entry = mPack\.Entry\(key\);',
+          "oot3d_deko3d_backend_tests (TestShaderPackTable)", forbid=r'mPack\.Parse\(std::move\(bytes\)'),
     Guard("tevskip: config/deko3d_pack picks the pack and deko3d.txt says which and whether it skips TEV stages",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'ShaderPackNameFromConfig\(line\).*?tev_passthrough=%s',

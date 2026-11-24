@@ -131,79 +131,68 @@ struct ShaderPackEntry {
 };
 static_assert(sizeof(ShaderPackEntry) == 24);
 
+// Bytes of header + entry table the header announces (0 without a header):
+// what a reader that keeps the blobs on the SD card reads first.
+[[nodiscard]] inline uint64_t ShaderPackTableBytes(std::span<const uint8_t> header) {
+    uint32_t count = 0;
+    if (header.size() < 16U) {
+        return 0U;
+    }
+    std::memcpy(&count, header.data() + 8, sizeof(count));
+    return 16U + static_cast<uint64_t>(count) * sizeof(ShaderPackEntry);
+}
+
 class ShaderPackIndex {
   public:
     // Takes the whole file. False (with a reason) on any inconsistency; the
     // index is then empty.
     bool Parse(std::vector<uint8_t> bytes, std::string* error) {
-        mBytes.clear();
-        mEntries.clear();
-        mFlags = 0;
-        const auto fail = [&](const char* why) {
-            if (error != nullptr) {
-                *error = why;
-            }
-            mBytes.clear();
-            mEntries.clear();
-            mFlags = 0;
+        if (!ParseEntries(bytes, bytes.size(), error)) {
             return false;
-        };
-        uint32_t header[4]{};
-        if (bytes.size() < sizeof(header)) {
-            return fail("pack shorter than its header");
         }
-        std::memcpy(header, bytes.data(), sizeof(header));
-        if (header[0] != kShaderPackMagic) {
-            return fail("not a DKP1 pack");
-        }
-        if (header[1] != kShaderPackVersion) {
-            return fail("unsupported pack version");
-        }
-        const uint64_t count = header[2];
-        const uint64_t tableEnd = sizeof(header) + count * sizeof(ShaderPackEntry);
-        if (tableEnd > bytes.size()) {
-            return fail("entry table past the end of the pack");
-        }
-        mEntries.resize(static_cast<size_t>(count));
-        if (count != 0U) {
-            std::memcpy(mEntries.data(), bytes.data() + sizeof(header), static_cast<size_t>(count) * sizeof(ShaderPackEntry));
-        }
-        for (size_t index = 0; index < mEntries.size(); ++index) {
-            const ShaderPackEntry& entry = mEntries[index];
-            if (index != 0U && mEntries[index - 1U].Key >= entry.Key) {
-                return fail("entries not sorted by unique key");
-            }
-            if (entry.Stage > static_cast<uint32_t>(ShaderStage::Fragment)) {
-                return fail("entry with an unknown stage");
-            }
-            if (entry.Offset < tableEnd || static_cast<uint64_t>(entry.Offset) + entry.Size > bytes.size() ||
-                entry.Size < 4U) {
-                return fail("entry blob outside the pack");
-            }
+        for (const ShaderPackEntry& entry : mEntries) {
             uint32_t magic = 0;
             std::memcpy(&magic, bytes.data() + entry.Offset, sizeof(magic));
             if (magic != kDkshMagic) {
-                return fail("entry blob is not DKSH");
+                return Fail(error, "entry blob is not DKSH");
             }
         }
         mBytes = std::move(bytes);
-        mFlags = header[3];
         return true;
     }
 
-    // The DKSH of a key (and its stage), or an empty span.
+    // Header + entry table only (ShaderPackTableBytes of them), the blobs
+    // staying in a file of fileSize bytes: Find is then empty and the reader
+    // fetches Entry(key) itself (the DKSH magic is checked there).
+    bool ParseTable(std::span<const uint8_t> table, uint64_t fileSize, std::string* error) {
+        if (table.size() != ShaderPackTableBytes(table)) {
+            return Fail(error, "entry table cut short");
+        }
+        return ParseEntries(table, fileSize, error);
+    }
+
+    // The DKSH of a key (and its stage), or an empty span (also without blobs).
     [[nodiscard]] std::span<const uint8_t> Find(uint64_t key, ShaderStage* stage = nullptr) const {
-        const auto found = std::lower_bound(mEntries.begin(), mEntries.end(), key,
-                                            [](const ShaderPackEntry& entry, uint64_t value) {
-                                                return entry.Key < value;
-                                            });
-        if (found == mEntries.end() || found->Key != key) {
+        const auto found = Entry(key);
+        if (!found.has_value() || mBytes.empty()) {
             return {};
         }
         if (stage != nullptr) {
             *stage = static_cast<ShaderStage>(found->Stage);
         }
         return {mBytes.data() + found->Offset, found->Size};
+    }
+
+    // Where a key's DKSH is in the file.
+    [[nodiscard]] std::optional<ShaderPackEntry> Entry(uint64_t key) const {
+        const auto found = std::lower_bound(mEntries.begin(), mEntries.end(), key,
+                                            [](const ShaderPackEntry& entry, uint64_t value) {
+                                                return entry.Key < value;
+                                            });
+        if (found == mEntries.end() || found->Key != key) {
+            return std::nullopt;
+        }
+        return *found;
     }
 
     [[nodiscard]] size_t Count() const noexcept {
@@ -222,6 +211,58 @@ class ShaderPackIndex {
     }
 
   private:
+    bool Fail(std::string* error, const char* why) {
+        if (error != nullptr) {
+            *error = why;
+        }
+        mBytes.clear();
+        mEntries.clear();
+        mFlags = 0;
+        return false;
+    }
+
+    // Header and table at the start of bytes; blobs must end within fileSize.
+    bool ParseEntries(std::span<const uint8_t> bytes, uint64_t fileSize, std::string* error) {
+        mBytes.clear();
+        mEntries.clear();
+        mFlags = 0;
+        uint32_t header[4]{};
+        if (bytes.size() < sizeof(header)) {
+            return Fail(error, "pack shorter than its header");
+        }
+        std::memcpy(header, bytes.data(), sizeof(header));
+        if (header[0] != kShaderPackMagic) {
+            return Fail(error, "not a DKP1 pack");
+        }
+        if (header[1] != kShaderPackVersion) {
+            return Fail(error, "unsupported pack version");
+        }
+        const uint64_t count = header[2];
+        const uint64_t tableEnd = sizeof(header) + count * sizeof(ShaderPackEntry);
+        if (tableEnd > bytes.size()) {
+            return Fail(error, "entry table past the end of the pack");
+        }
+        mEntries.resize(static_cast<size_t>(count));
+        if (count != 0U) {
+            std::memcpy(mEntries.data(), bytes.data() + sizeof(header), static_cast<size_t>(count) * sizeof(ShaderPackEntry));
+        }
+        for (size_t index = 0; index < mEntries.size(); ++index) {
+            const ShaderPackEntry& entry = mEntries[index];
+            if (index != 0U && mEntries[index - 1U].Key >= entry.Key) {
+                return Fail(error, "entries not sorted by unique key");
+            }
+            if (entry.Stage > static_cast<uint32_t>(ShaderStage::Fragment)) {
+                return Fail(error, "entry with an unknown stage");
+            }
+            if (entry.Offset < tableEnd || static_cast<uint64_t>(entry.Offset) + entry.Size > fileSize ||
+                entry.Size < 4U) {
+                return Fail(error, "entry blob outside the pack");
+            }
+        }
+        mFlags = header[3];
+        return true;
+    }
+
     std::vector<uint8_t> mBytes;
     std::vector<ShaderPackEntry> mEntries;
     uint32_t mFlags = 0;

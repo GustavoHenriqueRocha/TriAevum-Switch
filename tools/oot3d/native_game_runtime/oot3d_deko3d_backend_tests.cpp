@@ -122,6 +122,32 @@ void TestShaderPack() {
   Require(kDefaultShaderPackName == "deko3d.pack", "default pack");
 }
 
+// MM3D (24/11): o pack completo previsto (41 902 shaders, ~210 MB) não cabe na RAM
+// junto do jogo (proc_used ~3185 MB). Só o índice fica na memória; cada DKSH é lido
+// do arquivo quando a chave aparece.
+void TestShaderPackTable() {
+  using namespace Fast::Deko3d;
+  const auto pack = MakePack(10, 20);
+  const std::vector<uint8_t> table(pack.begin(), pack.begin() + 64);
+  ShaderPackIndex index;
+  std::string error;
+  Require(ShaderPackTableBytes(table) == 64, "tamanho do índice pelo cabeçalho");
+  Require(index.ParseTable(table, pack.size(), &error), "índice válido sem os blobs");
+  Require(index.Count() == 2, "duas entradas no índice");
+  const auto entry = index.Entry(20);
+  Require(entry.has_value() && entry->Offset == 72 && entry->Size == 8 &&
+              entry->Stage == static_cast<uint32_t>(ShaderStage::Fragment),
+          "entrada 20 com posição e tamanho no arquivo");
+  Require(!index.Entry(15).has_value(), "chave ausente no índice");
+  Require(index.Find(20).empty(), "sem os blobs na memória, Find não inventa bytes");
+  Require(!index.ParseTable(table, 75, &error) && index.Count() == 0, "blob além do fim do arquivo reprova");
+  const auto swapped = MakePack(20, 10);
+  Require(!index.ParseTable({swapped.begin(), swapped.begin() + 64}, swapped.size(), &error),
+          "índice fora de ordem reprova");
+  Require(!index.ParseTable({table.begin(), table.begin() + 40}, pack.size(), &error), "índice cortado reprova");
+  Require(ShaderPackTableBytes({}) == 0, "cabeçalho ausente");
+}
+
 // p6f on the console: lighting shaders with 4096 bytes of scratch and the queue with the
 // default of 2048 crashed the GPU when leaving Link's house.
 void TestDkshScratch() {
@@ -1164,6 +1190,8 @@ int main() {
   TestRendererConfigSelection();
   TestRawTextureCopy();
   TestShaderPack();
+  TestShaderPackTable();
+  TestShaderPackTable();
   TestDkshScratch();
   TestCommandGuard();
   TestProgramPick();

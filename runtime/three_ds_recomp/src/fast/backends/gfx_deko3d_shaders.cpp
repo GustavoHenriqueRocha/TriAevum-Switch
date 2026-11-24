@@ -16,21 +16,12 @@ constexpr const char* kPackDirectory = "sdmc:/switch/oot3dre/shadercache/";
 constexpr const char* kPackConfig = "sdmc:/switch/oot3dre/config/deko3d_pack";
 constexpr const char* kMissingDirectory = "sdmc:/switch/oot3dre/logs/deko3d_shaders";
 
-// The whole file in one read (nothing if it cannot be read). From the fork
-// author's ShaderStore::Init: TriAevum-Switch commit a7424d3b by Gustavo
-// Henrique Rocha ("leitura do pack de uma vez"), licence as the repository
-// (LICENSE): a per-byte istreambuf_iterator copy over the SD card delays boot.
-std::optional<std::vector<uint8_t>> ReadWholeFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return std::nullopt;
-    }
-    std::vector<uint8_t> bytes(static_cast<size_t>(file.tellg()));
-    file.seekg(0);
-    if (!bytes.empty() && !file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
-        return std::nullopt;
-    }
-    return bytes;
+// The pack opened for reading (nothing if it is not there). Only its header
+// and entry table go to memory, each in one fread (the fork author's
+// a7424d3b, "leitura do pack de uma vez": a per-byte istreambuf_iterator copy
+// over the SD card delayed boot); each DKSH is read on first use.
+std::FILE* OpenPack(const std::string& path) {
+    return std::fopen(path.c_str(), "rb");
 }
 } // namespace
 
@@ -45,14 +36,14 @@ bool ShaderStore::Init(Device& device) {
     // deko3d_reference.pack, the same stages without the pass-through TEV
     // rewrite). A bad name or a missing file falls back to deko3d.pack.
     std::string name(kDefaultShaderPackName);
-    std::optional<std::vector<uint8_t>> bytes;
+    std::FILE* file = nullptr;
     {
         std::ifstream config(kPackConfig);
         std::string line;
         if (config && std::getline(config, line)) {
             if (const auto chosen = ShaderPackNameFromConfig(line)) {
-                bytes = ReadWholeFile(kPackDirectory + *chosen);
-                if (bytes) {
+                file = OpenPack(kPackDirectory + *chosen);
+                if (file != nullptr) {
                     name = *chosen;
                 } else {
                     Log("shaders: config/deko3d_pack names %s, not found; reading %s", chosen->c_str(), name.c_str());
@@ -64,21 +55,44 @@ bool ShaderStore::Init(Device& device) {
         }
     }
     const std::string path = kPackDirectory + name;
-    if (!bytes) {
-        bytes = ReadWholeFile(path);
+    if (file == nullptr) {
+        file = OpenPack(path);
     }
-    if (!bytes) {
+    if (file == nullptr) {
         Log("shaders: %s not found (every program will be missing)", path.c_str());
         return true;
     }
+    // Only the header and the entry table go to memory (24 bytes per stage);
+    // the blobs are read on first use, so the pack can hold every predicted
+    // stage without taking the game's RAM.
+    std::vector<uint8_t> table(16U);
     std::string error;
-    if (!mPack.Parse(std::move(*bytes), &error)) {
-        Log("shaders: %s rejected: %s", path.c_str(), error.c_str());
+    uint64_t fileSize = 0;
+    if (std::fseek(file, 0, SEEK_END) == 0) {
+        const long end = std::ftell(file);
+        fileSize = end > 0 ? static_cast<uint64_t>(end) : 0U;
+    }
+    const uint64_t tableBytes = std::fseek(file, 0, SEEK_SET) == 0 &&
+                                        std::fread(table.data(), 1U, table.size(), file) == table.size()
+                                    ? ShaderPackTableBytes(table)
+                                    : 0U;
+    if (tableBytes < table.size() || tableBytes > fileSize) {
+        Log("shaders: %s rejected: header or entry table unreadable", path.c_str());
+        std::fclose(file);
         return true;
     }
+    table.resize(static_cast<size_t>(tableBytes));
+    if (std::fread(table.data() + 16, 1U, table.size() - 16U, file) != table.size() - 16U ||
+        !mPack.ParseTable(table, fileSize, &error)) {
+        Log("shaders: %s rejected: %s", path.c_str(), error.empty() ? "entry table unreadable" : error.c_str());
+        std::fclose(file);
+        return true;
+    }
+    mPackFile = file;
     mStats.PackEntries = mPack.Count();
     const size_t skipped = mPack.CountWithFlag(kShaderPackFlagTevPassthroughSkip);
-    Log("shaders: %zu precompiled stages in the pack", mPack.Count());
+    Log("shaders: %zu precompiled stages in the pack (index %llu KiB, %llu MiB on the SD card)", mPack.Count(),
+        static_cast<unsigned long long>(tableBytes >> 10), static_cast<unsigned long long>(fileSize >> 20));
     Log("shaders: pack %s flags=%u tev_passthrough=%s (%zu stages compiled with pass-through TEV stages skipped)",
         name.c_str(), static_cast<unsigned>(mPack.Flags()),
         (mPack.Flags() & kShaderPackFlagTevPassthroughSkip) != 0U ? "skip" : "keep", skipped);
@@ -87,6 +101,10 @@ bool ShaderStore::Init(Device& device) {
 
 void ShaderStore::Shutdown() noexcept {
     mLoaded.clear();
+    if (mPackFile != nullptr) {
+        std::fclose(mPackFile);
+        mPackFile = nullptr;
+    }
     if (mCode != nullptr) {
         dkMemBlockDestroy(mCode);
         mCode = nullptr;
@@ -102,13 +120,23 @@ const DkShader* ShaderStore::FindKey(ShaderStage stage, uint64_t key, std::strin
     if (const auto found = mLoaded.find(key); found != mLoaded.end()) {
         return &found->second->Shader;
     }
-    ShaderStage packedStage = stage;
-    const auto dksh = mPack.Find(key, &packedStage);
-    if (dksh.empty() || packedStage != stage) {
+    const auto entry = mPack.Entry(key);
+    if (!entry.has_value() || entry->Stage != static_cast<uint32_t>(stage) || mPackFile == nullptr) {
         RecordMissing(stage, key, textForRecord);
         return nullptr;
     }
-    return Load(key, dksh);
+    mBlob.resize(entry->Size);
+    uint32_t magic = 0;
+    if (std::fseek(mPackFile, static_cast<long>(entry->Offset), SEEK_SET) != 0 ||
+        std::fread(mBlob.data(), 1U, mBlob.size(), mPackFile) != mBlob.size() ||
+        (std::memcpy(&magic, mBlob.data(), sizeof(magic)), magic != kDkshMagic)) {
+        if (mStats.LoadFailures++ < 10U) {
+            Log("shaders: %016llx could not be read from the pack", static_cast<unsigned long long>(key));
+        }
+        return nullptr;
+    }
+    ++mStats.PackReads;
+    return Load(key, mBlob);
 }
 
 const DkShader* ShaderStore::Embedded(uint64_t key, std::span<const uint8_t> dksh) {
