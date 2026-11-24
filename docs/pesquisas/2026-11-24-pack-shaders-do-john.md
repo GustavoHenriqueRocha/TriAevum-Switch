@@ -38,3 +38,15 @@ coletado só pelo nosso tour. Dá para aproveitar o pacote dele sem jogar essas 
 - Quantas das 2540 chaves o nosso runtime gera de fato (o fork dele mudou shaders, como a sombra simples):
   medir pelos faltantes em `logs/deko3d_shaders/` e pelo GPU no Templo do Fogo e no Barinade.
 - Se os 23 MiB a mais pesam no boot ou na memória do jogo.
+
+## Resultado no console (tour28-john, 24/11 15:40)
+
+- Tour do lab com 14 lugares das issues dele (Jabu-Jabu, Tumba Real, Cratera, Templo do Fogo, antes do
+  Volvagia, Templo do Espírito, Templo do Tempo, Castelo de Ganon, Barinade, Volvagia, Twinrova, Ganondorf,
+  Ganon, cutscene da morte do Ganon): 59 de 59 acks, `~/oot3d-work/bench/tour28-john`.
+- Sessão 68 do `perf.txt`: 289 janelas, média 59,2 fps, p10 57,2; 7 janelas abaixo de 54 fps, todas logo
+  depois de um warp (posição pelo quadro do ack, aproximada): Cratera 45,0 e entrada do Templo do Fogo
+  49,0–51,8, com guest 15,5–16,7 ms (CPU, não shader); uma de 1,8 fps (guest 545 ms) no começo da cutscene
+  da morte do Ganon (carregamento).
+- Faltantes em `logs/deko3d_shaders/`: os mesmos 2 de antes do tour; nenhum novo nesses lugares.
+- O boot com o pacote de 35 MB foi normal (Gustavo, 24/11).
