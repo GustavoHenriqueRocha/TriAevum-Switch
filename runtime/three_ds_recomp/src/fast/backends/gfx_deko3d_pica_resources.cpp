@@ -151,6 +151,7 @@ bool PicaResources::Init(Device& device) {
         return false;
     }
 
+    mNoFog = std::ifstream("sdmc:/switch/oot3dre/config/deko3d_nofog").good();
     std::ifstream budget(kBudgetPath);
     const std::string text((std::istreambuf_iterator<char>(budget)), std::istreambuf_iterator<char>());
     mBudgetBytes = PicaGlResidency::ParseBudgetBytes(text, PicaGlResidency::Policy{}.BudgetBytes);
@@ -1191,6 +1192,15 @@ bool PicaResources::StreamUniforms(std::span<const uint8_t> bytes, LastUniforms&
     }
     const size_t copy = std::min<size_t>(bytes.size(), size);
     std::memcpy(stream.Cpu, bytes.data(), copy);
+    // Diagnóstico (config/deko3d_nofog): fator de névoa 1 em toda a tabela.
+    constexpr size_t kFogLutEnd = Oot3d::kPicaPackedFragmentFogLutOffset + 64U * Oot3d::kPicaPackedVec4Bytes;
+    if (&last == &mLastFragmentUniforms && mNoFog && copy >= kFogLutEnd) {
+        const float noFog[4] = {1.0F, 0.0F, 1.0F, 0.0F};
+        for (size_t offset = Oot3d::kPicaPackedFragmentFogLutOffset; offset < kFogLutEnd;
+             offset += sizeof(noFog)) {
+            std::memcpy(static_cast<uint8_t*>(stream.Cpu) + offset, noFog, sizeof(noFog));
+        }
+    }
     address = stream.Gpu;
     last.Frame = mFrame;
     last.Address = stream.Gpu;

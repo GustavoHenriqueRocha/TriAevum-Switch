@@ -304,6 +304,7 @@ class PicaResources {
     DkImage mFallbackColor{};
     DkImage mFallbackInteger{};
     DkImage mFallbackClear{};
+    bool mNoFog = false; // config/deko3d_nofog (diagnóstico)
     DkMemBlock mConstant = nullptr; // (0, 0, 0, 1) floats, CPU-visible
     DkGpuAddr mConstantGpu = DK_GPU_ADDR_INVALID;
     DescriptorSlots<kMaxImages> mImageSlots{kReservedImages};

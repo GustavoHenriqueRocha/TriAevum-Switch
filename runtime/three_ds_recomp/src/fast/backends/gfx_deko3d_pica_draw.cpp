@@ -466,10 +466,32 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
                           texture.CopyReferences.size());
             textures += entry;
         }
+        // Névoa: escala/deslocamento de profundidade, w-buffer, cor e a tabela em 0/32/64/96/127.
+        char fog[192] = "[]";
+        const auto& fragment = draw.FragmentUniformBytes;
+        if (fragment.size() >= Oot3d::kPicaPackedFragmentFogLutOffset + 64U * Oot3d::kPicaPackedVec4Bytes) {
+            const auto f32 = [&](size_t offset) {
+                float value = 0.0F;
+                std::memcpy(&value, fragment.data() + offset, sizeof(value));
+                return value;
+            };
+            const auto lut = [&](unsigned index) {
+                return f32(Oot3d::kPicaPackedFragmentFogLutOffset + index * 2U * sizeof(float));
+            };
+            int32_t wBuffering = 0;
+            std::memcpy(&wBuffering, fragment.data() + Oot3d::kPicaPackedFragmentWBufferingOffset, sizeof(wBuffering));
+            std::snprintf(fog, sizeof(fog), "[%.4g,%.4g,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f]",
+                          f32(Oot3d::kPicaPackedFragmentDepthScaleOffset),
+                          f32(Oot3d::kPicaPackedFragmentDepthOffsetOffset), wBuffering,
+                          f32(Oot3d::kPicaPackedFragmentFogColorOffset),
+                          f32(Oot3d::kPicaPackedFragmentFogColorOffset + 4U),
+                          f32(Oot3d::kPicaPackedFragmentFogColorOffset + 8U), lut(0), lut(32), lut(64), lut(96),
+                          lut(127));
+        }
         CensusLine("{\"k\":\"draw\",\"f\":%llu,\"id\":%llu,\"ns\":%llu,\"color\":\"%08x\",\"depth\":\"%08x\","
                    "\"fb\":[%u,%u,%u,%u,%d],\"vtx\":%u,\"dt\":%d,\"dw\":%d,\"dc\":%u,\"cm\":%u,"
                    "\"blend\":[%d,%u,%u,%u,%u],\"at\":[%d,%u,%u],\"st\":%d,\"sc\":[%u,%u,%u,%u,%u],"
-                   "\"range\":%.4f,\"mode\":%u,\"tex\":[%s]}",
+                   "\"range\":%.4f,\"mode\":%u,\"fog\":%s,\"tex\":[%s]}",
                    static_cast<unsigned long long>(Renderer3ds::PicaSurfaceDebug::Instance().Frame()),
                    static_cast<unsigned long long>(draw.SubmissionId),
                    static_cast<unsigned long long>(draw.RenderTargetNamespace), draw.FramebufferColorPhysicalAddress,
@@ -481,7 +503,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
                    static_cast<unsigned>(draw.Blend.SourceAlpha), static_cast<unsigned>(draw.Blend.DestAlpha),
                    draw.AlphaTestEnabled ? 1 : 0, static_cast<unsigned>(draw.AlphaCompare), draw.AlphaReference,
                    draw.Stencil.Enabled ? 1 : 0, draw.ScissorMode, draw.ScissorX1, draw.ScissorY1, draw.ScissorX2,
-                   draw.ScissorY2, draw.DepthRange, draw.FragmentOperationMode, textures.c_str());
+                   draw.ScissorY2, draw.DepthRange, draw.FragmentOperationMode, fog, textures.c_str());
     }
 
     const PicaTargetKey key = MakePicaTargetKey(draw);
