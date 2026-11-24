@@ -236,15 +236,11 @@ bool PicaTargets::GpuWritten(uint64_t targetNamespace, uint32_t address) const {
 std::pair<const PicaTargetKey*, PicaTarget*> PicaTargets::FindColor(uint64_t targetNamespace, uint32_t colorAddress) {
     const PicaTargetKey* bestKey = nullptr;
     PicaTarget* best = nullptr;
-    const auto order = [](const PicaTargetKey& key) {
-        return std::tie(key.Namespace, key.ColorAddress, key.DepthAddress, key.Width, key.Height, key.ColorFormat,
-                        key.DepthFormat);
-    };
     for (auto& [key, target] : mTargets) {
         if (key.Namespace != targetNamespace || key.ColorAddress != colorAddress) {
             continue;
         }
-        if (bestKey == nullptr || order(key) < order(*bestKey)) {
+        if (bestKey == nullptr || PicaTargetKeyOrder(key, *bestKey)) {
             bestKey = &key;
             best = &target;
         }

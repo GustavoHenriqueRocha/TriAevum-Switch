@@ -28,6 +28,16 @@ class Guard:
 
 
 GUARDS = [
+    # --- 24/11: Floresta Perdida do MM3D azul chapada sem as árvores (deko3d) ---
+    # A limpeza da profundidade (preenchimento de 18537fc0) vale para o primeiro alvo que a cobre
+    # e sai da fila. A cena (cor 18237fc0) e os alvos do borrão (183c...) dividem esse endereço de
+    # profundidade, cada um com a sua imagem no deko3d; num unordered_map um alvo do borrão podia
+    # levar a limpeza e a profundidade da cena nunca era limpa (só passava o mais próximo).
+    # O GL percorre um std::map: os alvos vão na ordem da chave (cor menor primeiro).
+    Guard("deko3d: preenchimentos e ForEach percorrem os alvos na ordem da chave do GL (std::map)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.h",
+          r'void ForEach\(F&& visit\) \{.*?std::sort\(.*?PicaTargetKeyOrder',
+          "docs/pesquisas/2026-11-24-mm3d-tour-lab.md (censo do deko3d)"),
     # --- 24/11: tela azul na Floresta Perdida do MM3D (deko3d) ---
     # O brilho da cena (draw aditivo de tela cheia) amostra endereços que a própria GPU escreveu
     # no quadro (saída de cópia 18381180, alvos 183c9280/183cb300). O deko3d decodificava essas

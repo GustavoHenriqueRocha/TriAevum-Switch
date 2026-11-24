@@ -18,16 +18,28 @@
 #include "gfx_deko3d_device.h"
 #include "gfx_deko3d_pica_resources.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace Fast::Deko3d {
+
+// GL keeps its targets in a std::map: a fill goes to the first target that
+// covers it in this order (the scene before a blur target sharing its depth).
+inline bool PicaTargetKeyOrder(const PicaTargetKey& left, const PicaTargetKey& right) {
+    const auto order = [](const PicaTargetKey& key) {
+        return std::tie(key.Namespace, key.ColorAddress, key.DepthAddress, key.Width, key.Height, key.ColorFormat,
+                        key.DepthFormat);
+    };
+    return order(left) < order(right);
+}
 
 struct PicaTarget {
     DkMemBlock Memory = nullptr;
@@ -104,9 +116,18 @@ class PicaTargets {
     // The GPU writes this address: a target's colour buffer or a transfer output
     // (the guest bytes there never see those writes).
     bool GpuWritten(uint64_t targetNamespace, uint32_t address) const;
+    // In GL's key order (PicaTargetKeyOrder): the unordered map's order once
+    // gave the scene's depth clear to a blur target (MM3D Lost Woods).
     template <typename F> void ForEach(F&& visit) {
+        std::vector<std::pair<const PicaTargetKey*, PicaTarget*>> ordered;
+        ordered.reserve(mTargets.size());
         for (auto& [key, target] : mTargets) {
-            visit(key, target);
+            ordered.emplace_back(&key, &target);
+        }
+        std::sort(ordered.begin(), ordered.end(),
+                  [](const auto& left, const auto& right) { return PicaTargetKeyOrder(*left.first, *right.first); });
+        for (const auto& [key, target] : ordered) {
+            visit(*key, *target);
         }
     }
     [[nodiscard]] size_t Count() const noexcept { return mTargets.size(); }
