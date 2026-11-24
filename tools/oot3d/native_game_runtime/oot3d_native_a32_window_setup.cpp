@@ -1328,6 +1328,9 @@ void NativeA32WindowSession::Setup() {
       std::chrono::steady_clock::now());
   api.SetNativePicaGeometryCacheEnabled(
       !launch.DisableOpenGlPicaGeometryCache);
+  // Textura num endereço que a GPU escreveu lê a imagem da GPU (deko3d); o
+  // OoT3D segue com o preto transparente (ctr_title_profile.h).
+  api.SetNativePicaGpuFeedbackTextures(titleProfile.GpuFeedbackTextures);
   titleRenderBackend =
       dynamic_cast<Fast::Oot3d::TitleRenderBackend *>(&api);
   gui =

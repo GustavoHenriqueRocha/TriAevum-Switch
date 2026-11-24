@@ -59,6 +59,11 @@ struct PicaTarget {
     // identity of the content a display copy read (GL: Id/Version).
     uint64_t Id = 0;
     uint64_t Version = 0;
+    // Order of the last colour write by a draw, clear or fill
+    // (PicaTargets::NextWriteSerial; 0 = only the creation clear): which of
+    // the target and a transfer at the same address wrote last
+    // (gfx_deko3d_pica_feedback.h).
+    uint64_t WriteSerial = 0;
 };
 
 struct PicaDisplayCopy {
@@ -84,6 +89,11 @@ struct PicaDisplay {
     uint32_t ContentWidth = 0;
     uint32_t ContentHeight = 0;
     PicaDisplayCopy LastCopy;
+    // The last transfer into it (feedback textures): its order, output format
+    // and whether the output has a texture's tiled layout.
+    uint64_t WriteSerial = 0;
+    uint8_t ColorFormat = 0;
+    bool TextureLayout = false;
 };
 
 struct PicaTargetStats {
@@ -163,6 +173,15 @@ class PicaTargets {
 
     PicaDisplay* GetDisplay(uint64_t targetNamespace, uint32_t outputAddress, uint32_t width, uint32_t height,
                             uint32_t allocWidth, uint32_t allocHeight);
+    // The display image a transfer wrote at this address; nullptr when none.
+    PicaDisplay* FindDisplay(uint64_t targetNamespace, uint32_t outputAddress);
+    // Feedback textures (gfx_deko3d_pica_feedback.h): the image a texture at
+    // this address reads, the GPU surface copied in texture orientation. Same
+    // lifetime as display images (retired when its extent changes).
+    PicaDisplay* GetFeedbackImage(uint64_t targetNamespace, uint32_t address, uint32_t width, uint32_t height,
+                                  uint32_t allocWidth, uint32_t allocHeight);
+    // Monotonic order of GPU colour writes (targets and transfers).
+    uint64_t NextWriteSerial() noexcept { return ++mWriteSerial; }
 
     [[nodiscard]] float Scale() const noexcept { return mScale; }
     [[nodiscard]] float WidescreenFactor() const noexcept { return mWidescreenFactor; }
@@ -175,6 +194,9 @@ class PicaTargets {
         uint64_t Frame = 0;
     };
     void DestroyTarget(PicaTarget& target) noexcept;
+    PicaDisplay* GetImage(std::map<std::pair<uint64_t, uint32_t>, PicaDisplay>& images, const char* what,
+                          uint64_t targetNamespace, uint32_t address, uint32_t width, uint32_t height,
+                          uint32_t allocWidth, uint32_t allocHeight);
 
     Device* mDevice = nullptr;
     PicaResources* mResources = nullptr;
@@ -185,6 +207,8 @@ class PicaTargets {
     uint64_t mFrame = 0;
     std::unordered_map<PicaTargetKey, PicaTarget, PicaTargetKeyHash> mTargets;
     std::map<std::pair<uint64_t, uint32_t>, PicaDisplay> mDisplays;
+    std::map<std::pair<uint64_t, uint32_t>, PicaDisplay> mFeedback;
+    uint64_t mWriteSerial = 0;
     std::vector<Retired> mRetired;
     std::optional<DepthStencilWordLayout> mDepthStencilLayout;
     PicaTargetStats mStats{};

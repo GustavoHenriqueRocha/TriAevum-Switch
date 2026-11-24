@@ -16,6 +16,7 @@
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_draw_coverage.h"
+#include "fast/backends/gfx_deko3d_pica_feedback.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "fast/backends/gfx_deko3d_clear_draw.h"
 #include "gfx_deko3d_api.h"
@@ -270,6 +271,7 @@ void GfxRenderingAPIDeko3d::ApplyPicaFill(const GfxNativePicaMemoryFillView& fil
         const auto color = DecodePicaClearColor(fill, key.ColorFormat);
         dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
         ++target.Version;
+        target.WriteSerial = mTargets.NextWriteSerial();
     }
     if (coverage.Depth) {
         const auto [depth, stencil] = DecodePicaClearDepthStencil(fill, key.DepthFormat);
@@ -483,6 +485,19 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         }
         return true;
     }
+    // Feedback textures (title profile): the GPU image replaces the black
+    // where the plan allows it (gfx_deko3d_pica_feedback.h). A texture with a
+    // raw copy (CopyReferences) keeps the copy, as in Prepare.
+    if (gpuWrittenSlots != 0U) {
+        for (const auto& texture : draw.Textures) {
+            if (texture.Slot < mDrawResources.Textures.size() && (gpuWrittenSlots & (1U << texture.Slot)) != 0U &&
+                texture.CopyReferences.empty() && ClassifyPicaTexture(texture) == PicaTextureUse::Color) {
+                if (const DkResHandle handle = ResolvePicaFeedbackTexture(draw.RenderTargetNamespace, texture)) {
+                    mDrawResources.Textures[texture.Slot] = handle;
+                }
+            }
+        }
+    }
     ++mCounters.PicaDrawsPrepared;
     mDevice.Checkpoint("prepare", mCalls.Draws, draw.VertexCount);
     if (RecordPicaDraw(draw, program, key, *target)) {
@@ -515,6 +530,9 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     mDevice.Checkpoint("draw.barrier");
     BindPicaTarget(target);
     ++target.Version;
+    if (colorMask != 0U) {
+        target.WriteSerial = mTargets.NextWriteSerial();
+    }
     mDevice.Checkpoint("draw.target");
 
     const DkShader* shaders[] = {program.Vertex, program.Fragment};
@@ -941,6 +959,9 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
     }
     display->ContentWidth = plan.ContentWidth;
     display->ContentHeight = plan.ContentHeight;
+    display->WriteSerial = mTargets.NextWriteSerial();
+    display->ColorFormat = PicaTransferOutputFormat(transfer.Flags);
+    display->TextureLayout = PicaTransferWritesTexture(transfer.Flags);
     if (transfer.Present && source->DynamicEligible) {
         auto& dynamic = PicaGlDynamicScale::gState;
         dynamic.PresentedFrames.fetch_add(1U, std::memory_order_relaxed);
@@ -1073,6 +1094,91 @@ bool GfxRenderingAPIDeko3d::SetPinnedPicaTextureCopies(std::span<const Renderer3
     return true;
 }
 
+DkResHandle GfxRenderingAPIDeko3d::ResolvePicaFeedbackTexture(uint64_t renderTargetNamespace,
+                                                              const Renderer3ds::PicaTextureView& texture) {
+    PicaFeedbackProducer fromTarget;
+    const auto [key, target] = mTargets.FindColor(renderTargetNamespace, texture.PhysicalAddress);
+    if (target != nullptr) {
+        fromTarget.Present = true;
+        fromTarget.ColorFormat = key->ColorFormat;
+        fromTarget.NativeWidth = key->Width;
+        fromTarget.NativeHeight = key->Height;
+        fromTarget.AllocWidth = target->Alloc.Width;
+        fromTarget.AllocHeight = target->Alloc.Height;
+        fromTarget.ContentWidth = target->Extent.Width;
+        fromTarget.ContentHeight = target->Extent.Height;
+        fromTarget.WriteSerial = target->WriteSerial;
+    }
+    PicaFeedbackProducer fromDisplay;
+    PicaDisplay* display = mTargets.FindDisplay(renderTargetNamespace, texture.PhysicalAddress);
+    if (display != nullptr) {
+        fromDisplay.Present = true;
+        fromDisplay.TextureLayout = display->TextureLayout;
+        fromDisplay.ColorFormat = display->ColorFormat;
+        fromDisplay.NativeWidth = display->Width;
+        fromDisplay.NativeHeight = display->Height;
+        fromDisplay.AllocWidth = display->AllocWidth;
+        fromDisplay.AllocHeight = display->AllocHeight;
+        fromDisplay.ContentWidth = display->ContentWidth;
+        fromDisplay.ContentHeight = display->ContentHeight;
+        fromDisplay.WriteSerial = display->WriteSerial;
+    }
+    const PicaFeedbackPlan plan =
+        PlanPicaFeedbackTexture(texture, fromTarget, fromDisplay, mGpuFeedbackTextures, mFlipY);
+    const bool fromTargetImage = plan.Source == PicaFeedbackSource::Target;
+    if (!fromTargetImage && plan.Source != PicaFeedbackSource::Display) {
+        if (mGpuFeedbackTextures && mCounters.PicaFeedbackCleared++ < 10U) {
+            Deko3d::Log("feedback: texture %08x %ux%u format %u stays transparent black (%s)",
+                        texture.PhysicalAddress, texture.Width, texture.Height, texture.NativeFormat,
+                        plan.Reason != nullptr ? plan.Reason : "no producer");
+        }
+        return 0;
+    }
+    PicaDisplay* image = mTargets.GetFeedbackImage(renderTargetNamespace, texture.PhysicalAddress, texture.Width,
+                                                   texture.Height, plan.ImageWidth, plan.ImageHeight);
+    if (image == nullptr) {
+        return 0;
+    }
+    // The serial names the producer version (unique over targets and transfers).
+    const PicaDisplayCopy copy{fromTargetImage ? 1U : 2U, plan.WriteSerial, plan.SourceWidth, plan.SourceHeight,
+                               plan.Linear};
+    if (!(image->LastCopy == copy)) {
+        DkCmdBuf cmd = mDevice.Cmd();
+        if (!plan.CoversImage) {
+            // Rows past the producer (a taller texture): transparent black,
+            // as the whole texture read before.
+            const DkImageView* colors[] = {&image->View};
+            dkCmdBufBindRenderTargets(cmd, colors, 1, nullptr);
+            mBoundTarget = nullptr;
+            const DkScissor scissor = {0, 0, plan.ImageWidth, plan.ImageHeight};
+            dkCmdBufSetScissors(cmd, 0, &scissor, 1);
+            dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, 0.0F, 0.0F, 0.0F, 0.0F);
+        }
+        // The producer's fragments land before the 2D engine reads them; the
+        // copy lands before the draw samples it (as a display transfer).
+        dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+        const DkImageRect sourceRect = {0, 0, 0, plan.SourceWidth, plan.SourceHeight, 1};
+        const DkImageRect destRect = {0, 0, 0, plan.DestWidth, plan.DestHeight, 1};
+        const uint32_t flags = (plan.Linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest) |
+                               (plan.FlipY ? static_cast<uint32_t>(DkBlitFlag_FlipY) : 0U);
+        dkCmdBufBlitImage(cmd, fromTargetImage ? &target->ColorView : &display->View, &sourceRect, &image->View,
+                          &destRect, flags, 0);
+        dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+        image->LastCopy = copy;
+        image->ContentWidth = plan.DestWidth;
+        image->ContentHeight = plan.DestHeight;
+        ++mCounters.PicaFeedbackCopies;
+        mDevice.Checkpoint("feedback", texture.PhysicalAddress, plan.WriteSerial);
+    }
+    if (mCounters.PicaFeedbackBound++ == 0U) {
+        Deko3d::Log("feedback: first texture %08x %ux%u reads the GPU %s (%ux%u -> %ux%u of %ux%u, flip %d)",
+                    texture.PhysicalAddress, texture.Width, texture.Height, fromTargetImage ? "target" : "transfer",
+                    plan.SourceWidth, plan.SourceHeight, plan.DestWidth, plan.DestHeight, plan.ImageWidth,
+                    plan.ImageHeight, plan.FlipY ? 1 : 0);
+    }
+    return dkMakeTextureHandle(image->ImageSlot, mResources.SamplerSlot(MakePicaSamplerKey(texture, 1U)));
+}
+
 void GfxRenderingAPIDeko3d::DrawPicaScanout(const GfxNativePicaDisplayTransferView& transfer,
                                             const PicaDisplay& display, const PicaTransferPlan& plan,
                                             float allocScale) {
@@ -1171,6 +1277,7 @@ bool GfxRenderingAPIDeko3d::ClearPicaRenderTarget(uint64_t renderTargetNamespace
         dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, 0.0F, 0.0F, 0.0F, 0.0F);
         dkCmdBufClearDepthStencil(cmd, true, 1.0F, 0xFF, 0);
         ++target.Version;
+        target.WriteSerial = mTargets.NextWriteSerial();
         ++mCounters.PicaClears;
         mDevice.Checkpoint("clear", key.ColorAddress, key.DepthAddress);
     });

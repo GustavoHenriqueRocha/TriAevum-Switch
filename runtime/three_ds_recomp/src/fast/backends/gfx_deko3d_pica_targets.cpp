@@ -115,15 +115,17 @@ void PicaTargets::Reset() noexcept {
         DestroyTarget(target);
     }
     mTargets.clear();
-    for (auto& [key, display] : mDisplays) {
-        if (display.Memory != nullptr) {
-            dkMemBlockDestroy(display.Memory);
+    for (auto* images : {&mDisplays, &mFeedback}) {
+        for (auto& [key, display] : *images) {
+            if (display.Memory != nullptr) {
+                dkMemBlockDestroy(display.Memory);
+            }
+            if (mResources != nullptr) {
+                mResources->FreeImageSlot(display.ImageSlot);
+            }
         }
-        if (mResources != nullptr) {
-            mResources->FreeImageSlot(display.ImageSlot);
-        }
+        images->clear();
     }
-    mDisplays.clear();
     for (const Retired& retired : mRetired) {
         dkMemBlockDestroy(retired.Memory);
         if (mResources != nullptr) {
@@ -278,7 +280,24 @@ bool PicaTargets::ApplyDynamicScale(const PicaTargetKey& key, PicaTarget& target
 
 PicaDisplay* PicaTargets::GetDisplay(uint64_t targetNamespace, uint32_t outputAddress, uint32_t width,
                                      uint32_t height, uint32_t allocWidth, uint32_t allocHeight) {
-    auto [found, inserted] = mDisplays.try_emplace({targetNamespace, outputAddress});
+    return GetImage(mDisplays, "display image", targetNamespace, outputAddress, width, height, allocWidth,
+                    allocHeight);
+}
+
+PicaDisplay* PicaTargets::FindDisplay(uint64_t targetNamespace, uint32_t outputAddress) {
+    const auto found = mDisplays.find({targetNamespace, outputAddress});
+    return found != mDisplays.end() && found->second.Memory != nullptr ? &found->second : nullptr;
+}
+
+PicaDisplay* PicaTargets::GetFeedbackImage(uint64_t targetNamespace, uint32_t address, uint32_t width,
+                                           uint32_t height, uint32_t allocWidth, uint32_t allocHeight) {
+    return GetImage(mFeedback, "feedback image", targetNamespace, address, width, height, allocWidth, allocHeight);
+}
+
+PicaDisplay* PicaTargets::GetImage(std::map<std::pair<uint64_t, uint32_t>, PicaDisplay>& images, const char* what,
+                                   uint64_t targetNamespace, uint32_t outputAddress, uint32_t width, uint32_t height,
+                                   uint32_t allocWidth, uint32_t allocHeight) {
+    auto [found, inserted] = images.try_emplace({targetNamespace, outputAddress});
     PicaDisplay& display = found->second;
     if (!inserted && display.Memory != nullptr && display.Width == width && display.Height == height &&
         display.AllocWidth == allocWidth && display.AllocHeight == allocHeight) {
@@ -294,13 +313,13 @@ PicaDisplay* PicaTargets::GetDisplay(uint64_t targetNamespace, uint32_t outputAd
     const uint32_t slot = mResources->AllocateImageSlot();
     if (slot >= PicaResources::kMaxImages || !Place({&image}, bytes) ||
         (display.Memory = mDevice->MakeBlock(static_cast<uint32_t>(bytes),
-                                             DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, "display image")) ==
+                                             DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image, what)) ==
             nullptr) {
         if (slot < PicaResources::kMaxImages) {
             mResources->FreeImageSlot(slot);
         }
         ++mStats.Failures;
-        mDisplays.erase(found);
+        images.erase(found);
         return nullptr;
     }
     dkImageInitialize(&display.Image, &image.Layout, display.Memory, image.Offset);
@@ -312,7 +331,7 @@ PicaDisplay* PicaTargets::GetDisplay(uint64_t targetNamespace, uint32_t outputAd
     display.AllocWidth = allocWidth;
     display.AllocHeight = allocHeight;
     ++mStats.DisplaysCreated;
-    Log("targets: display image %ux%u (native %ux%u, ns %llu, output %08x)", allocWidth, allocHeight, width, height,
+    Log("targets: %s %ux%u (native %ux%u, ns %llu, address %08x)", what, allocWidth, allocHeight, width, height,
         static_cast<unsigned long long>(targetNamespace), outputAddress);
     return &display;
 }

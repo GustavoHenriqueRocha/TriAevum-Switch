@@ -28,6 +28,46 @@ class Guard:
 
 
 GUARDS = [
+    # --- 24/11: Tael escura na abertura do MM3D (deko3d) ---
+    # A abertura reduz a cena com DisplayTransfer tiled->tiled 2x2 (02000020) para memória de textura
+    # e faz um bloom em ping-pong entre alvos pequenos (upstream 1757f77c). Desde 93627fa4 essas
+    # texturas liam preto transparente: sem brilho nem rastro. Com o perfil ligado, a textura lê a
+    # imagem da GPU (alvo ou saída da transferência, a que escreveu por último). O OoT3D não muda.
+    Guard("deko3d: OoT3D mantém o preto transparente nas texturas escritas pela GPU (perfil desligado)",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool GpuFeedbackTextures = false;.*?GenericTitleProfile.*?profile\.GpuFeedbackTextures = true;',
+          test="oot3d_deko3d_backend_tests (TestFeedbackTextures)"),
+    Guard("deko3d: a janela passa o perfil de título ao backend (texturas escritas pela GPU)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'api\.SetNativePicaGpuFeedbackTextures\(titleProfile\.GpuFeedbackTextures\);'),
+    Guard("deko3d: o backend nasce com as texturas escritas pela GPU desligadas",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'bool mGpuFeedbackTextures = false;'),
+    Guard("deko3d: textura escrita pela GPU decidida pelo plano puro com o perfil e a orientação do viewport",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'mResources\.Prepare\(draw, mDrawResources, &why, gpuWrittenSlots\).*?'
+          r'ResolvePicaFeedbackTexture\(draw\.RenderTargetNamespace, texture\).*?'
+          r'PlanPicaFeedbackTexture\(texture, fromTarget, fromDisplay, mGpuFeedbackTextures, mFlipY\).*?'
+          r'\(plan\.FlipY \? static_cast<uint32_t>\(DkBlitFlag_FlipY\) : 0U\)',
+          test="oot3d_deko3d_backend_tests (TestFeedbackTextures)"),
+    # Linha do John: a cópia crua de textura (e1198bac, CopyReferences) lê a imagem da GPU e grava
+    # a memória do guest; nem o preto nem a textura de feedback passam por cima dela.
+    Guard("deko3d (linha do John): a textura de feedback não substitui a cópia crua (CopyReferences)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'\(gpuWrittenSlots & \(1U << texture\.Slot\)\) != 0U &&\s+'
+          r'texture\.CopyReferences\.empty\(\) && ClassifyPicaTexture\(texture\) == PicaTextureUse::Color\) \{\s+'
+          r'if \(const DkResHandle handle = ResolvePicaFeedbackTexture\(draw\.RenderTargetNamespace, texture\)\)',
+          test="oot3d_deko3d_backend_tests (TestRawTextureCopy)"),
+    Guard("deko3d: só draw com máscara de cor (e clear/fill) conta como escrita da GPU no alvo",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'\+\+target\.Version;\s+if \(colorMask != 0U\) \{\s+target\.WriteSerial = mTargets\.NextWriteSerial\(\);\s+\}'
+          r'.*?display->WriteSerial = mTargets\.NextWriteSerial\(\);\s+'
+          r'display->ColorFormat = PicaTransferOutputFormat\(transfer\.Flags\);\s+'
+          r'display->TextureLayout = PicaTransferWritesTexture\(transfer\.Flags\);'),
+    Guard("deko3d: só transferência tiled->tiled sem inversão vira textura (critério do upstream)",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_feedback.h",
+          r'return \(flags & \(1U \| 2U \| 8U \| 0x10000U\)\) == 0U && \(flags & 0x20U\) != 0U && \(\(flags >> 24U\) & 3U\) <= 2U;',
+          test="oot3d_deko3d_backend_tests (TestFeedbackTextures)"),
     # --- 24/11: Floresta Perdida do MM3D azul chapada sem as árvores (deko3d) ---
     # A limpeza da profundidade (preenchimento de 18537fc0) vale para o primeiro alvo que a cobre
     # e sai da fila. A cena (cor 18237fc0) e os alvos do borrão (183c...) dividem esse endereço de

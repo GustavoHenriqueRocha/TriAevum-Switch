@@ -82,6 +82,9 @@ struct Deko3dBackendCounters {
     uint64_t PicaScanouts = 0;
     uint64_t PicaFills = 0;
     uint64_t PicaClears = 0;
+    uint64_t PicaFeedbackBound = 0;   // textures that read a GPU image (gfx_deko3d_pica_feedback.h)
+    uint64_t PicaFeedbackCopies = 0;  // copies of a new producer version into its feedback image
+    uint64_t PicaFeedbackCleared = 0; // GPU-written addresses still read as transparent black
     uint64_t UiDraws = 0;           // TopScreen UI triangles lists drawn
     uint64_t UiDrawsSkipped = 0;    // not on the window, unknown layout, no texture
     uint64_t UiTexturesCreated = 0;
@@ -140,6 +143,7 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
                                      bool can_extract_depth) override;
     GfxNativePicaBackendStats GetNativePicaBackendStats() const noexcept override;
     void SetNativePicaGeometryCacheEnabled(bool enabled) noexcept override;
+    void SetNativePicaGpuFeedbackTextures(bool enabled) noexcept override;
 
     bool SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string* error = nullptr) override;
     bool SubmitPicaDisplayTransfer(const GfxNativePicaDisplayTransferView& transfer,
@@ -255,6 +259,11 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // Opens the device frame (if needed) and starts the resources' frame
     // once per device frame.
     void EnsureFrame();
+    // The GPU image a texture at a GPU-written address reads (target or tiled
+    // transfer output, copied in texture orientation), 0 for the fallback
+    // (gfx_deko3d_pica_feedback.h).
+    DkResHandle ResolvePicaFeedbackTexture(uint64_t renderTargetNamespace,
+                                           const Renderer3ds::PicaTextureView& texture);
     // Package 6 (gfx_deko3d_ui.cpp).
     struct UiTexture {
         DkMemBlock Memory = nullptr;
@@ -397,6 +406,7 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     std::array<float, 4> mWindowClearRgba{};
     FilteringMode mFilterMode = FILTER_THREE_POINT;
     bool mGeometryCacheEnabled = true;
+    bool mGpuFeedbackTextures = false; // title profile (off: the transparent black of 93627fa4)
     std::vector<uint64_t> mCompletions;
     Deko3dBackendCounters mCounters{};
     Deko3dPicaCalls mCalls{};

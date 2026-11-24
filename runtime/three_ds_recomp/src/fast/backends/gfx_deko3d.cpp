@@ -354,6 +354,11 @@ void GfxRenderingAPIDeko3d::SetNativePicaGeometryCacheEnabled(bool enabled) noex
     mGeometryCacheEnabled = enabled;
 }
 
+void GfxRenderingAPIDeko3d::SetNativePicaGpuFeedbackTextures(bool enabled) noexcept {
+    mGpuFeedbackTextures = enabled;
+    Deko3d::Log("pica: feedback textures %s (title profile)", enabled ? "on" : "off");
+}
+
 void GfxRenderingAPIDeko3d::PrepareNativePicaPrograms(std::span<const Renderer3ds::PicaVertexArtifact> vertices) {
     // Nothing to build ahead: every stage is a precompiled DKSH loaded at its
     // first draw (a copy into code memory, no compilation).
@@ -750,7 +755,8 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
     Deko3d::Log("pica (%s): draws issued=%llu skipped=%llu shadow_producers=%llu no_effect=%llu; transfers=%llu "
                 "repeated=%llu rejected=%llu texture_copies=%llu (reused %llu, failed %llu, sampled %llu, "
                 "%.1f ms each, max %.1f) "
-                "scanouts=%llu fills=%llu clears=%llu; targets=%llu (%llu MiB) displays=%llu failures=%llu",
+                "scanouts=%llu fills=%llu clears=%llu; feedback bound=%llu "
+                "copies=%llu black=%llu; targets=%llu (%llu MiB) displays=%llu failures=%llu",
                 when, static_cast<unsigned long long>(mCounters.PicaDrawsIssued),
                 static_cast<unsigned long long>(mCounters.PicaDrawsSkipped),
                 static_cast<unsigned long long>(mCounters.PicaShadowProducersSkipped),
@@ -769,6 +775,9 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(mCounters.PicaScanouts),
                 static_cast<unsigned long long>(mCounters.PicaFills),
                 static_cast<unsigned long long>(mCounters.PicaClears),
+                static_cast<unsigned long long>(mCounters.PicaFeedbackBound),
+                static_cast<unsigned long long>(mCounters.PicaFeedbackCopies),
+                static_cast<unsigned long long>(mCounters.PicaFeedbackCleared),
                 static_cast<unsigned long long>(targets.TargetsCreated),
                 static_cast<unsigned long long>(targets.TargetBytes >> 20),
                 static_cast<unsigned long long>(targets.DisplaysCreated),

@@ -239,6 +239,10 @@ class GfxRenderingAPI : public ::Fast::Renderer3ds::PicaRenderBackend {
     }
     virtual void SetNativePicaGeometryCacheEnabled(bool) noexcept {
     }
+    // Title profile (GpuFeedbackTextures): a texture at an address the GPU
+    // wrote (colour target, tiled transfer output) reads the GPU image.
+    virtual void SetNativePicaGpuFeedbackTextures(bool) noexcept {
+    }
     bool SubmitPicaDraw(const GfxNativePicaDrawView&,
                         std::string* error = nullptr) override {
         if (error != nullptr) {
