@@ -101,6 +101,9 @@ class PicaTargets {
     // The target a transfer or clear names: the smallest key (GL's std::map
     // order) of the namespace with that colour address.
     std::pair<const PicaTargetKey*, PicaTarget*> FindColor(uint64_t targetNamespace, uint32_t colorAddress);
+    // The GPU writes this address: a target's colour buffer or a transfer output
+    // (the guest bytes there never see those writes).
+    bool GpuWritten(uint64_t targetNamespace, uint32_t address) const;
     template <typename F> void ForEach(F&& visit) {
         for (auto& [key, target] : mTargets) {
             visit(key, target);

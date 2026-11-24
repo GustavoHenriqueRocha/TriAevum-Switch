@@ -221,6 +221,18 @@ PicaTarget* PicaTargets::Get(const PicaTargetKey& key, bool* created) {
     return &stored;
 }
 
+bool PicaTargets::GpuWritten(uint64_t targetNamespace, uint32_t address) const {
+    if (mDisplays.contains({targetNamespace, address})) {
+        return true;
+    }
+    for (const auto& [key, target] : mTargets) {
+        if (key.Namespace == targetNamespace && key.ColorAddress == address) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::pair<const PicaTargetKey*, PicaTarget*> PicaTargets::FindColor(uint64_t targetNamespace, uint32_t colorAddress) {
     const PicaTargetKey* bestKey = nullptr;
     PicaTarget* best = nullptr;

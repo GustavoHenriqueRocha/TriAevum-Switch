@@ -132,6 +132,7 @@ bool PicaResources::Init(Device& device) {
     };
     place(mFallbackColor, DkImageFormat_RGBA8_Unorm);
     place(mFallbackInteger, DkImageFormat_R32_Uint);
+    place(mFallbackClear, DkImageFormat_RGBA8_Unorm);
     // The constant attribute every absent vertex attribute reads (GL: a
     // disabled array reads (0, 0, 0, 1)). CPU-visible: the image block above
     // has no CPU address.
@@ -145,6 +146,7 @@ bool PicaResources::Init(Device& device) {
     mConstantGpu = dkMemBlockGetGpuAddr(mConstant);
     WriteImageDescriptor(kFallbackColorImage, mFallbackColor);
     WriteImageDescriptor(kFallbackIntegerImage, mFallbackInteger);
+    WriteImageDescriptor(kFallbackClearImage, mFallbackClear);
     if (SamplerSlot(NearestClampKey()) != kNearestSampler) {
         return false;
     }
@@ -404,8 +406,8 @@ void PicaResources::BeginFrame(uint64_t frame) {
     }
     mPackRebuilds.NewFrame();
     if (!mFallbacksUploaded) {
-        // Fallback contents: white, and an empty Shadow2D texel.
-        const StreamSpan staging = mDevice->Stream(2U * kStagingAlignment, kStagingAlignment);
+        // Fallback contents: white, an empty Shadow2D texel and transparent black.
+        const StreamSpan staging = mDevice->Stream(3U * kStagingAlignment, kStagingAlignment);
         if (staging.Cpu != nullptr) {
             const uint32_t white = 0xFFFFFFFFU;
             std::memcpy(staging.Cpu, &white, sizeof(white));
@@ -416,6 +418,11 @@ void PicaResources::BeginFrame(uint64_t frame) {
             Texture integer;
             integer.Image = mFallbackInteger;
             UploadLevel(integer, 0U, 1U, 1U, staging.Gpu + kStagingAlignment);
+            const uint32_t clear = 0U;
+            std::memcpy(static_cast<uint8_t*>(staging.Cpu) + 2U * kStagingAlignment, &clear, sizeof(clear));
+            Texture transparent;
+            transparent.Image = mFallbackClear;
+            UploadLevel(transparent, 0U, 1U, 1U, staging.Gpu + 2U * kStagingAlignment);
             mFallbacksUploaded = true;
             mInvalidate = true;
         }
@@ -1081,7 +1088,8 @@ DkResHandle PicaResources::LightingLutHandle(const Renderer3ds::PicaLightingLutV
     return dkMakeTextureHandle(inserted->second.ImageSlot, kNearestSampler);
 }
 
-bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources& out, std::string* error) {
+bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources& out, std::string* error,
+                            uint32_t gpuWrittenSlots) {
     const auto fail = [&](const char* why) {
         if (error != nullptr) {
             *error = why;
@@ -1112,6 +1120,10 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
                 if (!texture.CopyReferences.empty() && mCopies.Fill(texture, mCopyScratch, mCopyView)) {
                     ++mStats.CopiedTextures;
                     out.Textures[texture.Slot] = TextureHandle(mCopyView, menuDraw);
+                } else if (texture.CopyReferences.empty() && (gpuWrittenSlots & (1U << texture.Slot)) != 0U) {
+                    // A cópia crua do John (CopyReferences) vem antes: ela lê a imagem da GPU
+                    // e grava a memória do guest; o preto vale só para o resto.
+                    out.Textures[texture.Slot] = dkMakeTextureHandle(kFallbackClearImage, kNearestSampler);
                 } else {
                     out.Textures[texture.Slot] = TextureHandle(texture, menuDraw);
                 }

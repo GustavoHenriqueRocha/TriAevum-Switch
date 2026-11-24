@@ -459,8 +459,16 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         ++mCounters.PicaDrawsSkipped;
         return true;
     }
+    // Textures the GPU wrote (a blur chain sampling its own targets, MM3D's Lost
+    // Woods): transparent black, as the stale guest bytes would add a frozen image.
+    uint32_t gpuWrittenSlots = 0U;
+    for (const auto& texture : draw.Textures) {
+        if (texture.Slot < 32U && mTargets.GpuWritten(draw.RenderTargetNamespace, texture.PhysicalAddress)) {
+            gpuWrittenSlots |= 1U << texture.Slot;
+        }
+    }
     std::string why;
-    if (!mResources.Prepare(draw, mDrawResources, &why)) {
+    if (!mResources.Prepare(draw, mDrawResources, &why, gpuWrittenSlots)) {
         if (mCounters.PicaDrawsRejected++ < 10U) {
             Deko3d::Log("draw rejected: %s", why.c_str());
         }

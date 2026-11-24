@@ -28,6 +28,22 @@ class Guard:
 
 
 GUARDS = [
+    # --- 24/11: tela azul na Floresta Perdida do MM3D (deko3d) ---
+    # O brilho da cena (draw aditivo de tela cheia) amostra endereços que a própria GPU escreveu
+    # no quadro (saída de cópia 18381180, alvos 183c9280/183cb300). O deko3d decodificava essas
+    # texturas da memória do guest, que a GPU nunca atualiza: um borrão azul velho somado à cena.
+    # Textura num alvo ou numa saída de cópia conhecida lê preto transparente (o PC lê zeros).
+    Guard("deko3d: textura num endereço escrito pela GPU (alvo ou saída de cópia) lê preto transparente",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'case PicaTextureUse::Color:\s+if \(!texture\.CopyReferences\.empty\(\) && mCopies\.Fill\(.*?'
+          r'\} else if \(texture\.CopyReferences\.empty\(\) && \(gpuWrittenSlots & \(1U << texture\.Slot\)\) != 0U\) \{.*?'
+          r'out\.Textures\[texture\.Slot\] = dkMakeTextureHandle\(kFallbackClearImage, kNearestSampler\);',
+          "docs/pesquisas/2026-11-24-mm3d-tour-lab.md (censo do deko3d)"),
+    Guard("deko3d: o draw marca as texturas que a GPU escreveu (alvo ou saída de cópia do mesmo namespace)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(texture\.Slot < 32U && mTargets\.GpuWritten\(draw\.RenderTargetNamespace, texture\.PhysicalAddress\)\).*?'
+          r'mResources\.Prepare\(draw, mDrawResources, &why, gpuWrittenSlots\)',
+          "docs/pesquisas/2026-11-24-mm3d-tour-lab.md (censo do deko3d)"),
     # --- 11/11 (0.2.3-test.3): heavy lag at the final boss's light attack, raw texture copies ---
     Guard("the final boss lagged badly at its light attack in 0.2.3-test.2 (player report): each raw texture "
           "copy waited for the mailbox present thread, then read the whole source target back (colour and "

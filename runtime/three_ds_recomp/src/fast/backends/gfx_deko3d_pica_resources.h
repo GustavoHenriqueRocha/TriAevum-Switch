@@ -144,7 +144,10 @@ class PicaResources {
     // Fixed image slots.
     static constexpr uint32_t kFallbackColorImage = 0U; // white RGBA8 1x1
     static constexpr uint32_t kFallbackIntegerImage = 1U; // R32UI 1x1 0xFFFFFFFF
-    static constexpr uint32_t kReservedImages = 2U;
+    // Transparent black RGBA8 1x1: what a texture the GPU wrote this frame reads
+    // (a target or a transfer output; the guest bytes there are stale).
+    static constexpr uint32_t kFallbackClearImage = 2U;
+    static constexpr uint32_t kReservedImages = 3U;
     static constexpr uint32_t kNearestSampler = 0U;
 
     bool Init(Device& device);
@@ -156,7 +159,9 @@ class PicaResources {
 
     // Everything a draw reads, recorded into the frame (uploads included).
     // False with an error on a draw the GL backend rejects too.
-    bool Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources& out, std::string* error);
+    // gpuWrittenSlots: bit per texture slot whose address the GPU wrote.
+    bool Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources& out, std::string* error,
+                 uint32_t gpuWrittenSlots = 0U);
     // The per-pixel lighting block of the draw Prepare just made ready
     // (config/lighting perpixel), deduplicated like the PICA uniforms.
     bool PrepareSurfaceLighting(std::span<const uint8_t> bytes, PicaDrawResources& out);
@@ -298,6 +303,7 @@ class PicaResources {
     DkMemBlock mFixed = nullptr; // fallback images
     DkImage mFallbackColor{};
     DkImage mFallbackInteger{};
+    DkImage mFallbackClear{};
     DkMemBlock mConstant = nullptr; // (0, 0, 0, 1) floats, CPU-visible
     DkGpuAddr mConstantGpu = DK_GPU_ADDR_INVALID;
     DescriptorSlots<kMaxImages> mImageSlots{kReservedImages};
