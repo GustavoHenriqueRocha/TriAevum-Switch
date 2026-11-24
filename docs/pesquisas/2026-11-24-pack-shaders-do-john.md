@@ -46,7 +46,13 @@ coletado só pelo nosso tour. Dá para aproveitar o pacote dele sem jogar essas 
   Ganon, cutscene da morte do Ganon): 59 de 59 acks, `~/oot3d-work/bench/tour28-john`.
 - Sessão 68 do `perf.txt`: 289 janelas, média 59,2 fps, p10 57,2; 7 janelas abaixo de 54 fps, todas logo
   depois de um warp (posição pelo quadro do ack, aproximada): Cratera 45,0 e entrada do Templo do Fogo
-  49,0–51,8, com guest 15,5–16,7 ms (CPU, não shader); uma de 1,8 fps (guest 545 ms) no começo da cutscene
-  da morte do Ganon (carregamento).
+  49,0–51,8 (guest da janela 15,5–16,7 ms); uma de 1,8 fps (guest 545 ms) no começo da cutscene da morte do
+  Ganon (carregamento).
+- `hitches.txt` (tem a cena): as quedas são engasgos isolados de 100–245 ms com `cause=render`, guest 8–15 ms,
+  `tex_new=0 prog_new=0`, a cada ~5 s na Cratera (spot17), no Templo do Fogo (hidan) e no do Espírito
+  (jyasinzou); a DRS não mudou (`drs_changes=0`). Velocidade do jogo: um só quadro de lógica acima do passo de
+  33 ms (39,7 ms na entrada do Templo do Fogo); 12918 quadros em 222 s. Engasgo, não câmera lenta.
+- Não dá para dizer se o pacote do John causa os engasgos: o `hitches.txt` do tour27 é do formato sem cena.
+  A/B possível com `config/deko3d_pack` = `deko3d.antes-john.pack`; o Gustavo achou desnecessário (24/11).
 - Faltantes em `logs/deko3d_shaders/`: os mesmos 2 de antes do tour; nenhum novo nesses lugares.
 - O boot com o pacote de 35 MB foi normal (Gustavo, 24/11).
