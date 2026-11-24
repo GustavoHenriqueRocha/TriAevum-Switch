@@ -78,6 +78,11 @@ struct CtrTitleProfile {
     // linhas dentro de uma cópia de 416 com linhas de 256 pixels. O OoT3D
     // apresenta a cópia inteira (TopScreen 16:9); fica como sempre.
     bool LcdScreenCrop = false;
+    // Textura no endereço de um alvo de cor ou da saída de um DisplayTransfer
+    // tiled lê a imagem da GPU (deko3d, gfx_deko3d_pica_feedback.h): brilho,
+    // rastro e bloom em ping-pong do MM3D (Tael na abertura). No OoT3D fica
+    // o preto transparente de 93627fa4, como sempre.
+    bool GpuFeedbackTextures = false;
     // Mira por giroscópio no Switch: o sensor de seis eixos do console
     // (oot3d_switch_motion.h) vira o movimento de controle que o SDL do
     // devkitPro não informa. Só testado no OoT3D; em outro título o sensor
@@ -126,6 +131,7 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.BottomScreenPictureInPicture = true;
     profile.SubRectDisplayTransfers = true;
     profile.LcdScreenCrop = true;
+    profile.GpuFeedbackTextures = true;
     profile.SwitchConsoleMotion = false;
     return profile;
 }

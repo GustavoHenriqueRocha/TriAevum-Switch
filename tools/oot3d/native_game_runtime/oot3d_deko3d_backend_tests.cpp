@@ -10,6 +10,8 @@
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "fast/backends/gfx_deko3d_ui_plan.h"
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
+#include "fast/backends/gfx_deko3d_pica_feedback.h"
+#include "ctr_title_profile.h"
 
 #include <array>
 #include <cmath>
@@ -1039,6 +1041,125 @@ void TestRawTextureCopy() {
   Require(store.Count() == 0U, "an empty pin set releases every version");
 }
 
+// ---- superfícies que a GPU escreveu amostradas como textura (Tael/MM3D) ----
+// Upstream 1757f77c: a abertura do MM3D reduz a cena (DisplayTransfer 2x2,
+// flags 02000020) para memória de textura e faz um bloom em ping-pong entre
+// alvos pequenos. Números do censo deko3d (~/oot3d-work/bench/mm3d-fix2):
+// 18237fc0 512x400 -> 18381180 256x200, lida como 256x256 RGBA8; 183c1200
+// 64x128 -> 183c9280 32x64; alvos 183c9280/183d3c00 32x64 lendo um ao outro.
+void TestFeedbackTextures() {
+  using namespace Fast::Deko3d;
+  Require(PicaTransferWritesTexture(0x02000020U), "02000020 (tiled->tiled 2x2) escreve textura");
+  Require(PicaTransferWritesTexture(0x00000020U), "tiled->tiled 1:1 escreve textura");
+  Require(!PicaTransferWritesTexture(0x01001004U), "apresentação (saída linear) não é textura");
+  Require(!PicaTransferWritesTexture(0x00001004U), "tiled->linear não é textura");
+  Require(!PicaTransferWritesTexture(0x02000021U), "invertida não é textura");
+  Require(!PicaTransferWritesTexture(0x00000022U), "entrada linear não é textura");
+  Require(!PicaTransferWritesTexture(0x00000028U), "TextureCopy crua não é este caminho");
+  Require(!PicaTransferWritesTexture(0x00010020U), "block 32 não é textura");
+  Require(!PicaTransferWritesTexture(0x03000020U), "escala 3 é inválida");
+
+  Fast::Renderer3ds::PicaTextureView texture;
+  texture.Width = 32;
+  texture.Height = 64;
+  texture.NativeFormat = 0; // RGBA8
+  texture.PhysicalAddress = 0x183c9280U;
+  PicaFeedbackProducer target;
+  target.Present = true;
+  target.NativeWidth = 32;
+  target.NativeHeight = 64;
+  target.AllocWidth = target.ContentWidth = 64; // escala 2
+  target.AllocHeight = target.ContentHeight = 128;
+  target.WriteSerial = 10;
+  PicaFeedbackProducer display = target;
+  display.TextureLayout = PicaTransferWritesTexture(0x02000020U);
+  display.WriteSerial = 5;
+  const PicaFeedbackProducer none;
+
+  // Desligado (OoT3D): o de hoje, preto transparente onde a GPU escreveu.
+  auto plan = PlanPicaFeedbackTexture(texture, target, display, false, true);
+  Require(plan.Source == PicaFeedbackSource::Clear, "desligado: alvo amostrado lê preto como antes");
+  Require(PlanPicaFeedbackTexture(texture, none, none, true, true).Source == PicaFeedbackSource::Guest,
+          "sem produtor: memória do guest");
+  Require(PlanPicaFeedbackTexture(texture, none, none, false, true).Source == PicaFeedbackSource::Guest,
+          "sem produtor e desligado: memória do guest");
+
+  // Ping-pong: o desenho no alvo (série 10) é mais novo que a cópia (5).
+  plan = PlanPicaFeedbackTexture(texture, target, display, true, true);
+  Require(plan.Source == PicaFeedbackSource::Target && plan.WriteSerial == 10, "alvo mais novo que a cópia vence");
+  Require(plan.ImageWidth == 64 && plan.ImageHeight == 128 && plan.SourceWidth == 64 && plan.SourceHeight == 128 &&
+              plan.DestWidth == 64 && plan.DestHeight == 128 && plan.CoversImage && !plan.Linear,
+          "alvo 32x64 a 2x vira imagem 64x128 inteira, sem filtro");
+  Require(plan.FlipY, "linha 0 do alvo é o fundo do quadro; a da textura, o começo da memória");
+  Require(!PlanPicaFeedbackTexture(texture, target, display, true, false).FlipY,
+          "config/deko3d_flip_y 0: o alvo já fica na ordem da memória");
+  display.WriteSerial = 12;
+  plan = PlanPicaFeedbackTexture(texture, target, display, true, true);
+  Require(plan.Source == PicaFeedbackSource::Display && plan.WriteSerial == 12, "cópia mais nova que o desenho vence");
+  display.WriteSerial = 5;
+
+  // Saída da redução 2x2 lida por uma textura maior (256x256 sobre 256x200),
+  // com a cena em resolução dinâmica (conteúdo 1,5x numa alocação de 2x).
+  Fast::Renderer3ds::PicaTextureView big;
+  big.Width = 256;
+  big.Height = 256;
+  big.NativeFormat = 0;
+  PicaFeedbackProducer reduced;
+  reduced.Present = true;
+  reduced.TextureLayout = PicaTransferWritesTexture(0x02000020U);
+  reduced.NativeWidth = 256;
+  reduced.NativeHeight = 200;
+  reduced.AllocWidth = 512;
+  reduced.AllocHeight = 400;
+  reduced.ContentWidth = 384;
+  reduced.ContentHeight = 300;
+  reduced.WriteSerial = 3;
+  plan = PlanPicaFeedbackTexture(big, none, reduced, true, true);
+  Require(plan.Source == PicaFeedbackSource::Display, "redução 2x2 em memória de textura é produtor");
+  Require(plan.ImageWidth == 512 && plan.ImageHeight == 512 && plan.DestWidth == 512 && plan.DestHeight == 400 &&
+              plan.SourceWidth == 384 && plan.SourceHeight == 300 && plan.Linear && !plan.CoversImage,
+          "textura maior: a cópia cobre as primeiras 200 linhas da memória, com filtro (DRS)");
+
+  // Casos que continuam no preto de hoje.
+  const auto clear = [&](const Fast::Renderer3ds::PicaTextureView& view, const PicaFeedbackProducer& t,
+                         const PicaFeedbackProducer& d, const char* message) {
+    Require(PlanPicaFeedbackTexture(view, t, d, true, true).Source == PicaFeedbackSource::Clear, message);
+  };
+  PicaFeedbackProducer linear = reduced;
+  linear.TextureLayout = PicaTransferWritesTexture(0x01001004U);
+  clear(big, none, linear, "saída linear lida como textura: preto");
+  Fast::Renderer3ds::PicaTextureView ia8 = texture;
+  ia8.NativeFormat = 5; // asset IA8 carregado na memória do alvo do bloom (upstream)
+  clear(ia8, target, display, "outro formato no endereço do alvo: preto");
+  PicaFeedbackProducer rgb5a1 = target;
+  rgb5a1.ColorFormat = 2;
+  clear(texture, rgb5a1, none, "alvo fora de RGBA8: preto");
+  Fast::Renderer3ds::PicaTextureView mipped = texture;
+  mipped.MaxMipLevel = 2;
+  clear(mipped, target, none, "textura com mips: preto");
+  Fast::Renderer3ds::PicaTextureView cube = texture;
+  cube.NativeType = 1;
+  clear(cube, target, none, "textura que não é 2D: preto");
+  Fast::Renderer3ds::PicaTextureView narrow = texture;
+  narrow.Width = 16;
+  clear(narrow, target, none, "largura diferente (outra linha de tiles): preto");
+  Fast::Renderer3ds::PicaTextureView shorter = texture;
+  shorter.Height = 32;
+  clear(shorter, target, none, "textura menor que o alvo: preto");
+  PicaFeedbackProducer partial = target;
+  partial.NativeHeight = 60;
+  Fast::Renderer3ds::PicaTextureView tall = texture;
+  clear(tall, partial, none, "linha de tiles incompleta: preto");
+  PicaFeedbackProducer fresh = target;
+  fresh.WriteSerial = 0;
+  clear(texture, fresh, none, "alvo que nenhum desenho escreveu: preto");
+
+  // Perfil de título: o OoT3D não muda; genéricos ligam (o MM3D tem perfil próprio no repo dele).
+  Require(!Oot3dNativeGame::Oot3dTitleProfile().GpuFeedbackTextures, "OoT3D: textura do alvo continua preta");
+  Require(Oot3dNativeGame::GenericTitleProfile(std::nullopt).GpuFeedbackTextures, "genérico: liga");
+}
+// ---- fim: superfícies que a GPU escreveu ----
+
 int main() {
   TestRendererConfigSelection();
   TestRawTextureCopy();
@@ -1064,6 +1185,7 @@ int main() {
   TestSavestateRestoreValidation();
   TestFrameBreakdown();
   TestDepthBreakdown();
+  TestFeedbackTextures();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }
