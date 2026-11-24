@@ -16,6 +16,7 @@
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_draw_coverage.h"
+#include "fast/renderer3ds/pica_surface_debug.h"
 #include "fast/backends/gfx_deko3d_pica_feedback.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "fast/backends/gfx_deko3d_clear_draw.h"
@@ -28,6 +29,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -165,7 +167,47 @@ Oot3d::GlWidescreenDrawPlacement ResolveWidescreenPlacement(const GfxNativePicaD
     placement.SplitCorners = false;
     return placement;
 }
+// config/deko3d_census ("<intervalo> <máximo>", padrão 300 40): um quadro a cada
+// <intervalo>, até <máximo> quadros, cada draw, cópia e preenchimento numa linha
+// JSON em logs/deko3d_census.jsonl (o mesmo PicaSurfaceDebug do censo do Vulkan).
+struct Census {
+    bool Read = false;
+    uint64_t Interval = 0;
+    uint64_t Left = 0;
+};
+Census gCensus;
+
+void CensusLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
+void CensusLine(const char* format, ...) {
+    char line[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    Renderer3ds::PicaSurfaceDebug::Instance().Write(line);
+}
 } // namespace
+
+void Deko3d::CensusBeginFrame(uint64_t frame) {
+    if (!gCensus.Read) {
+        gCensus.Read = true;
+        if (const auto text = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_census")) {
+            unsigned long long interval = 300, frames = 40;
+            std::sscanf(text->c_str(), "%llu %llu", &interval, &frames);
+            gCensus.Interval = interval == 0 ? 1 : interval;
+            gCensus.Left = frames;
+            Log("census: one frame every %llu, %llu frames (config/deko3d_census)", interval, frames);
+        }
+    }
+    auto& debug = Renderer3ds::PicaSurfaceDebug::Instance();
+    if (gCensus.Left != 0U && frame % gCensus.Interval == 0U) {
+        --gCensus.Left;
+        debug.RequestTrace("sdmc:/switch/oot3dre/logs/deko3d_census.jsonl", 1U, true);
+    }
+    if (gCensus.Interval != 0U) {
+        debug.BeginFrame();
+    }
+}
 
 void GfxRenderingAPIDeko3d::InitPica() {
     float widescreen = 1.0F;
@@ -412,6 +454,35 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
     EnsureFrame();
     Deko3d::GrassObserveDraw(draw, mDevice.Frame()); // config/grass
     ObservePlayerShadowDraw(draw);                   // config/simple_shadow
+    if (gCensus.Interval != 0U && Renderer3ds::PicaSurfaceDebug::Instance().Census()) {
+        std::string textures;
+        for (const auto& texture : draw.Textures) {
+            char entry[112];
+            std::snprintf(entry, sizeof(entry), "%s[\"%08x\",%u,%u,%u,%u,\"%016llx\",%zu]", textures.empty() ? "" : ",",
+                          texture.PhysicalAddress, texture.Width, texture.Height, texture.NativeFormat,
+                          texture.NativeType,
+                          static_cast<unsigned long long>(texture.NativeContentHashAvailable ? texture.NativeContentHash
+                                                                                             : 0ULL),
+                          texture.CopyReferences.size());
+            textures += entry;
+        }
+        CensusLine("{\"k\":\"draw\",\"f\":%llu,\"id\":%llu,\"ns\":%llu,\"color\":\"%08x\",\"depth\":\"%08x\","
+                   "\"fb\":[%u,%u,%u,%u,%d],\"vtx\":%u,\"dt\":%d,\"dw\":%d,\"dc\":%u,\"cm\":%u,"
+                   "\"blend\":[%d,%u,%u,%u,%u],\"at\":[%d,%u,%u],\"st\":%d,\"sc\":[%u,%u,%u,%u,%u],"
+                   "\"range\":%.4f,\"mode\":%u,\"tex\":[%s]}",
+                   static_cast<unsigned long long>(Renderer3ds::PicaSurfaceDebug::Instance().Frame()),
+                   static_cast<unsigned long long>(draw.SubmissionId),
+                   static_cast<unsigned long long>(draw.RenderTargetNamespace), draw.FramebufferColorPhysicalAddress,
+                   draw.FramebufferDepthPhysicalAddress, draw.FramebufferWidth, draw.FramebufferHeight,
+                   draw.FramebufferColorFormat, draw.FramebufferDepthFormat, draw.FramebufferFlipped ? 1 : 0,
+                   draw.VertexCount, draw.DepthTestEnabled ? 1 : 0, draw.DepthWriteEnabled ? 1 : 0,
+                   static_cast<unsigned>(draw.DepthCompare), draw.ColorWriteMask, draw.Blend.Enabled ? 1 : 0,
+                   static_cast<unsigned>(draw.Blend.SourceRgb), static_cast<unsigned>(draw.Blend.DestRgb),
+                   static_cast<unsigned>(draw.Blend.SourceAlpha), static_cast<unsigned>(draw.Blend.DestAlpha),
+                   draw.AlphaTestEnabled ? 1 : 0, static_cast<unsigned>(draw.AlphaCompare), draw.AlphaReference,
+                   draw.Stencil.Enabled ? 1 : 0, draw.ScissorMode, draw.ScissorX1, draw.ScissorY1, draw.ScissorX2,
+                   draw.ScissorY2, draw.DepthRange, draw.FragmentOperationMode, textures.c_str());
+    }
 
     const PicaTargetKey key = MakePicaTargetKey(draw);
     bool created = false;
@@ -868,6 +939,15 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         return false;
     };
     const uint64_t transferCall = mCalls.Transfers++;
+    if (gCensus.Interval != 0U && Renderer3ds::PicaSurfaceDebug::Instance().Census()) {
+        CensusLine("{\"k\":\"xfer\",\"f\":%llu,\"ns\":%llu,\"in\":\"%08x\",\"iw\":%u,\"ih\":%u,\"out\":\"%08x\","
+                   "\"ow\":%u,\"oh\":%u,\"flags\":\"%08x\",\"present\":%d,\"raw\":%u,\"after\":%llu}",
+                   static_cast<unsigned long long>(Renderer3ds::PicaSurfaceDebug::Instance().Frame()),
+                   static_cast<unsigned long long>(transfer.RenderTargetNamespace), transfer.InputPhysicalAddress,
+                   transfer.InputWidth, transfer.InputHeight, transfer.OutputPhysicalAddress, transfer.OutputWidth,
+                   transfer.OutputHeight, transfer.Flags, transfer.Present ? 1 : 0, transfer.TextureCopyBytes,
+                   static_cast<unsigned long long>(transfer.AfterDrawSubmissionId));
+    }
     if (transfer.Present) {
         ++mCalls.Presents;
     }
@@ -1285,6 +1365,13 @@ bool GfxRenderingAPIDeko3d::ClearPicaRenderTarget(uint64_t renderTargetNamespace
 }
 
 bool GfxRenderingAPIDeko3d::SubmitPicaMemoryFill(const GfxNativePicaMemoryFillView& fill, std::string* error) {
+    if (gCensus.Interval != 0U && Renderer3ds::PicaSurfaceDebug::Instance().Census()) {
+        CensusLine("{\"k\":\"fill\",\"f\":%llu,\"ns\":%llu,\"start\":\"%08x\",\"end\":\"%08x\",\"value\":\"%08x\","
+                   "\"control\":\"%04x\"}",
+                   static_cast<unsigned long long>(Renderer3ds::PicaSurfaceDebug::Instance().Frame()),
+                   static_cast<unsigned long long>(fill.RenderTargetNamespace), fill.StartPhysicalAddress,
+                   fill.EndPhysicalAddress, fill.Value, fill.Control);
+    }
     if (mCalls.Fills++ == 0U) {
         Deko3d::Log("pica: first memory fill (ns %llu, %08x-%08x, control %04x)",
                     static_cast<unsigned long long>(fill.RenderTargetNamespace), fill.StartPhysicalAddress,

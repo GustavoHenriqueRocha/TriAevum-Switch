@@ -537,6 +537,8 @@ void GrassNoteSample(bool synthetic, uint64_t frame);
 // Placements requested and not made yet (config/grass = draw; render
 // thread): entry work for the pacing governor (Deko3dEntryWorkPending).
 [[nodiscard]] bool GrassWorkPending();
+// config/deko3d_census: once per frame, before its draws (gfx_deko3d_pica_draw.cpp).
+void CensusBeginFrame(uint64_t frame);
 } // namespace Deko3d
 
 } // namespace Fast

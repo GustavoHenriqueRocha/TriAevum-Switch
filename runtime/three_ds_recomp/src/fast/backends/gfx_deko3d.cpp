@@ -125,6 +125,7 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         if (mFrameBarrier) {
             mResources.RequestInvalidate(); // config/deko3d_barrier "frame" (A/B)
         }
+        Deko3d::CensusBeginFrame(mResourcesFrame); // config/deko3d_census
         mTargets.BeginFrame(mResourcesFrame);
         CollectUiRetired();
         ApplyLightingSettings();
