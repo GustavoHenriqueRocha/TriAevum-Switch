@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -79,5 +80,17 @@ bool MountNativeA32ProcessImage(NativeA32Process& process,
                                 const NativeA32ProcessImageManifest& manifest,
                                 std::span<const uint8_t> codeBin,
                                 std::string* error = nullptr);
+
+// (base, tamanho mapeado) do primeiro segmento executável: a faixa de texto do
+// título para o perfilador do guest (OoT3D 0x3CA000 bytes, MM3D 0x51D000).
+inline std::optional<std::pair<uint32_t, uint32_t>>
+NativeA32GuestTextRange(const NativeA32ProcessImageManifest& manifest) {
+    for (const auto& segment : manifest.Segments) {
+        if (segment.Executable && segment.MappedSize != 0U) {
+            return std::pair{segment.Address, static_cast<uint32_t>(segment.MappedSize)};
+        }
+    }
+    return std::nullopt;
+}
 
 } // namespace Oot3dNativeGame

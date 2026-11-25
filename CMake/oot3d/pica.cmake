@@ -17,6 +17,10 @@ target_link_libraries(oot3d_native_a32_process_image PUBLIC
     nlohmann_json::nlohmann_json
 )
 oot3d_target_defaults(oot3d_native_a32_process_image FOLDER Tools)
+add_executable(oot3d_native_a32_process_image_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_a32_process_image_tests.cpp)
+target_link_libraries(oot3d_native_a32_process_image_tests PRIVATE oot3d_native_a32_process_image)
+oot3d_target_defaults(oot3d_native_a32_process_image_tests FOLDER Tests)
 
 find_package(spdlog REQUIRED)
 

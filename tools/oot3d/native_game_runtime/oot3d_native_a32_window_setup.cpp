@@ -502,8 +502,11 @@ void NativeA32WindowSession::Setup() {
       guestProfileOn = false;
     }
     if (guestProfileOn) {
-      // OoT3D text segment (ExHeader): 0x00100000..0x004CA000.
-      guestProfiler.Start(guestProfileOptions, 0x00100000U, 0x003CA000U);
+      // Segmento de texto do título, do manifesto (ExHeader): OoT3D
+      // 0x00100000..0x004CA000, MM3D 0x00100000..0x0061D000.
+      const auto text = Oot3dNativeGame::NativeA32GuestTextRange(*manifest);
+      guestProfiler.Start(guestProfileOptions, text ? text->first : 0x00100000U,
+                          text ? text->second : 0x003CA000U);
       guestProfiler.SetAppendix([](std::ostream &out) {
         out << Oot3dNativeGame::DescribeOot3dGuestOverrides();
       });

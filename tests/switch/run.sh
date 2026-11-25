@@ -44,6 +44,7 @@ UNIT_TESTS=(
     oot3d_simple_shadow_tests
     oot3d_player_shadow_tests
     oot3d_native_a32_ctr_fs_tests
+    oot3d_native_a32_process_image_tests
     oot3d_native_a32_ctr_host_tests
     oot3d_native_a32_romfs_overlay_tests
     oot3d_native_a32_second_core_tests
