@@ -5,6 +5,7 @@
 #include "oot3d_native_a32_ctr_save_safety.h"
 #include "oot3d_native_a32_ctr_system_archives.h"
 
+#include <chrono>
 #include <algorithm>
 #include <cstdio>
 
@@ -740,7 +741,24 @@ NativeA32HostResult NativeA32CtrHostServices::HandleControlMemory(
 NativeA32HostResult NativeA32CtrHostServices::HandleSvc(
     uint32_t immediate, oot3d::recomp::a32::GuestState& state,
     NativeA32Memory& memory, NativeA32HostContext& context) {
+    const uint64_t eventsBefore = mSvcEvents.TotalEventCount();
+    const auto start = mConfig.ProfileSvcTime ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
     auto result = HandleSvcImpl(immediate, state, memory, context);
+    if (mConfig.ProfileSvcTime) [[unlikely]] {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        char key[96];
+        const auto* event = mSvcEvents.TotalEventCount() != eventsBefore ? mSvcEvents.LastEvent() : nullptr;
+        if (event == nullptr)
+            std::snprintf(key, sizeof(key), "0x%02X", immediate);
+        else if (immediate == 0x32U)
+            std::snprintf(key, sizeof(key), "0x32 %.64s cmd=0x%04X", event->Name.c_str(), event->Detail >> 16);
+        else
+            std::snprintf(key, sizeof(key), "0x%02X %.40s", immediate,
+                          event->Name.substr(0, event->Name.find(':')).c_str());
+        mSvcTimes.Add(key, static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));
+    }
     if (result.Action == NativeA32HostAction::Wait) {
         const auto* event = mSvcEvents.LastEvent();
         if (mConfig.StubUnknownServices && immediate == 0x32U && event &&

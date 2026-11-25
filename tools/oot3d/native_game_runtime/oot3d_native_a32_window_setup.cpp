@@ -363,6 +363,17 @@ void NativeA32WindowSession::Setup() {
   }
   hostConfig.DetailedSvcDiagnostics = launch.ExtendedDiagnostics;
   hostConfig.ProfileRuntime = launch.ProfileA32Runtime;
+  // Tempo de host por SVC (oot3d_native_a32_svc_time_profile.h): config/svc_profile
+  // no Switch, TRIAEVUM_SVC_PROFILE no PC; relatório em logs/svc_profile.txt.
+#if defined(__SWITCH__)
+  {
+    std::error_code svcProfileError;
+    hostConfig.ProfileSvcTime = std::filesystem::exists(
+        "sdmc:/switch/oot3dre/config/svc_profile", svcProfileError);
+  }
+#else
+  hostConfig.ProfileSvcTime = std::getenv("TRIAEVUM_SVC_PROFILE") != nullptr;
+#endif
   // TRIAEVUM_GUEST_STATE_DUMP=<N>: despejo do estado das threads do guest a
   // cada N VBlanks no stderr (oot3d_native_a32_guest_state_dump.h).
   if (const auto interval = Oot3dNativeGame::ParseGuestStateDumpInterval(

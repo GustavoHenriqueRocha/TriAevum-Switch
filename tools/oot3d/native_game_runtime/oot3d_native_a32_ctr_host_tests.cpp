@@ -2506,7 +2506,45 @@ void TestFastSvcEquivalence() {
               << slow.host.SvcEventCount() << " SVCs)\n";
 }
 
+// Tempo de host por SVC (config/svc_profile): o perfil do guest do MM3D (25/11)
+// mostrou o SendSyncRequest a 17,8 us por chamada; a chave separa SVC e, no IPC,
+// sessão e comando. Desligado por padrão: nada é medido.
+void TestSvcTimeProfile() {
+    const auto run = [](bool profile) {
+        NativeA32Memory memory;
+        std::string error;
+        Require(memory.MapRegion({"tls", 0x1FF82000, 0x1000, true, false, {}}, &error), error);
+        NativeA32CtrHostConfig config = MakeConfig();
+        config.ProfileSvcTime = profile;
+        auto host = std::make_unique<NativeA32CtrHostServices>(std::move(config));
+        const oot3d::recomp::a32::Registry registry{};
+        NativeA32Process process(registry, *host);
+        NativeA32HostContext context{process, 0};
+        GuestState state{};
+        state.thread_pointer = 0x1FF82000;
+        for (int i = 0; i < 2; ++i)
+            Require(host->HandleSvc(0x28, state, memory, context).Action == NativeA32HostAction::Resume,
+                    "GetSystemTick did not resume");
+        return host->SvcTimes().Stats();
+    };
+    Require(run(false).empty(), "svc profile measured while disabled");
+    const auto stats = run(true);
+    const auto tick = stats.find("0x28 GetSystemTick");
+    Require(stats.size() == 1U && tick != stats.end() && tick->second.Count == 2U,
+            "svc profile did not count GetSystemTick twice under its key");
+
+    Oot3dNativeGame::SvcTimeProfile profile;
+    profile.Add("barato", 1000U);
+    profile.Add("caro", 5000U);
+    profile.Add("caro", 3000U);
+    const std::string text = profile.Format(4U);
+    Require(text.find("caro") < text.find("barato"), "svc profile is not sorted by total time");
+    Require(text.find("0.0 | 4.00 | 2 | 0.5 | 0.002 | caro\n") != std::string::npos,
+            "svc profile row for 'caro' is wrong:\n" + text);
+}
+
 void RunAllTests() {
+    TestSvcTimeProfile();
     TestCreateThreadProcessor();
     TestCfgAzaharDefaultBlocks();
     TestSelfNcchArchive();

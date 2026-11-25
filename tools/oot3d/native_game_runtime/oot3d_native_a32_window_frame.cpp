@@ -1613,6 +1613,12 @@ bool NativeA32WindowSession::RunFrame() {
 #if defined(__SWITCH__)
   gSwitchRuntimeHostFrames = runFrameCount;
   gSwitchRuntimeGuestFrames = frameCount;
+  // config/svc_profile: a tabela acumulada a cada 900 quadros do host.
+  if (runFrameCount % 900U == 0U && !hostServicesStorage->SvcTimes().Stats().empty()) {
+    const std::string svcProfile = hostServicesStorage->SvcTimes().Format(runFrameCount);
+    std::ofstream file("sdmc:/switch/oot3dre/logs/svc_profile.txt", std::ios::trunc);
+    file << svcProfile;
+  }
   // Physical-console profile: every 150 host frames, append the rate and the
   // per-frame milliseconds of each phase over that window to logs/perf.txt.
   {

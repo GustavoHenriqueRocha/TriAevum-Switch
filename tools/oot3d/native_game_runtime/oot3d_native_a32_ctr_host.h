@@ -1,6 +1,7 @@
 #pragma once
 
 #include "oot3d_native_a32_ctr_pica_bridge.h"
+#include "oot3d_native_a32_svc_time_profile.h"
 #include "oot3d_native_a32_input.h"
 #include "oot3d_native_a32_process.h"
 #include "oot3d_native_a32_romfs_overlay.h"
@@ -275,6 +276,8 @@ struct NativeA32CtrHostConfig {
     // Contagem de IPC por nome sem o resto do perfil de runtime (despejo
     // TRIAEVUM_GUEST_STATE_DUMP, oot3d_native_a32_guest_state_dump.h).
     bool CollectIpcNameCounts = false;
+    // Tempo de host por SVC (oot3d_native_a32_svc_time_profile.h).
+    bool ProfileSvcTime = false;
     std::array<int16_t, 9> GyroscopeCalibration{
         0, 6700, -6700, 0, 6700, -6700, 0, 6700, -6700,
     };
@@ -334,6 +337,7 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     // Endereço onde o guest mapeou a memória compartilhada do GSP (fila de
     // comandos GX em +0x800, interrupções em +0x000); vazio antes do mapa.
     std::optional<uint32_t> GspSharedMemoryAddress() const noexcept;
+    const Oot3dNativeGame::SvcTimeProfile& SvcTimes() const noexcept { return mSvcTimes; }
     bool CollectsIpcNameCounts() const noexcept {
         return mConfig.ProfileRuntime || mConfig.CollectIpcNameCounts;
     }
@@ -636,6 +640,7 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
                                  uint64_t sampleTick);
 
     detail::NativeA32CtrSvcEventHistory mSvcEvents;
+    Oot3dNativeGame::SvcTimeProfile mSvcTimes;
     NativeA32CtrHostConfig mConfig;
     NativeA32CtrRuntimeProfile mRuntimeProfile;
     std::vector<HandleRecord> mHandles;
