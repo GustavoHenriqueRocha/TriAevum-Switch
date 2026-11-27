@@ -18,6 +18,10 @@ struct GameLanguage {
 std::vector<GameLanguage>
 DetectGameLanguages(const std::filesystem::path &romfs, uint64_t offset = 0,
                     uint64_t size = 0);
+// CFG system languages for a title whose RomFS is not scanned (not OoT3D):
+// English first (the default), then the others the 3DS offers, so
+// game_language.json can pick e.g. Spanish (MM3D's PT-BR text lives there).
+std::vector<GameLanguage> CtrSystemLanguages();
 nlohmann::json GameLanguageDocument(const std::vector<GameLanguage> &languages,
                                     const std::string &selected = "en");
 

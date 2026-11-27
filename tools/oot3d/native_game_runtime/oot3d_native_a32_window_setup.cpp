@@ -259,8 +259,9 @@ void NativeA32WindowSession::Setup() {
           ? Oot3dNativeGame::DetectGameLanguages(manifest->RomFsImagePath,
                 manifest->RomFsImageOffset, manifest->RomFsImageSize)
           // A detecção lê os menus/QM do OoT3D na RomFS; outro título
-          // recebe só o idioma do sistema (inglês).
-          : std::vector<Oot3dNativeGame::GameLanguage>{{"en", "English", 1U}});
+          // recebe os idiomas do CFG (inglês por padrão; o PT-BR do MM3D vai
+          // no espanhol, escolhido no game_language.json).
+          : Oot3dNativeGame::CtrSystemLanguages());
   hostConfig.SystemLanguage = languageSettings->SystemId();
   hostConfig.ResourceLimitValues = manifest->ResourceLimitValues;
   hostConfig.ResourceCurrentValues = manifest->ResourceCurrentValues;

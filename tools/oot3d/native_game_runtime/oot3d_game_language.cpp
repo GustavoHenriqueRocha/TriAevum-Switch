@@ -51,6 +51,14 @@ constexpr std::array<NativeLanguage, 9> kLanguages{{
 }};
 } // namespace
 
+std::vector<GameLanguage> CtrSystemLanguages() {
+  return {{"en", "English", 1U},  {"ja", "Japanese", 0U},
+          {"fr", "Francais", 2U}, {"de", "Deutsch", 3U},
+          {"it", "Italiano", 4U}, {"es", "Espanol", 5U},
+          {"nl", "Nederlands", 8U}, {"pt", "Portugues", 9U},
+          {"ru", "Russkiy", 10U}};
+}
+
 std::vector<GameLanguage> DetectGameLanguages(const std::filesystem::path &path,
                                               uint64_t offset, uint64_t size) {
   const auto fileSize = std::filesystem::file_size(path);

@@ -2999,6 +2999,17 @@ GUARDS = [
     Guard("ctr_title_boot_probe ligava núcleos manuais do OoT3D sem olhar o perfil",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
           r'dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U\);'),
+    # 23/11: título que não é o OoT3D (MM3D) só tinha o inglês; a tradução
+    # PT-BR do MM3D vai no espanhol (eus.gmsg), então o idioma do sistema tem
+    # de poder ser o espanhol (CFG 5) pelo game_language.json.
+    Guard("título que não é o OoT3D ficava preso no idioma inglês (o PT-BR do MM3D vai no espanhol)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r': Oot3dNativeGame::CtrSystemLanguages\(\)\);\s*hostConfig\.SystemLanguage = languageSettings->SystemId\(\);',
+          test="janela headless do MM3D com game_language.json selected=es"),
+    Guard("lista de idiomas CFG sem o espanhol (5) ou sem o inglês (1) como padrão",
+          "tools/oot3d/native_game_runtime/oot3d_game_language.cpp",
+          r'std::vector<GameLanguage> CtrSystemLanguages\(\) \{\s*return \{\{"en", "English", 1U\}.*?\{"es", "Espanol", 5U\}',
+          test="janela headless do MM3D com game_language.json selected=es"),
     # 23/11: o MM3D esperava para sempre o evento do giroscópio do hid:USER
     # (WaitSynchronization1 sem prazo): a janela avança o HID a cada quadro,
     # o boot probe não, e o boot parava em 0 quadros com 600 VBlanks.
