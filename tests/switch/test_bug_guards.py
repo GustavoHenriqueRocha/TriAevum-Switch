@@ -3010,6 +3010,16 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_game_language.cpp",
           r'std::vector<GameLanguage> CtrSystemLanguages\(\) \{\s*return \{\{"en", "English", 1U\}.*?\{"es", "Espanol", 5U\}',
           test="janela headless do MM3D com game_language.json selected=es"),
+    # 23/11: o teclado do sistema e o seletor de Mii têm dois ids cada
+    # (0x201/0x401 e 0x202/0x402, como no Azahar); o MM3D usa 0x401 para nomear
+    # o arquivo novo (que o OoT3D também use o 0x401 não foi conferido).
+    Guard("applet de teclado/Mii reconhecia só um dos dois ids (0x201/0x401, 0x202/0x402)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_applet.cpp",
+          r'kAptSoftwareKeyboard1 = 0x201U;.*?kAptMiiSelectorEd1 = 0x202U;.*?'
+          r'kAptSoftwareKeyboard2 = 0x401U;.*?kAptMiiSelectorEd2 = 0x402U;.*?'
+          r'appletId == kAptMiiSelectorEd1 \|\| appletId == kAptMiiSelectorEd2.*?'
+          r'appletId == kAptSoftwareKeyboard1 \|\| appletId == kAptSoftwareKeyboard2',
+          test="oot3d_native_a32_ctr_host_tests (TestSoftwareKeyboardApplet)"),
     # 23/11: o MM3D esperava para sempre o evento do giroscópio do hid:USER
     # (WaitSynchronization1 sem prazo): a janela avança o HID a cada quadro,
     # o boot probe não, e o boot parava em 0 quadros com 600 VBlanks.
