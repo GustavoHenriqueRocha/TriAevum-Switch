@@ -64,6 +64,11 @@ def main() -> int:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--window", action="store_true")
     parser.add_argument("--window-seconds", type=int, default=20)
+    # As do OoT3D no Switch (docs/pesquisas/2026-11-25-mm3d-melhorias-outros-ports.md, item 2).
+    for option, text in (("--native-vfp-aarch64", "VFP escalar com instruções AArch64 nativas"),
+                         ("--vfp-zero-aware", "com o VFP nativo: zeros exatos sem cair no software"),
+                         ("--lean-stack", "loads sem inicializar o destino (caminho quente fora da pilha)")):
+        parser.add_argument(option, action="store_true", help=f"gerador: {text}")
     args = parser.parse_args()
     if importlib.util.find_spec("capstone") is None:
         sys.exit("a descoberta precisa do capstone (pip install capstone==5.0.7)")
@@ -88,7 +93,13 @@ def main() -> int:
                          "--program-output", program, "--selection-output", selection])
 
     manifest = cpp / "oot3d_whole_aot_generated.cpp"
-    if args.force or not fresh([manifest], [program, selection, A32 / "whole_aot_cpp.py"]):
+    options = [option for option, on in (("--native-vfp-aarch64", args.native_vfp_aarch64),
+                                         ("--vfp-zero-aware", args.vfp_zero_aware),
+                                         ("--lean-stack", args.lean_stack)) if on]
+    # As opções não mudam data de nada: o C++ gerado com outras é velho.
+    options_file = cpp / "ctr_convert_generate_options.txt"
+    same_options = options_file.exists() and options_file.read_text().split() == options
+    if args.force or not same_options or not fresh([manifest], [program, selection, A32 / "whole_aot_cpp.py"]):
         run("generate", [sys.executable, "-E", "-s", A32 / "generate_whole_aot_cpp.py",
                          "--program", program, "--selection", selection, "--code", code,
                          "--output", cpp, "--shards", "256",
@@ -97,7 +108,9 @@ def main() -> int:
                          # vão para shards de acréscimo (256+), então só esses e
                          # os dos chamadores recompilam. Sem manifesto, faixas
                          # fixas de endereço. O OoT3D (CMake) segue com affinity.
-                         "--shard-strategy", "address-append"])
+                         "--shard-strategy", "address-append", *options])
+        cpp.mkdir(parents=True, exist_ok=True)
+        options_file.write_text(" ".join(options) + "\n")
 
     if args.window:
         command = [REPO / "tools/ctr/build_title_window.sh", "--work", args.work,
