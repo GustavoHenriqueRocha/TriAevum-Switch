@@ -645,6 +645,11 @@ bool NativeA32CtrHostServices::CloseHandle(uint32_t handle) {
                     journal->Close(object->FilePath, object->SaveJournalWriter);
                 object->FileClosed = true;
             }
+            // An event destroyed with its last handle returns to the
+            // resource limit, as the kernel frees it.
+            if (object && object->Type == "event:guest" && object.use_count() == 1 &&
+                mConfig.ResourceCurrentValues[kResourceEvent] > 0)
+                --mConfig.ResourceCurrentValues[kResourceEvent];
             return true;
         }
     }
@@ -1457,6 +1462,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             return HandleNdmRequest(state, memory, context, sessionType,
                                     commandBuffer, std::move(event));
         }
+        if (*sessionType == "client_session:ir:USER") {
+            return HandleIrRequest(state, memory, context, sessionType,
+                                   commandBuffer, std::move(event));
+        }
         if (*sessionType == "client_session:cfg:u") {
             return HandleCfgRequest(state, memory, context, sessionType,
                                     commandBuffer, std::move(event));
@@ -1552,7 +1561,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
                     serviceName == "fs:USER" ||
                     serviceName == "gsp::Gpu" || serviceName == "dsp::DSP" ||
                     serviceName == "cfg:u" || serviceName == "hid:USER" ||
-                    serviceName == "ndm:u" || serviceName == "y2r:u") {
+                    serviceName == "ndm:u" || serviceName == "y2r:u" ||
+                    serviceName == "ir:USER") {
                     const uint32_t session =
                         CreateHandle("client_session:" + serviceName);
                     if (memory.Write32(commandBuffer,
