@@ -3585,11 +3585,36 @@ def _stable_shard_index(entry: int, shard_count: int) -> int:
     return (mixed * shard_count) >> 32
 
 
+def _address_shard_index(
+    entry: int, shard_count: int, base: int, span: int
+) -> int:
+    """Faixa fixa de endereço: ``[base, base + span)`` em ``shard_count``
+    partes iguais. Depende só do endereço (Thumb conta pelo par), da imagem e
+    da contagem, nunca das outras funções: somar ou tirar funções muda só os
+    shards das faixas delas, e funções novas vizinhas caem juntas."""
+    offset = (entry & ~1) - base
+    return min(shard_count - 1, max(0, offset * shard_count // span))
+
+
 def _shard_buckets(
     functions: tuple[Function, ...], shard_count: int, strategy: str,
     existing_assignments: dict[int, int] | None = None,
+    address_range: tuple[int, int] | None = None,
 ) -> list[list[Function]]:
     buckets: list[list[Function]] = [[] for _ in range(shard_count)]
+    if strategy == "address":
+        if address_range is None or address_range[1] <= 0:
+            raise ValueError("address shard strategy needs a code range")
+        base, span = address_range
+        for function in functions:
+            buckets[
+                _address_shard_index(function.entry, shard_count, base, span)
+            ].append(function)
+        return buckets
+    if strategy == "address-append":
+        return _address_append_buckets(
+            functions, shard_count, address_range, existing_assignments or {}
+        )
     if strategy == "stable":
         for function in functions:
             buckets[_stable_shard_index(function.entry, shard_count)].append(
@@ -3812,6 +3837,54 @@ def _affinity_incremental_buckets(
         buckets[index].append(function)
         weights[index] += weight
         placed[function.entry] = index
+    return buckets
+
+
+def _address_append_buckets(
+    functions: tuple[Function, ...], shard_count: int,
+    address_range: tuple[int, int] | None,
+    existing_assignments: dict[int, int],
+) -> list[list[Function]]:
+    """Acréscimo: regerar com funções novas não remaneja as que existiam.
+
+    Sem distribuição anterior é ``address``. Com ela (do manifesto anterior,
+    de qualquer estratégia, mesma contagem de base), cada função que já
+    existia fica no mesmo shard; as novas vão, em ordem de endereço, para o
+    último shard de acréscimo (índices a partir de ``shard_count``) enquanto
+    ele couber no peso médio de um shard, e depois para um shard novo. Os
+    shards de base e os de acréscimo já cheios ficam byte a byte iguais, então
+    só os shards das novas e os dos chamadores delas recompilam."""
+    if not existing_assignments:
+        return _shard_buckets(
+            functions, shard_count, "address", address_range=address_range
+        )
+    weight_of = {
+        function.entry: sum(len(block.instructions) for block in function.blocks)
+        for function in functions
+    }
+    total = max(shard_count, max(existing_assignments.values()) + 1)
+    buckets: list[list[Function]] = [[] for _ in range(total)]
+    weights = [0] * total
+    new: list[Function] = []
+    for function in functions:
+        index = existing_assignments.get(function.entry)
+        if index is None or index < 0:
+            new.append(function)
+            continue
+        buckets[index].append(function)
+        weights[index] += weight_of[function.entry]
+    cap = sum(weight_of.values()) / shard_count
+    for function in sorted(new, key=lambda item: item.entry):
+        weight = weight_of[function.entry]
+        last = len(buckets) - 1
+        if last < shard_count or (
+            weights[last] and weights[last] + weight > cap
+        ):
+            buckets.append([])
+            weights.append(0)
+            last += 1
+        buckets[last].append(function)
+        weights[last] += weight
     return buckets
 
 
@@ -4060,11 +4133,12 @@ def generate(
     if shard_count <= 0:
         raise ValueError("whole-AOT shard count must be positive")
     if shard_strategy not in {
-        "stable", "balanced", "incremental", "affinity", "affinity-incremental"
+        "stable", "balanced", "incremental", "affinity", "affinity-incremental",
+        "address", "address-append",
     }:
         raise ValueError(
             "whole-AOT shard strategy must be stable, balanced, incremental, "
-            "affinity or affinity-incremental"
+            "affinity, affinity-incremental, address or address-append"
         )
     program_bytes = program_path.read_bytes()
     selection_bytes = selection_path.read_bytes()
@@ -4166,12 +4240,23 @@ def generate(
         and sum(len(block.instructions) for block in function.blocks)
         >= giant_function_instructions
     )
+    # Faixa da estratégia address: o texto declarado (exheader) ou, sem ele,
+    # o code.bin inteiro; as duas coisas são fixas para um título.
+    address_range = (
+        (
+            int(program["base"]),
+            int(program.get("executable_size") or len(code)),
+        )
+        if shard_strategy in {"address", "address-append"}
+        else None
+    )
     try:
         return _generate_files(
             output, functions, external_entries, shard_count, shard_strategy,
             region_entries, memory_entries, local_state, fold_literals,
             memory_contract, program_sha256, selection_sha256, code_sha256,
-            generator_sha256, {**giant_contract, **option_contract})
+            generator_sha256, {**giant_contract, **option_contract},
+            address_range)
     finally:
         _LITERAL_IMAGE = None
         _NATIVE_VFP_AARCH64 = False
@@ -4201,6 +4286,7 @@ def _generate_files(
     code_sha256: str,
     generator_sha256: str,
     giant_contract: dict[str, object] | None = None,
+    address_range: tuple[int, int] | None = None,
 ) -> dict[str, object]:
     if region_entries - {function.entry for function in functions}:
         raise ValueError("callback-free regions must be selected function entries")
@@ -4223,11 +4309,12 @@ def _generate_files(
             _existing_shard_assignments(output, shard_count)
             if shard_strategy == "incremental"
             else _manifest_shard_assignments(output, shard_count)
-            if shard_strategy == "affinity-incremental"
+            if shard_strategy in {"affinity-incremental", "address-append"}
             else None
         )
         buckets = _shard_buckets(
-            functions, shard_count, shard_strategy, existing_assignments
+            functions, shard_count, shard_strategy, existing_assignments,
+            address_range,
         )
         generated_files[INTERNAL_HEADER_NAME] = _render_internal_header().encode(
             "utf-8"
@@ -4289,6 +4376,12 @@ def _generate_files(
         "generator_sha256": generator_sha256,
         "shard_count": shard_count,
         "shard_strategy": shard_strategy,
+        # Só na estratégia address: nas outras o manifesto fica o de antes.
+        **(
+            {"address_range": list(address_range)}
+            if address_range is not None
+            else {}
+        ),
         "callback_free_regions": sorted(region_entries),
         "memory_regions": sorted(memory_entries),
         "memory_region_contract_sha256": memory_contract,

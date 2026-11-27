@@ -8,7 +8,7 @@
 Etapas (cada uma pula se a saída já é mais nova que a entrada, salvo --force):
   1. extract   ncch_extract.py         -> <work>/extract/{exheader,code,romfs}.bin
   2. discover  discover_functions.py   -> <work>/extract/{inventory.csv,aot_program.json,functions.json}
-  3. generate  generate_whole_aot_cpp.py -> <work>/cpp (256 shards)
+  3. generate  generate_whole_aot_cpp.py -> <work>/cpp (256 shards por faixa de endereço + shards de acréscimo)
   4. build     build_title_boot_probe.sh -> <work>/build/ctr_title_boot_probe (-O0)
      --run roda o probe: <work>/build/title/{report.json,stderr.log}
      --complete-gpu-work conclui o trabalho da GPU sem desenhar (o jogo não
@@ -91,7 +91,13 @@ def main() -> int:
     if args.force or not fresh([manifest], [program, selection, A32 / "whole_aot_cpp.py"]):
         run("generate", [sys.executable, "-E", "-s", A32 / "generate_whole_aot_cpp.py",
                          "--program", program, "--selection", selection, "--code", code,
-                         "--output", cpp, "--shards", "256"])
+                         "--output", cpp, "--shards", "256",
+                         # Regerar com funções novas não remaneja as antigas:
+                         # elas ficam no shard do manifesto anterior e as novas
+                         # vão para shards de acréscimo (256+), então só esses e
+                         # os dos chamadores recompilam. Sem manifesto, faixas
+                         # fixas de endereço. O OoT3D (CMake) segue com affinity.
+                         "--shard-strategy", "address-append"])
 
     if args.window:
         command = [REPO / "tools/ctr/build_title_window.sh", "--work", args.work,

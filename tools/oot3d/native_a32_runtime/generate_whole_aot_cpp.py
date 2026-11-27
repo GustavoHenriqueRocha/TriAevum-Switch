@@ -48,14 +48,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--shard-strategy",
         choices=(
             "stable", "balanced", "incremental", "affinity",
-            "affinity-incremental",
+            "affinity-incremental", "address", "address-append",
         ),
         default="stable",
         help=(
             "stable hash placement, weight-balanced placement, preservation "
-            "of existing assignments, direct-call affinity placement, or "
+            "of existing assignments, direct-call affinity placement, "
             "affinity placement that preserves the previous manifest's "
-            "assignments (ccache-friendly)"
+            "assignments (ccache-friendly), fixed address ranges of the "
+            "text (new neighbouring functions touch only their range's "
+            "shard), or those ranges with the previous manifest's assignments "
+            "kept and new functions in appended shards"
         ),
     )
     parser.add_argument(

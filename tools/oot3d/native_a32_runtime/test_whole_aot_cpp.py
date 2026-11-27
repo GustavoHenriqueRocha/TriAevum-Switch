@@ -1789,5 +1789,259 @@ class AffinityIncrementalShardingTests(unittest.TestCase):
         )
 
 
+# sha256 (do mapa nome -> sha256 dos .cpp/.h) da fixture de AddressShardingTests
+# gerada antes da estratégia address. Na linha do John (integra-john-2) o
+# gerador é outro (o C++ do english do John): os pinos são os do gerador do
+# integra-john-2 sem este commit (generico-john baac324e, 27/11); no
+# deko3d eram 0d26c280.../c6eb9fdc... (9d5bd4da).
+PINNED_STABLE_DIGEST = (
+    "a3f3fa172029ff08ef5bedfc62c1e291520cbeca06a07bcb65a70ec3f22b80dc")
+PINNED_AFFINITY_DIGEST = (
+    "de5bfd2fbb7a450b09151f0d412fed3ba76d304e4009bd83952d96e99903cfc3")
+
+
+class AddressShardingTests(unittest.TestCase):
+    """Estratégia ``address``: o shard de uma função depende só do endereço.
+
+    Faixas fixas de ``[base, base + executable_size)`` (ou do code.bin
+    inteiro sem ``executable_size``): somar ou tirar funções muda só os
+    shards das faixas delas, e funções novas vizinhas caem no mesmo shard.
+    """
+
+    COUNT = 64  # funções-folha de uma instrução (BX LR) em 0x1000 + 4*i
+
+    def write(self, root: Path, entries, *, executable_size=None, order=None):
+        code = words(*([0xE12FFF1E] * self.COUNT))
+        code_path = root / "code.bin"
+        program_path = root / "program.json"
+        selection_path = root / "selection.json"
+        code_path.write_bytes(code)
+        program = {
+            "format": PROGRAM_FORMAT,
+            "base": 0x1000,
+            "code_sha256": hashlib.sha256(code).hexdigest(),
+            "blocks": [
+                {"id": index, "pc": 0x1000 + 4 * index,
+                 "end_pc": 0x1004 + 4 * index,
+                 "successors": [{"site": 0x1000 + 4 * index, "kind": "return"}]}
+                for index in range(self.COUNT)
+            ],
+            "functions": [
+                {"entry": 0x1000 + 4 * index, "name": f"Leaf{index}",
+                 "blocks": [index], "closed_static_cfg": True,
+                 "direct_calls": [], "tail_calls": [], "indirect_sites": []}
+                for index in range(self.COUNT)
+            ],
+        }
+        if executable_size is not None:
+            program["executable_size"] = executable_size
+        program_path.write_text(json.dumps(program), encoding="utf-8")
+        selected = sorted(entries) if order is None else list(order)
+        selection_path.write_text(json.dumps({
+            "format": SELECTION_FORMAT,
+            "functions": [{"entry": entry} for entry in selected],
+        }), encoding="utf-8")
+        return program_path, selection_path, code_path
+
+    @staticmethod
+    def digests(output: Path) -> dict[str, str]:
+        return {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(output.iterdir())
+            if path.suffix in {".cpp", ".h"}
+        }
+
+    def changed_shards(self, entries_before, entries_after, strategy):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            before, after = root / "before", root / "after"
+            before.mkdir()
+            after.mkdir()
+            generate(*self.write(before, entries_before), before / "cpp",
+                     shard_count=8, shard_strategy=strategy)
+            generate(*self.write(after, entries_after), after / "cpp",
+                     shard_count=8, shard_strategy=strategy)
+            old, new = self.digests(before / "cpp"), self.digests(after / "cpp")
+        self.assertEqual(set(old), set(new))
+        return sorted(name for name in old if old[name] != new[name])
+
+    def test_adding_one_function_changes_only_its_shard(self) -> None:
+        all_entries = [0x1000 + 4 * index for index in range(self.COUNT)]
+        added = 0x1000 + 4 * 21  # faixa 2 (8 funções por faixa)
+        changed = self.changed_shards(
+            [entry for entry in all_entries if entry != added], all_entries,
+            "address")
+        self.assertEqual(
+            changed, ["oot3d_whole_aot_generated.cpp",
+                      "oot3d_whole_aot_shard_02.cpp"])
+
+    def test_neighbouring_new_functions_share_one_shard(self) -> None:
+        all_entries = [0x1000 + 4 * index for index in range(self.COUNT)]
+        added = set(all_entries[40:48])  # uma faixa inteira (shard 5)
+        changed = self.changed_shards(
+            [entry for entry in all_entries if entry not in added],
+            all_entries, "address")
+        self.assertEqual(
+            changed, ["oot3d_whole_aot_generated.cpp",
+                      "oot3d_whole_aot_shard_05.cpp"])
+        # O hash (stable, o padrão de antes nos títulos do conversor)
+        # espalha as mesmas 8 funções vizinhas por vários shards.
+        self.assertGreater(len(self.changed_shards(
+            [entry for entry in all_entries if entry not in added],
+            all_entries, "stable")), 3)
+
+    def test_placement_is_pure_and_order_independent(self) -> None:
+        all_entries = [0x1000 + 4 * index for index in range(self.COUNT)]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fresh, reused = root / "fresh", root / "reused"
+            fresh.mkdir()
+            reused.mkdir()
+            generate(*self.write(fresh, all_entries), fresh / "cpp",
+                     shard_count=8, shard_strategy="address")
+            # Saída anterior de outra seleção na mesma pasta, e a seleção em
+            # ordem invertida: o resultado não depende de nenhum dos dois.
+            generate(*self.write(reused, all_entries[::3]), reused / "cpp",
+                     shard_count=8, shard_strategy="address")
+            manifest = generate(
+                *self.write(reused, all_entries, order=all_entries[::-1]),
+                reused / "cpp", shard_count=8, shard_strategy="address")
+            self.assertEqual(self.digests(fresh / "cpp"),
+                             self.digests(reused / "cpp"))
+        self.assertEqual(manifest["shard_strategy"], "address")
+        self.assertEqual(manifest["address_range"], [0x1000, 4 * self.COUNT])
+        self.assertEqual(
+            [shard["entries"] for shard in manifest["shards"]],
+            [all_entries[index:index + 8] for index in range(0, 64, 8)])
+
+    def test_executable_size_bounds_the_ranges(self) -> None:
+        from whole_aot_cpp import _address_shard_index
+
+        # Só o texto (128 bytes) é dividido; o que passa dele vai para o
+        # último shard, e Thumb (endereço ímpar) conta pelo endereço par.
+        self.assertEqual(_address_shard_index(0x1000, 8, 0x1000, 128), 0)
+        self.assertEqual(_address_shard_index(0x107C, 8, 0x1000, 128), 7)
+        self.assertEqual(_address_shard_index(0x10F0, 8, 0x1000, 128), 7)
+        self.assertEqual(_address_shard_index(0x1011, 8, 0x1000, 128), 1)
+        self.assertEqual(_address_shard_index(0x0FF0, 8, 0x1000, 128), 0)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = generate(
+                *self.write(root, [0x1000, 0x1040, 0x10FC],
+                            executable_size=128),
+                root / "cpp", shard_count=8, shard_strategy="address")
+        self.assertEqual(manifest["address_range"], [0x1000, 128])
+        self.assertEqual(
+            [shard["entries"] for shard in manifest["shards"]],
+            [[0x1000], [], [], [], [0x1040], [], [], [0x10FC]])
+
+    def test_other_strategies_are_byte_identical(self) -> None:
+        # sha256 tirados no 9d5bd4da (antes da estratégia address): o modo do
+        # OoT3D (affinity, e stable/balanced) não pode mudar um byte.
+        expected = {
+            "stable": PINNED_STABLE_DIGEST,
+            "affinity": PINNED_AFFINITY_DIGEST,
+        }
+        all_entries = [0x1000 + 4 * index for index in range(self.COUNT)]
+        for strategy, digest in expected.items():
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = generate(*self.write(root, all_entries),
+                                    root / "cpp", shard_count=8,
+                                    shard_strategy=strategy)
+                combined = hashlib.sha256(json.dumps(
+                    self.digests(root / "cpp"), sort_keys=True).encode()
+                ).hexdigest()
+            self.assertNotIn("address_range", manifest)
+            self.assertEqual(combined, digest, strategy)
+
+
+class AddressAppendShardingTests(AddressShardingTests):
+    """Estratégia ``address-append``: quem já existia fica no shard do
+    manifesto anterior (de qualquer estratégia, mesma contagem); funções novas
+    vão para shards de acréscimo depois dos ``shard_count`` de base, sem tocar
+    os existentes. Sem manifesto anterior é igual a ``address``."""
+
+    ALL = [0x1000 + 4 * index for index in range(64)]
+
+    def generations(self, selections, strategies, *, keep=True):
+        """Gera cada seleção em sequência na mesma pasta; devolve os sha256 e
+        os manifestos de cada geração."""
+        results = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for entries, strategy in zip(selections, strategies):
+                manifest = generate(*self.write(root, entries), root / "cpp",
+                                    shard_count=8, shard_strategy=strategy)
+                results.append((self.digests(root / "cpp"), manifest))
+        return results
+
+    @staticmethod
+    def changed(old: dict, new: dict) -> list[str]:
+        return sorted(n for n in set(old) | set(new) if old.get(n) != new.get(n))
+
+    def test_without_previous_manifest_matches_address(self) -> None:
+        (append, _), = self.generations([self.ALL], ["address-append"])
+        (address, _), = self.generations([self.ALL], ["address"])
+        self.assertEqual(append, address)
+
+    def test_spread_new_functions_touch_only_an_appended_shard(self) -> None:
+        spread = {self.ALL[3], self.ALL[20], self.ALL[45], self.ALL[60]}
+        base = [entry for entry in self.ALL if entry not in spread]
+        (old, _), (new, manifest) = self.generations(
+            [base, self.ALL], ["address-append"] * 2)
+        self.assertEqual(
+            self.changed(old, new),
+            ["oot3d_whole_aot_generated.cpp", "oot3d_whole_aot_shard_08.cpp"])
+        self.assertEqual(manifest["shards"][8]["entries"], sorted(spread))
+        self.assertEqual(manifest["shard_count"], 8)
+        self.assertEqual(len(manifest["shards"]), 9)
+
+    def test_removal_touches_only_its_shard_and_readding_appends(self) -> None:
+        victim = self.ALL[33]  # faixa 4
+        reduced = [entry for entry in self.ALL if entry != victim]
+        (first, _), (second, _), (third, manifest) = self.generations(
+            [self.ALL, reduced, self.ALL], ["address-append"] * 3)
+        self.assertEqual(
+            self.changed(first, second),
+            ["oot3d_whole_aot_generated.cpp", "oot3d_whole_aot_shard_04.cpp"])
+        self.assertEqual(
+            self.changed(second, third),
+            ["oot3d_whole_aot_generated.cpp", "oot3d_whole_aot_shard_08.cpp"])
+        self.assertEqual(manifest["shards"][8]["entries"], [victim])
+
+    def test_previous_stable_layout_is_kept(self) -> None:
+        # Trocar o título de stable para address-append não remaneja nada.
+        added = {self.ALL[7], self.ALL[50]}
+        base = [entry for entry in self.ALL if entry not in added]
+        (old, stable), (new, manifest) = self.generations(
+            [base, self.ALL], ["stable", "address-append"])
+        self.assertEqual(
+            self.changed(old, new),
+            ["oot3d_whole_aot_generated.cpp", "oot3d_whole_aot_shard_08.cpp"])
+        self.assertEqual(
+            [shard["entries"] for shard in manifest["shards"][:8]],
+            [shard["entries"] for shard in stable["shards"]])
+
+    def test_full_appended_shard_opens_the_next(self) -> None:
+        # Teto de um shard de acréscimo: o peso médio de um shard de base
+        # (64 instruções / 8 = 8 aqui). 12 novas: 8 no 08 e 4 no 09.
+        added = self.ALL[10:22]
+        base = [entry for entry in self.ALL if entry not in added]
+        (_, _), (_, manifest) = self.generations(
+            [base, self.ALL], ["address-append"] * 2)
+        self.assertEqual(
+            [shard["entries"] for shard in manifest["shards"][8:]],
+            [added[:8], added[8:]])
+
+    # Os testes herdados de AddressShardingTests rodam de novo aqui; não
+    # precisam.
+    test_adding_one_function_changes_only_its_shard = None
+    test_neighbouring_new_functions_share_one_shard = None
+    test_placement_is_pure_and_order_independent = None
+    test_executable_size_bounds_the_ranges = None
+    test_other_strategies_are_byte_identical = None
+
+
 if __name__ == "__main__":
     unittest.main()
