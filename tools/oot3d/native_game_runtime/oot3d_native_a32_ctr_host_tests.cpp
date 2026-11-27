@@ -2543,8 +2543,49 @@ void TestSvcTimeProfile() {
             "svc profile row for 'caro' is wrong:\n" + text);
 }
 
+void TestQueryMemory() {
+    using State = NativeA32KernelMemoryState;
+    NativeA32Memory memory;
+    std::string error;
+    for (const NativeA32MemoryRegionConfig& region :
+         {NativeA32MemoryRegionConfig{"text", 0x00100000, 0x1000, false, true, {}, State::Code},
+          NativeA32MemoryRegionConfig{"rodata", 0x00101000, 0x1000, false, false, {}, State::Code},
+          NativeA32MemoryRegionConfig{"heap_0", 0x08000000, 0x1000, true, false, {}, State::Private},
+          NativeA32MemoryRegionConfig{"heap_1", 0x08001000, 0x1000, true, false, {}, State::Private},
+          NativeA32MemoryRegionConfig{"stack", 0x0FFFC000, 0x4000, true, false, {}, State::Locked}}) {
+        Require(memory.MapRegion(region, &error), error);
+    }
+    NativeA32CtrHostServices host(MakeConfig());
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    NativeA32HostContext context{process, 0};
+    const auto query = [&](uint32_t address) {
+        GuestState state{};
+        state.r[2] = address;
+        Require(host.HandleSvc(0x02, state, memory, context).Action ==
+                        NativeA32HostAction::Resume &&
+                    state.r[0] == 0,
+                "QueryMemory did not succeed");
+        return std::array<uint32_t, 5>{state.r[1], state.r[2], state.r[3],
+                                       state.r[4], state.r[5]};
+    };
+    Require(query(0x0FFFFFFF) ==
+                std::array<uint32_t, 5>{0x0FFFC000, 0x4000, 3, 11, 0},
+            "QueryMemory of the stack top is wrong");
+    Require(query(0x08001800) ==
+                std::array<uint32_t, 5>{0x08000000, 0x2000, 3, 5, 0},
+            "QueryMemory did not merge touching heap mappings");
+    Require(query(0x00100800) ==
+                std::array<uint32_t, 5>{0x00100000, 0x1000, 5, 4, 0},
+            "QueryMemory merged code areas of different permissions");
+    Require(query(0x00200000) ==
+                std::array<uint32_t, 5>{0x00102000, 0x08000000 - 0x00102000, 0, 0, 0},
+            "QueryMemory of a free gap is wrong");
+}
+
 void RunAllTests() {
     TestSvcTimeProfile();
+    TestQueryMemory();
     TestCreateThreadProcessor();
     TestCfgAzaharDefaultBlocks();
     TestSelfNcchArchive();
@@ -2683,6 +2724,19 @@ void RunAllTests() {
                 response == 0x00050042 &&
                 memory.Read32(0x1FF8208C, &aptSession),
             "srv:GetServiceHandle APT:U response is wrong");
+
+    // APT:A, the applications' APT port of later SDKs, opens the same service.
+    Require(memory.Write32(0x1FF82080, 0x00050100) &&
+                memory.Write32(0x1FF82084, 0x3A545041) &&
+                memory.Write32(0x1FF82088, 0x00000041) &&
+                memory.Write32(0x1FF8208C, 5),
+            "cannot write srv:GetServiceHandle APT:A request");
+    state.r[0] = srvSession;
+    Require(host.HandleSvc(0x32, state, memory, context).Action ==
+                    NativeA32HostAction::Resume &&
+                memory.Read32(0x1FF82080, &response) &&
+                response == 0x00050042,
+            "srv:GetServiceHandle did not open APT:A");
 
     Require(memory.Write32(0x1FF82080, 0x00050100) &&
                 memory.Write32(0x1FF82084, 0x553A7366) &&
@@ -3893,6 +3947,14 @@ void RunAllTests() {
                 memory.Read32(0x1FF82080, &response) &&
                 response == 0x00160040,
             "GSP:AcquireRight response is wrong");
+
+    // Before a relay queue is registered, VBlank has nowhere to go and is
+    // not an error; a PICA completion is.
+    Require(host.SignalVBlank(memory),
+            "VBlank before RegisterInterruptRelayQueue failed");
+    Require(!host.SignalPicaInterrupt(
+                memory, Oot3dNativeGame::Oot3dPicaInterruptId::P3d),
+            "PICA completion without a relay queue was accepted");
 
     state.r[1] = 0;
     Require(host.HandleSvc(0x17, state, memory, context).Action ==

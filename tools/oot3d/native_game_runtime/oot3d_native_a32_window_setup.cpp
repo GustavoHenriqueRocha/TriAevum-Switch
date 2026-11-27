@@ -1001,6 +1001,9 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.WholeAotObservableExitPcs =
       wholeAotObservableExitBlocks;
   process.SetTimingEnabled(launch.ProfileA32Runtime);
+  // Product mode: OoT3D's hand-written compiled functions only where the
+  // title adapter allows them (ctr_title_profile.h; on in the OoT3D).
+  process.SetManualCompiledFunctionsEnabled(enableManualCompiledFunctions);
 #if !defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
   // Native candidates are experimental reconstruction aids.  The product
   // executes the audited whole-AOT graph and never substitutes source-native

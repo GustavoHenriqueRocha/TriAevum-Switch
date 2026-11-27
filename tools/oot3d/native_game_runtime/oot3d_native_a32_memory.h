@@ -129,6 +129,21 @@ OOT3D_AOT_HOT T LoadGuestValue(const uint8_t* source) noexcept {
     return value;
 #endif
 }
+// CTR kernel MemoryState of a mapping, as svcQueryMemory reports it.
+enum class NativeA32KernelMemoryState : uint8_t {
+    Free = 0,
+    Reserved = 1,
+    Io = 2,
+    Static = 3,
+    Code = 4,
+    Private = 5,
+    Shared = 6,
+    Continuous = 7,
+    Aliased = 8,
+    Alias = 9,
+    AliasCode = 10,
+    Locked = 11,
+};
 
 // Store cards. Every guest store marks the 4 KiB page it wrote: one byte per
 // guest page in a flat table of the image, with two bits that the two kinds
@@ -171,6 +186,15 @@ struct NativeA32MemoryRegionConfig {
     bool Writable = false;
     bool Executable = false;
     std::span<const uint8_t> InitialBytes;
+    NativeA32KernelMemoryState KernelState = NativeA32KernelMemoryState::Private;
+};
+
+struct NativeA32MemoryRegionInfo {
+    uint32_t BaseAddress = 0;
+    uint64_t Size = 0;
+    bool Writable = false;
+    bool Executable = false;
+    NativeA32KernelMemoryState KernelState = NativeA32KernelMemoryState::Private;
 };
 
 class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
@@ -187,6 +211,8 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     bool IsWritable(uint32_t address, size_t size) const;
     bool IsExecutable(uint32_t address, size_t size) const;
     size_t RegionCount() const;
+    // Mapped regions in address order.
+    std::vector<NativeA32MemoryRegionInfo> RegionInfos() const;
     // Architectural write generation: changes between two calls exactly when
     // a tracked write happened in between (any store, service write, fill,
     // device publication or escaped write pointer); savestates carry it. It
@@ -579,6 +605,8 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         std::vector<uint8_t> Bytes;
         bool Writable = false;
         bool Executable = false;
+        NativeA32KernelMemoryState KernelState =
+            NativeA32KernelMemoryState::Private;
     };
 
     // Read/Write are the typed fast-path entries; both are null while write

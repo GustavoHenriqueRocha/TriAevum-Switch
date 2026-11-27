@@ -330,6 +330,9 @@ class NativeA32Process {
         oot3d::recomp::a32::NativeBlockCallback callback,
         void* user = nullptr);
     void SetTimingEnabled(bool enabled) noexcept;
+    // Product mode only: whether OoT3D's hand-written compiled functions may
+    // replace guest functions. The window setup clears it for other titles.
+    void SetManualCompiledFunctionsEnabled(bool enabled) noexcept;
     NativeA32ProcessTimingStats TimingStats() const noexcept;
     // A snapshot: the second core's per-thread time is folded in.
     NativeA32GuestThreadProfile GuestThreadProfile() const noexcept;
@@ -538,6 +541,7 @@ class NativeA32Process {
     oot3d::recomp::a32::NativeBlockCallback mNativeBlockCallback = nullptr;
     void* mNativeBlockUser = nullptr;
     bool mTimingEnabled = false;
+    bool mManualCompiledFunctions = true;
     NativeA32ProcessTimingStats mTimingStats;
     NativeA32GuestThreadProfile mThreadProfile{};
     bool mThreadProfileRunning = false;

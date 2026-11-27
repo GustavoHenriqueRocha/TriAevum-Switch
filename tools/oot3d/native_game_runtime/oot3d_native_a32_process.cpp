@@ -84,7 +84,8 @@ oot3d::recomp::a32::ExecutionResult DispatchWholeAotProduct(
     oot3d::recomp::a32::BlockEntryCallback blockEntry,
     void* blockEntryUser, const uint32_t* blockEntryPcs,
     size_t blockEntryPcCount, std::optional<uint32_t> stopPc,
-    oot3d::recomp::a32::NativeBlockCallback productMod, void* productModUser) {
+    oot3d::recomp::a32::NativeBlockCallback productMod, void* productModUser,
+    bool manualCompiledFunctions) {
     using oot3d::recomp::a32::ExecutionResult;
     using oot3d::recomp::a32::ExitKind;
     using oot3d::recomp::a32::FallbackReason;
@@ -104,7 +105,7 @@ oot3d::recomp::a32::ExecutionResult DispatchWholeAotProduct(
         const bool handled = modHandled || ExecuteOot3dCompiledFunction(
             state.r[15], state, memory, &result, remaining, &consumed,
             blockEntry, blockEntryUser, blockEntryPcs, blockEntryPcCount,
-            false, true, true, stopPc.value_or(0U));
+            false, manualCompiledFunctions, true, stopPc.value_or(0U));
         if (!handled) {
             return {
                 ExitKind::MissingBlock,
@@ -309,10 +310,12 @@ bool NativeA32Process::CreatePrimaryThread(
     NativeA32Memory stagedMemory = mMemory;
     std::string mapError;
     if (!stagedMemory.MapRegion({"primary_stack", config.StackBaseAddress,
-                                 config.StackSize, true, false, {}},
+                                 config.StackSize, true, false, {},
+                                 NativeA32KernelMemoryState::Locked},
                                 &mapError) ||
         !stagedMemory.MapRegion({"primary_tls", config.TlsBaseAddress,
-                                 config.TlsSize, true, false, {}},
+                                 config.TlsSize, true, false, {},
+                                 NativeA32KernelMemoryState::Locked},
                                 &mapError)) {
         if (error != nullptr) {
             *error = mapError;
@@ -423,7 +426,8 @@ std::optional<uint32_t> NativeA32Process::CreateThread(
         if (mNextTlsOffset != mTlsSize || mTlsSize % kTlsPageSize != 0 ||
             nextPage + kTlsPageSize > uint64_t(UINT32_MAX) + 1 ||
             !mMemory.MapRegion({"thread_tls", static_cast<uint32_t>(nextPage),
-                                kTlsPageSize, true, false, {}}, error)) {
+                                kTlsPageSize, true, false, {},
+                                NativeA32KernelMemoryState::Locked}, error)) {
             SetError(error, "native A32 process cannot allocate another TLS page");
             return std::nullopt;
         }
@@ -959,7 +963,8 @@ bool NativeA32Process::InvokeFunctionWithState(
                 state, mMemory, blockLimitPerDispatch,
                 mBlockEntryCallback, mBlockEntryUser,
                 mBlockEntryFilterPcs.data(), mBlockEntryFilterPcs.size(),
-                returnAddress, mNativeBlockCallback, mNativeBlockUser);
+                returnAddress, mNativeBlockCallback, mNativeBlockUser,
+                mManualCompiledFunctions);
 #else
             oot3d::recomp::a32::Dispatch(
             mRegistry, state.r[15], state, mMemory, nullptr, nullptr,
@@ -1107,6 +1112,10 @@ void NativeA32Process::SetNativeBlockCallback(
 void NativeA32Process::SetTimingEnabled(bool enabled) noexcept {
     mTimingEnabled = enabled;
     mTimingStats = {};
+}
+
+void NativeA32Process::SetManualCompiledFunctionsEnabled(bool enabled) noexcept {
+    mManualCompiledFunctions = enabled;
 }
 
 NativeA32ProcessTimingStats NativeA32Process::TimingStats() const noexcept {
@@ -1379,13 +1388,13 @@ oot3d::recomp::a32::ExecutionResult NativeA32Process::DispatchGuest(
     if (secondCore) {
         return DispatchWholeAotProduct(state, mMemory, blockLimit, nullptr,
                                        nullptr, nullptr, 0U, std::nullopt,
-                                       nullptr, nullptr);
+                                       nullptr, nullptr, mManualCompiledFunctions);
     }
     return DispatchWholeAotProduct(
         state, mMemory, blockLimit,
         mBlockEntryCallback, mBlockEntryUser,
         mBlockEntryFilterPcs.data(), mBlockEntryFilterPcs.size(), std::nullopt,
-        mNativeBlockCallback, mNativeBlockUser);
+        mNativeBlockCallback, mNativeBlockUser, mManualCompiledFunctions);
 #else
     if (secondCore) {
         return oot3d::recomp::a32::Dispatch(
