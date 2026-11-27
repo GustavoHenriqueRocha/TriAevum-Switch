@@ -197,7 +197,10 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
 - ROM de entrada: USA (No-Intro 0033), convertida para EUR canônico pelo adaptador
   `oot3d-usa-input-canonical-eur-ef210566`. Trabalho fora do git em `~/oot3d-work`.
 - **Este fork (TriAevum-Switch) é público**: nunca suba ROM, C++ gerado, `.nro`, `game/` nem
-  derivados. Pacote pessoal (NRO + caches + configs) só no repo privado `oot3dre-pessoal`, como release.
+  derivados no git. Desde 27/11 (decisão do Gustavo, ciente do risco de DMCA) o pacote da release
+  (NRO, `deko3d.pack`, zip com o mod PT-BR) também sai como release pública aqui, sempre com os créditos
+  (coccofresco, John Uzoka, SolidOne e LordeJabiraca pelo texto PT-BR, TopScreen); `oot3dre-pessoal`
+  continua sendo de onde o atualizador do console lê.
 - Fluidez acima de FPS médio: nenhum quadro > 16,7 ms em qualquer área de jogo; queda em
   carregamento é aceitável (ignore `ctx=load`). Ao comparar tours, olhe primeiro picos/refresh
   perdidos, hold × interp e imagens distintas por segundo; a média vem depois.
