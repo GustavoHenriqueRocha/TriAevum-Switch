@@ -18,7 +18,8 @@
 #     OOT3D_REGENERATE_WHOLE_AOT=OFF, fora do modo produto, sem o registro de
 #     blocos A32 do OoT3D) e compila o alvo ctr_title_boot_probe em -O0 com
 #     nice e no máximo --jobs compilações (padrão 2). Se o pacote da CPU chegar
-#     a LIMITE (85 °C), pausa o build até RETOMA (75 °C);
+#     a LIMITE (85 °C), pausa o build até RETOMA (75 °C); sem o comando
+#     sensors (lm-sensors) compila sem teto;
 #  2. gera o manifesto do processo (build_process_manifest.py: layout do
 #     ExHeader, program id que escolhe o perfil de título, janela da RomFS);
 #  3. com --run, roda o probe: relatório JSON em <build>/title/report.json e o
@@ -122,7 +123,8 @@ cmake -S "$REPO" -B "$BUILD" -G Ninja \
 [ "$CONFIGURE_ONLY" = 1 ] && { echo "configurado: $BUILD"; exit 0; }
 
 # --- 2. compilar (nice, -j JOBS, teto de temperatura) --------------------------
-temp() { sensors 2>/dev/null | awk '/^(Package id 0|Tctl):/ {gsub(/[+°C]/, "", $2); gsub(/[+°C]/, "", $4); v=($1=="Tctl:")?$2:$4; print int(v); exit}'; }
+# Sem lm-sensors (WSL do Ryzen) não há teto: temperatura vazia, o laço trata como 0.
+temp() { command -v sensors > /dev/null 2>&1 || return 0; sensors 2>/dev/null | awk '/^(Package id 0|Tctl):/ {gsub(/[+°C]/, "", $2); gsub(/[+°C]/, "", $4); v=($1=="Tctl:")?$2:$4; print int(v); exit}'; }
 # Regera o build.ninja antes (o glob dos shards força um re-run do CMake e o
 # dry-run contaria 0 etapas).
 ninja -C "$BUILD" build.ninja > /dev/null 2>&1 || true
