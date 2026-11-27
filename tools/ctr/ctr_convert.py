@@ -108,7 +108,7 @@ def main() -> int:
                          # vão para shards de acréscimo (256+), então só esses e
                          # os dos chamadores recompilam. Sem manifesto, faixas
                          # fixas de endereço. O OoT3D (CMake) segue com affinity.
-                         "--shard-strategy", "address-append", *options])
+                         "--shard-strategy", "address-append"] + options)
         cpp.mkdir(parents=True, exist_ok=True)
         options_file.write_text(" ".join(options) + "\n")
 
