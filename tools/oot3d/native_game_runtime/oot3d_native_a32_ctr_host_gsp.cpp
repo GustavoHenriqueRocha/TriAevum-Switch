@@ -165,6 +165,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                 packet.Control = words[0];
                 std::copy_n(words.begin() + 1, packet.Parameters.size(),
                             packet.Parameters.begin());
+                // config/svc_profile: tempo de cada comando GSP na própria chave.
+                const auto packetStart = mConfig.ProfileSvcTime
+                                             ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
                 if (mConfig.ProfileRuntime) {
                     ++mRuntimeProfile.CommandPackets;
                 }
@@ -384,6 +388,16 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                             ":TriggerCmdReqQueue:" + picaError;
                     }
                     break;
+                }
+                if (mConfig.ProfileSvcTime) [[unlikely]] {
+                    static constexpr std::array<const char*, 6> kGspCommandKeys{
+                        "gsp RequestDma",      "gsp SubmitCommandList", "gsp MemoryFill",
+                        "gsp DisplayTransfer", "gsp TextureCopy",       "gsp CacheFlush"};
+                    const uint32_t id = packet.Control & 0xFFU;
+                    mSvcTimes.Add(id < kGspCommandKeys.size() ? kGspCommandKeys[id] : "gsp outro",
+                                  static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                            std::chrono::steady_clock::now() - packetStart)
+                                                            .count()));
                 }
                 --commandCount;
                 index = (index + 1U) % 15U;

@@ -2608,6 +2608,7 @@ void RunAllTests() {
     config.PicaFrontend = &picaFrontend;
     config.SaveDataDirectory = saveDataPath;
     config.ProfileRuntime = true;
+    config.ProfileSvcTime = true;
     NativeA32CtrHostServices host(std::move(config));
     const oot3d::recomp::a32::Registry registry{};
     NativeA32Process process(registry, host);
@@ -4029,6 +4030,14 @@ void RunAllTests() {
                 memory.Read8(0x10000001, &gspInterruptCount) &&
                 gspInterruptCount == 4 && dmaInterrupt == 6,
             "GSP DMA did not copy memory and signal native completion");
+    // Os 7 ms/quadro do TriggerCmdReqQueue no MM3D (2026-11-25-mm3d-tempo-por-svc.md)
+    // se dividem por comando GSP no svc_profile.
+    {
+        const auto& svcTimes = host.SvcTimes().Stats();
+        const auto dma = svcTimes.find("gsp RequestDma");
+        Require(dma != svcTimes.end() && dma->second.Count == 1U,
+                "svc profile did not time the GSP DMA command on its own key");
+    }
 
     const uint64_t ticksBeforeClockAdvance = host.SystemTicks();
     constexpr uint64_t clockAdvance = 0x123456789ABCDEF0ULL;
