@@ -368,6 +368,8 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     // RequireConnection. On by default, as on a New 3DS, whose ir module
     // presents the built-in C-stick and ZL/ZR as a connected Circle Pad Pro.
     void SetIrExtraHidAttached(bool attached) noexcept;
+    // The text the system software keyboard returns (a new file's name).
+    void SetSoftwareKeyboardText(std::u16string text);
     // Puts the Circle Pad Pro input reports due by the current tick into the
     // ir:USER receive buffer; true when the receive event was signalled.
     bool AdvanceIrToCurrentTick(NativeA32Memory& memory,
@@ -722,6 +724,9 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     bool mAptWakeupPending = false;
     std::optional<AptParameter> mAptParameter;
     AptLibraryApplet mAptLibraryApplet;
+    // Texto que o teclado de software do sistema devolve (nome do arquivo novo
+    // no MM3D); "Link" por padrão, TRIAEVUM_SWKBD_TEXT na janela.
+    std::u16string mSoftwareKeyboardText = u"Link";
     std::vector<uint8_t> mDspComponent;
     uint16_t mDspProgramMask = 0;
     uint16_t mDspDataMask = 0;

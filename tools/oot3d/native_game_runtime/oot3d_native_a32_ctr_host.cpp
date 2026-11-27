@@ -1132,22 +1132,43 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         return {NativeA32HostAction::Resume};
     }
     case 0x20: {
-        // UnmapMemoryBlock: por enquanto só o bloco vazio do applet de
-        // biblioteca (o Azahar faz UnmapRange de tamanho 0 = sucesso). A
-        // memória do host não desmapeia regiões; bloco com conteúdo segue
-        // como falha nomeada.
+        // UnmapMemoryBlock(handle, address). O bloco vazio do applet de
+        // biblioteca nunca foi mapeado (o Azahar faz UnmapRange de tamanho 0 =
+        // sucesso). Um bloco mapeado pelo MapMemoryBlock sai do espaço de
+        // endereços; o bloco que a aplicação criou sobre a própria memória
+        // (CreateMemoryBlock) continua dela.
         event.Name = "UnmapMemoryBlock";
         const HandleRecord* memoryBlock = LookupHandle(state.r[0]);
-        event.Detail = state.r[1];
+        const uint32_t address = state.r[1];
+        event.Detail = address;
+        if (memoryBlock != nullptr &&
+            memoryBlock->Object->Type == "shared_memory:applet_capture" &&
+            memoryBlock->Object->FileSize == 0) {
+            state.r[0] = kResultSuccess;
+            event.Name += ":applet-capture-empty";
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
         if (memoryBlock == nullptr ||
-            memoryBlock->Object->Type != "shared_memory:applet_capture" ||
-            memoryBlock->Object->FileSize != 0) {
+            !memoryBlock->Object->Type.starts_with("shared_memory:") ||
+            memoryBlock->Object->MappedAddress != address) {
             event.Name += ":unsupported";
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
+        if (memoryBlock->Object->Type != "shared_memory:application") {
+            std::string unmapError;
+            if (!memory.UnmapRegion(address,
+                                    static_cast<size_t>(memoryBlock->Object->FileSize),
+                                    &unmapError)) {
+                event.Name += ":" + unmapError;
+                mSvcEvents.push_back(std::move(event));
+                return {NativeA32HostAction::Wait};
+            }
+            memoryBlock->Object->MappedAddress.reset();
+        }
         state.r[0] = kResultSuccess;
-        event.Name += ":applet-capture-empty";
         event.Handled = true;
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};

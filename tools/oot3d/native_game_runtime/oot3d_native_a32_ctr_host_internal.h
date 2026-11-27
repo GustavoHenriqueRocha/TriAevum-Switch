@@ -134,6 +134,19 @@ constexpr uint32_t kAptResultParameterPresent = 0xC8A0CC02U;
 constexpr uint32_t kAptResultAppletNotSupported = 0xD8C0CFFAU;  // NotSupported/Permanent
 constexpr uint32_t kAptAppletUtilityRequest = 0x004B00C2U;
 constexpr uint32_t kAptAppletUtilityResponse = 0x004B0082U;
+constexpr uint32_t kAptSendCaptureBufferInfoRequest = 0x00400042U;
+constexpr uint32_t kAptSendCaptureBufferInfoResponse = 0x00400040U;
+constexpr uint32_t kAptReplySleepQueryRequest = 0x003E0080U;
+constexpr uint32_t kAptReplySleepQueryResponse = 0x003E0040U;
+constexpr uint32_t kAptReplySleepNotificationCompleteRequest = 0x003F0040U;
+constexpr uint32_t kAptReplySleepNotificationCompleteResponse = 0x003F0040U;
+// The system software keyboard and its 0x400-byte configuration.
+constexpr uint32_t kSoftwareKeyboardConfigSize = 0x400U;
+constexpr size_t kSoftwareKeyboardButtonsOffset = 0x04U;
+constexpr size_t kSoftwareKeyboardMaxTextLengthOffset = 0x20U;
+constexpr size_t kSoftwareKeyboardReturnCodeOffset = 0x138U;
+constexpr size_t kSoftwareKeyboardTextOffsetOffset = 0x144U;
+constexpr size_t kSoftwareKeyboardTextLengthOffset = 0x148U;
 constexpr uint32_t kAptUtilitySleepIfShellClosed = 4U;
 constexpr uint32_t kAptUtilityUnlockTransition = 7U;
 constexpr uint32_t kFsInitializeRequest = 0x08010002U;
@@ -249,6 +262,8 @@ constexpr uint32_t kFileOpenLinkFileRequest = 0x080C0000U;
 constexpr uint32_t kFileOpenLinkFileResponse = 0x080C0042U;
 constexpr uint32_t kGspAcquireRightRequest = 0x00160042U;
 constexpr uint32_t kGspAcquireRightResponse = 0x00160040U;
+constexpr uint32_t kGspReleaseRightRequest = 0x00170000U;
+constexpr uint32_t kGspReleaseRightResponse = 0x00170040U;
 constexpr uint32_t kGspWriteHwRegsRequest = 0x00010082U;
 constexpr uint32_t kGspWriteHwRegsResponse = 0x00010040U;
 constexpr uint32_t kGspWriteHwRegsWithMaskRequest = 0x00020084U;
@@ -266,6 +281,16 @@ constexpr uint32_t kGspFlushDataCacheRequest = 0x00080082U;
 constexpr uint32_t kGspFlushDataCacheResponse = 0x00080040U;
 constexpr uint32_t kGspInvalidateDataCacheRequest = 0x00090082U;
 constexpr uint32_t kGspInvalidateDataCacheResponse = 0x00090040U;
+// Around a library applet the application saves and restores the VRAM
+// system area; no applet draws on this host, so both only succeed.
+// Before a library applet: the screens' current framebuffers, top then
+// bottom, each as left, right, format, stride.
+constexpr uint32_t kGspImportDisplayCaptureInfoRequest = 0x00180000U;
+constexpr uint32_t kGspImportDisplayCaptureInfoResponse = 0x00180240U;
+constexpr uint32_t kGspSaveVramSysAreaRequest = 0x00190000U;
+constexpr uint32_t kGspSaveVramSysAreaResponse = 0x00190040U;
+constexpr uint32_t kGspRestoreVramSysAreaRequest = 0x001A0000U;
+constexpr uint32_t kGspRestoreVramSysAreaResponse = 0x001A0040U;
 constexpr uint32_t kGspSetLcdForceBlackRequest = 0x000B0040U;
 constexpr uint32_t kGspSetLcdForceBlackResponse = 0x000B0040U;
 constexpr uint32_t kDspLoadComponentRequest = 0x001100C2U;

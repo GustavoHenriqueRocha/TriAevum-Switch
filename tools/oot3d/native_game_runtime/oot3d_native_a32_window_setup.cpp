@@ -413,6 +413,16 @@ void NativeA32WindowSession::Setup() {
 #endif
   }
   auto &hostServices = hostServicesStorage.emplace(std::move(hostConfig));
+  // Development: TRIAEVUM_SWKBD_TEXT sets the text the system software
+  // keyboard returns (ASCII; default "Link").
+  if (const char *keyboardText = std::getenv("TRIAEVUM_SWKBD_TEXT");
+      keyboardText != nullptr && *keyboardText != '\0') {
+    std::u16string text;
+    for (const char *character = keyboardText; *character != '\0'; ++character) {
+      text.push_back(static_cast<char16_t>(static_cast<unsigned char>(*character)));
+    }
+    hostServices.SetSoftwareKeyboardText(std::move(text));
+  }
   frameRateContract =
       Oot3dNativeGame::ResolveNativeFrameRateContract(
           launch.GameplayTiming, launch.PresentationRateHz);
