@@ -504,7 +504,9 @@ void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
         const bool float32 = (setup & 0x80000000U) != 0U;
         uniformQueue.Words[uniformQueue.Count++] = writeValue;
         const size_t requiredWords = float32 ? 4U : 3U;
-        if (uniformQueue.Count == requiredWords) {
+        // >=: o modo pode trocar de float32 para float24 com 3 palavras na
+        // fila; a próxima completa o vetor (Azahar pica.cpp), sem passar de 4.
+        if (uniformQueue.Count >= requiredWords) {
             const size_t index = setup & 0x7FU;
             if (index < shader.FloatUniforms.size()) {
                 shader.FloatUniforms[index] =

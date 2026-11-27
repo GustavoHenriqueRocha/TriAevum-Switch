@@ -2792,6 +2792,13 @@ GUARDS = [
           r'kinds\[kPicaTriggerDraw\] = kRegisterTrigger;\s*kinds\[kPicaTriggerDrawIndexed\] = kRegisterTrigger;\s*'
           r'kinds\[kPicaIrqRequest\] = kRegisterTrigger;',
           test="oot3d_native_pica_list_walk_tests"),
+    # --- 26/11 (MM3D 6b5ef9c9, na linha do John 27/11): fila de uniform com == passava de 4 ---
+    Guard("pica: a fila de uniform fecha com >= (troca de float32 para float24 com 3 palavras na fila "
+          "escrevia fora do vetor nos dois percursos)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'const size_t requiredWords = float32 \? 4U : 3U;\s+(//[^\n]*\n\s+)*if \(uniformQueue\.Count >= requiredWords\)',
+          "oot3d_native_pica_list_walk_tests (TestUniformModeSwitch)",
+          forbid=r'uniformQueue\.Count == requiredWords'),
     Guard("listwalk: diagnostic history (every write recorded) keeps the per-word walk",
           "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
           r'const bool fastWalk = mListWalkFast && !mDiagnosticHistoryEnabled;.*?'

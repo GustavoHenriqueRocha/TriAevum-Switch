@@ -630,6 +630,47 @@ void TestDiagnosticHistory() {
     std::printf("diagnostic history: per-word walk kept (%zu writes recorded)\n", fast.PendingRegisterWrites().size());
 }
 
+// The float uniform mode switched from float32 to float24 with 3 words queued:
+// the next word completes the vector (Azahar pica.cpp: float_regs_counter >= 3),
+// the queue empties and the setup advances. With == the queue went past its 4
+// words, out of the array, in both walks (the MM3D port's 6b5ef9c9; the
+// Generator above keeps the streams away from that case, so they can compare).
+void TestUniformModeSwitch() {
+    for (const bool fastWalk : {false, true}) {
+        RecordingSink sink;
+        Oot3dNativePicaFrontend frontend(&sink);
+        frontend.SetDiagnosticHistoryEnabled(false);
+        frontend.SetListWalkFast(fastWalk);
+        std::vector<uint32_t> words;
+        const auto command = [&words](uint16_t id, std::vector<uint32_t> values) {
+            words.push_back(values[0]);
+            words.push_back(static_cast<uint32_t>(id) | (0xFU << 16U) |
+                            (static_cast<uint32_t>(values.size() - 1U) << 20U));
+            words.insert(words.end(), values.begin() + 1, values.end());
+            if ((words.size() & 1U) != 0U) words.push_back(0U);
+        };
+        command(0x2C0, {0x80000005U});                            // float32, uniform 5
+        command(0x2C1, {0x11111111U, 0x22222222U, 0x33333333U});  // 3 of its 4 words
+        command(0x2C0, {0x00000007U});                            // float24, uniform 7
+        command(0x2C1, {0x44444444U});                            // completes the vector
+        Oot3dGspCommandPacket packet{};
+        packet.Control = 1U;
+        packet.Parameters[0] = 0x18000000U;
+        packet.Parameters[1] = static_cast<uint32_t>(words.size() * 4U);
+        const char* walk = fastWalk ? "fast walk" : "per-word walk";
+        std::string error;
+        Require(frontend.SubmitGspCommand(packet, words, &error),
+                std::string("uniform mode switch (") + walk + "): list refused: " + error);
+        const auto state = frontend.CaptureState();
+        Require(state.at("vertex_uniform_queue").at("count").get<size_t>() == 0U,
+                std::string("uniform mode switch (") + walk + "): the queue did not empty, count " +
+                    state.at("vertex_uniform_queue").at("count").dump());
+        Require((frontend.ReadPicaRegister(0x2C0).value_or(0U) & 0x7FU) == 8U,
+                std::string("uniform mode switch (") + walk + "): the setup did not advance to 8");
+    }
+    std::printf("uniform mode switch: float32 -> float24 with 3 words queued completes the vector\n");
+}
+
 // ------------------------------------------------------------------ bench
 
 void Bench(const char* shape, void (Generator::*draw)(std::vector<uint32_t>&), size_t frames) {
@@ -695,6 +736,7 @@ int main(int argc, char** argv) {
     const size_t lists = argc > 1 ? static_cast<size_t>(std::strtoul(argv[1], nullptr, 10)) : 100U;
     TestEveryRegister();
     TestDiagnosticHistory();
+    TestUniformModeSwitch();
     for (uint64_t combination = 0; combination < 16U; ++combination) {
         Options options;
         options.CaptureDelta = (combination & 1U) == 0U;
