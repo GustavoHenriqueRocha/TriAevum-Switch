@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 // Hot/cold attributes for generated-code helpers (see oot3d_native_a32_memory.h).
 #ifndef OOT3D_AOT_HOT
@@ -393,6 +394,58 @@ OOT3D_AOT_COLD bool Oot3dAotEnterBlockSlow(
     state.Reload(0x7FFFU, true);
     reloadState();
     return true;
+}
+
+// Sítio de título compilado no bloco (apply_title_sites.py, MM3D): logo
+// depois do EnterBlock de um PC de sítio, o código gerado chama o mesmo
+// callback de função nativa que o despachante chamaria ali. Recusou: o bloco
+// segue. Substituiu: next recebe o PC onde o guest continua (o prólogo faz
+// goto se for rótulo da função, senão sai por valor, sem exceção). Sem
+// callback registrado (OoT3D) nada acontece.
+struct Oot3dWholeAotTitleSites {
+    oot3d::recomp::a32::NativeFunctionCallback Callback = nullptr;
+    void* User = nullptr;
+    // Sítios em código do guest, ordenados: o prólogo também está nos blocos
+    // de PC + 4, alvos e entradas de despacho do CSV (rótulos de goto), que
+    // só pagam esta busca.
+    std::vector<std::uint32_t> Pcs;
+    // Shards com prólogo (cada um se registra ao carregar): a janela recusa
+    // ligar os sítios compilados se o C++ não foi processado.
+    std::uint32_t CompiledShards = 0U;
+};
+inline Oot3dWholeAotTitleSites gOot3dWholeAotTitleSites;
+
+inline bool Oot3dRegisterTitleSiteShard() noexcept {
+    ++gOot3dWholeAotTitleSites.CompiledShards;
+    return true;
+}
+
+template <typename CommitState, typename ReloadState>
+OOT3D_AOT_COLD bool Oot3dAotTitleSite(
+    Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
+    Oot3dAotArchitecturalState& state, uint32_t pc,
+    CommitState& commitState, ReloadState& reloadState, uint32_t& next) {
+    const auto callback = gOot3dWholeAotTitleSites.Callback;
+    const auto& pcs = gOot3dWholeAotTitleSites.Pcs;
+    if (callback == nullptr || !std::binary_search(pcs.begin(), pcs.end(), pc)) {
+        return false;
+    }
+    commitState();
+    state.Flush(0x7FFFU, true);
+    oot3d::recomp::a32::ExecutionResult result{};
+    bool replaced = false;
+    {
+        Oot3dGuestFpHostCallScope hostFp(frame.Guest.fpscr);
+        frame.Guest.r[15] = pc;
+        replaced = callback(pc, frame.Guest, context.CallbackMemory, &result,
+                            gOot3dWholeAotTitleSites.User);
+    }
+    state.Reload(0x7FFFU, true);
+    reloadState();
+    if (replaced) {
+        next = result.pc;
+    }
+    return replaced;
 }
 
 // Hot half, inlined into every generated block: budget accounting plus one

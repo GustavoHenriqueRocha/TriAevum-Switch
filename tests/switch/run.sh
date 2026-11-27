@@ -148,6 +148,9 @@ result test_shrink_texture_pack "$code"
     test_whole_aot_hot_from_gcda test_whole_aot_indirect_census) > /tmp/switch-pgo.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-pgo.$$ | sed 's/^/  /'; rm -f /tmp/switch-pgo.$$
 result test_whole_aot_pgo "$code"
+python3 -I "$here/../../tools/oot3d/native_a32_runtime/test_apply_title_sites.py" > /tmp/switch-title-sites.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-title-sites.$$ | sed 's/^/  /'; rm -f /tmp/switch-title-sites.$$
+result test_apply_title_sites "$code"
 [[ "${1:-}" == "--quick" ]] && { echo "passed $pass, failed $fail"; exit $((fail > 0)); }
 
 echo "== unit tests (host: $HOST_BUILD)"
