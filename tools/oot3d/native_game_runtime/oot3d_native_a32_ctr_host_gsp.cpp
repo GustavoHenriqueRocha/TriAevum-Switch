@@ -200,6 +200,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                         listSize > 0x01000000U) {
                         submitted = false;
                     } else {
+                        const auto listReadStart = mConfig.ProfileSvcTime
+                                                       ? std::chrono::steady_clock::now()
+                                                       : std::chrono::steady_clock::time_point{};
                         commandList.resize(listSize / 4U);
                         const auto readStart =
                             mConfig.ProfileRuntime
@@ -213,6 +216,11 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                                                 commandList.data()),
                                             commandList.size() *
                                                 sizeof(uint32_t)));
+                        if (mConfig.ProfileSvcTime) [[unlikely]]
+                            mSvcTimes.Add("gsp SubmitCommandList leitura",
+                                          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                    std::chrono::steady_clock::now() - listReadStart)
+                                                                    .count()));
                         if (mConfig.ProfileRuntime) {
                             mRuntimeProfile.CommandListBytes +=
                                 submitted ? listSize : 0U;
@@ -271,9 +279,20 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                         mConfig.ProfileRuntime
                             ? RuntimeProfileClock::now()
                             : RuntimeProfileClock::time_point{};
+                    const auto frontendStart = mConfig.ProfileSvcTime
+                                                   ? std::chrono::steady_clock::now()
+                                                   : std::chrono::steady_clock::time_point{};
                     submitted = SubmitPicaGspCommand(
                         packet, commandList, &submissionResult,
                         &picaError);
+                    if (mConfig.ProfileSvcTime && (packet.Control & 0xFFU) ==
+                                                      static_cast<uint32_t>(Oot3dGspCommandId::SubmitCommandList))
+                        [[unlikely]] {
+                        mSvcTimes.Add("gsp SubmitCommandList frontend",
+                                      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                std::chrono::steady_clock::now() - frontendStart)
+                                                                .count()));
+                    }
                     if (mConfig.ProfileRuntime) {
                         mRuntimeProfile.PicaFrontendSubmitNanoseconds +=
                             RuntimeProfileElapsedNanoseconds(

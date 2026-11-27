@@ -4038,6 +4038,28 @@ void RunAllTests() {
         Require(dma != svcTimes.end() && dma->second.Count == 1U,
                 "svc profile did not time the GSP DMA command on its own key");
     }
+    // A lista PICA (4,5 ms/quadro no MM3D, 2026-11-25-mm3d-tempo-por-svc.md) separa a
+    // cópia da lista do guest e o percurso do frontend.
+    {
+        constexpr uint32_t listCommand = gspCommandQueue + 0x20U + 0x20U;
+        Require(memory.Write32(gspCommandQueue, 0x00000101) &&
+                    memory.Write32(listCommand, 0x00000001) &&
+                    memory.Write32(listCommand + 4U, 0x14000300) &&
+                    memory.Write32(listCommand + 8U, 0) &&
+                    memory.Write32(0x1FF82080, 0x000C0000),
+                "cannot prepare native GSP command list");
+        state.r[0] = gspSession;
+        Require(host.HandleSvc(0x32, state, memory, context).Action ==
+                    NativeA32HostAction::Resume,
+                "GSP command list did not resume");
+        const auto& svcTimes = host.SvcTimes().Stats();
+        for (const char* key : {"gsp SubmitCommandList", "gsp SubmitCommandList leitura",
+                                "gsp SubmitCommandList frontend"}) {
+            const auto found = svcTimes.find(key);
+            Require(found != svcTimes.end() && found->second.Count == 1U,
+                    std::string("svc profile has no single entry for ") + key);
+        }
+    }
 
     const uint64_t ticksBeforeClockAdvance = host.SystemTicks();
     constexpr uint64_t clockAdvance = 0x123456789ABCDEF0ULL;
