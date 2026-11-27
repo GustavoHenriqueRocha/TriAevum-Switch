@@ -2999,6 +2999,13 @@ GUARDS = [
     Guard("ctr_title_boot_probe ligava núcleos manuais do OoT3D sem olhar o perfil",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
           r'dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U\);'),
+    # 23/11: o MM3D esperava para sempre o evento do giroscópio do hid:USER
+    # (WaitSynchronization1 sem prazo): a janela avança o HID a cada quadro,
+    # o boot probe não, e o boot parava em 0 quadros com 600 VBlanks.
+    Guard("ctr_title_boot_probe não avançava o HID (MM3D parado no evento do giroscópio)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
+          r'hostServices\.AdvanceHidToCurrentTick\(\s*process\.Memory\(\),.*?'
+          r'hostServices\.SignalVBlank\(process\.Memory\(\)\)'),
     Guard("perfil OoT3D perdeu os ganchos da janela/TopScreen (Zelda mudaria)",
           "tools/oot3d/native_game_runtime/ctr_title_profile.h",
           r'bool Oot3dGuestHooks = true;.*?bool TopScreenUi = true;'

@@ -609,6 +609,17 @@ int main(int argc, char** argv) {
                 break;
             }
             completeGpuWork();
+            // Como a janela a cada quadro (window_frame): amostras e eventos
+            // do hid:USER (pad, acelerômetro e giroscópio ligados), com a
+            // entrada neutra. O MM3D espera o evento do giroscópio sem prazo.
+            if (hostServices.AdvanceHidToCurrentTick(
+                    process.Memory(), Oot3dNativeGame::NativeA32HidState{})
+                    .Status ==
+                Oot3dNativeGame::NativeA32CtrHidUpdateStatus::Failed) {
+                std::cerr << "[boot-probe] amostra do HID não coube na "
+                             "memória compartilhada\n";
+                break;
+            }
             if (!hostServices.SignalVBlank(process.Memory())) {
                 break;
             }
