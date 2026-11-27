@@ -29,9 +29,27 @@ A NRO do `generico-john` (serviços, fills, shaders lidos do SD, IR) quebra algu
 
 - A maior diferença por área é Hyrule Castle Courtyard: perdidas 3,8 contra 0,5, com o mesmo guest (13,62 ms).
   Uma rodada só, então não dá para chamar de regressão.
-- As duas gravaram os mesmos 2 shaders fora do pack (`frag_594c87e2a8e1e325`, `vert_ec5498476104c169`):
-  falta antiga do pack, não desta NRO.
+- Os 2 shaders baixados de `logs/deko3d_shaders/` (`frag_594c87e2a8e1e325`, `vert_ec5498476104c169`) NÃO
+  faltaram nesta sessão: `missing=0` em todas as linhas `programs` do `deko3d.txt` das duas rodadas. São
+  arquivos antigos que ficam na pasta do SD e voltam em todo download (ver "Por que os 2 shaders" abaixo).
+
+## Por que os 2 shaders "não entraram" e se há outros (pergunta do Gustavo, 27/11)
+- O `vert_ec5498476104c169` apareceu pela primeira vez em `~/oot3d-work/bench/integra-john/primeira`
+  (12/11 16:01, `missing=1` no `deko3d.txt`), 24 min depois do pack v10 (12/11 15:37). Sessões de 12 e 13/11
+  da linha do John (john-r1, john-r2, mascara, nospan, grama-metade) têm o mesmo `missing=1`; depois de 13/11
+  nenhuma sessão do OoT3D tem `missing` > 0.
+- O `frag_594c87e2a8e1e325` já estava na pasta em 24/11 15:12 (`bench/oot3d-faltantes-20261124`), gravado
+  numa sessão que não foi baixada.
+- Os dois JÁ ESTÃO no pack junto com o do John (24/11, 4795 shaders, md5 8247b5bb, o que o console usa):
+  `deko3d_shader_pack.py --pack <junto> --glsl <os 2> --lighting-variants ...` deu "0 compiled now" e o
+  mesmo md5. Por isso as sessões desde 24/11 têm `missing=0`.
+- O jogo nunca limpa `logs/deko3d_shaders/`; o download de cada tour pega os arquivos antigos de novo.
+- Outros do mesmo tipo: nenhum. Desde 24/11 todas as sessões do OoT3D baixadas (tour28-john, as duas desta
+  pesquisa) têm `missing=0` e `uber=0`; a pasta só tem esses 2. No MM3D os tours desde 25/11 baixaram 0.
+- O problema real era outro: a release 1.0.2 (17/11) saiu com o pack v10 (2255 shaders), sem os 2540 do
+  John. Quem instalou pela release não tinha esses shaders. A 1.0.3 sai com o pack junto.
 
 ## Em aberto
 - Segunda rodada de cada uma para confirmar Courtyard.
-- Pôr os 2 shaders no pack (`tools/oot3d/deko3d_shader_pack.py`).
+- Limpar `logs/deko3d_shaders/` no SD (ou o jogo apagar o arquivo quando o shader entra no pack) para o
+  download mostrar só faltantes novos.
