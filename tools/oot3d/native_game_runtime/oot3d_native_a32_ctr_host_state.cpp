@@ -132,6 +132,8 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
             // Handle escritor no diário do save (commit por handle).
             if (object.SaveJournalWriter != 0U) encodedObject["save_journal_writer"] = object.SaveJournalWriter;
         }
+        // File:SetPriority (MM3D); 0 fica fora, como nos estados antigos.
+        if (object.FilePriority != 0U) encodedObject["file_priority"] = object.FilePriority;
         // Só objetos criados pelo guest de outro título têm estes campos; o
         // estado do OoT3D continua com as mesmas chaves.
         if (object.MaximumCount != 0) {
@@ -462,6 +464,7 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             object->FileOpenMode = encoded.at("file_open_mode").get<uint32_t>();
             object->FileClosed = encoded.value("file_closed", false);
             object->SaveJournalWriter = encoded.value("save_journal_writer", uint64_t{0});
+            object->FilePriority = encoded.value("file_priority", 0U);
             if (isRomFsFile && (object->FileOffset != mConfig.RomFsImageOffset ||
                                 object->FileSize != RomFsServiceViewSize())) {
                 // The view size includes installed RomFS mods: a state is

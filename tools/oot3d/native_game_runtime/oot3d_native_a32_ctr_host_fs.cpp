@@ -192,7 +192,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     const auto diskPath = [&]() { return journal ? journal->ActivePath(file.FilePath) : file.FilePath; };
     // Validate the reply BEFORE any disk mutation or backend allocation.
     const uint32_t replyBytes = event.Detail == kFileReadRequest || event.Detail == kFileWriteRequest
-                                    ? 20U : event.Detail == kFileGetSizeRequest ? 16U : 8U;
+                                    ? 20U
+                                : event.Detail == kFileGetSizeRequest || event.Detail == kFileOpenLinkFileRequest
+                                    ? 16U
+                                : event.Detail == kFileGetPriorityRequest ? 12U : 8U;
     if (!memory.IsWritable(commandBuffer, replyBytes)) {
         return fail(kFsBackendFailure, "unwritable-command-buffer");
     }
@@ -388,6 +391,42 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
         if (!resized) return fail(kFsBackendFailure, "backend-resize-failed", 0U, size);
         file.FileSize = size;
         return reply(kFileSetSizeResponse, "SetSize");
+    }
+    // Set/GetPriority (MM3D): prioridade de E/S da sessão. A leitura aqui é
+    // síncrona, então ela só é guardada e devolvida.
+    if (event.Detail == kFileSetPriorityRequest) {
+        uint32_t priority = 0U;
+        if (!memory.Read32(commandBuffer + 4U, &priority))
+            return fail(kInvalidBufferDescriptor, "unreadable-priority");
+        file.FilePriority = priority;
+        return reply(kFileSetPriorityResponse, "SetPriority:" + std::to_string(priority));
+    }
+    if (event.Detail == kFileGetPriorityRequest) {
+        if (!memory.Write32(commandBuffer + 8U, file.FilePriority))
+            return fail(kFsBackendFailure, "reply-write-failed");
+        return reply(kFileGetPriorityResponse, "GetPriority");
+    }
+    if (event.Detail == kFileOpenLinkFileRequest) {
+        // Outra sessão sobre o mesmo arquivo (MM3D, no RomFS depois da
+        // abertura). A leitura leva o próprio offset, então a sessão nova
+        // divide o arquivo e o backend. Os campos são copiados antes do
+        // CreateHandle, que pode realocar a tabela de handles; o escritor do
+        // diário do save começa do zero (é outro handle).
+        auto link = std::make_shared<KernelObject>();
+        link->Type = file.Type;
+        link->FilePath = file.FilePath;
+        link->FileOffset = file.FileOffset;
+        link->FileSize = file.FileSize;
+        link->FileOpenMode = file.FileOpenMode;
+        link->FilePriority = file.FilePriority;
+        link->FileBackend = file.FileBackend;
+        link->RomFsBacking = file.RomFsBacking;
+        const uint32_t handle = CreateHandle(std::move(link));
+        if (handle == 0U) return fail(kFsBackendFailure, "link-handle-failed");
+        if (!memory.Write32(commandBuffer + 8U, kMoveHandleDescriptor) ||
+            !memory.Write32(commandBuffer + 12U, handle))
+            return fail(kFsBackendFailure, "reply-write-failed");
+        return reply(kFileOpenLinkFileResponse, "OpenLinkFile");
     }
     if (event.Detail == kFileFlushRequest) {
         // RootedFilesystemBackendV1::Write flushes before returning success.

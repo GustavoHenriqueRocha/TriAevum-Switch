@@ -444,6 +444,7 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         // Save file on the directory backend: this handle's identifier
         // as a journal writer (CtrSaveJournal; 0 = has not written yet).
         uint64_t SaveJournalWriter = 0;
+        uint32_t FilePriority = 0;
         std::shared_ptr<NativeA32CtrFile> FileBackend;
         std::shared_ptr<RomFsBackingFile> RomFsBacking;
         std::optional<uint32_t> MappedAddress;
