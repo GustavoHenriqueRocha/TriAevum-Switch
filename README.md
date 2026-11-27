@@ -1,52 +1,62 @@
-> **Nintendo Switch port, in English.** This fork of
-> [GustavoHenriqueRocha/TriAevum-Switch](https://github.com/GustavoHenriqueRocha/TriAevum-Switch), the Switch port of
-> [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum), translates the port into English and adds gyro aiming,
-> touchscreen controls, a performance overlay, in-game updates and a first-launch import of your own cartridge dump.
-> All credit for the recompilation, runtime and renderer goes to those projects and the ones credited below.
-> No ROM or game data is distributed. Port notes: [SWITCH_PORT.md](SWITCH_PORT.md); 3DS → Switch porting
-> guide: [docs/PORTING_GUIDE_3DS_SWITCH.md](docs/PORTING_GUIDE_3DS_SWITCH.md).
+# Ocarina of Time 3D no Nintendo Switch (TriAevum-Switch)
 
-## Nintendo Switch
+Port para Nintendo Switch (homebrew) do [TriAevum](https://github.com/coccofresco/TriAevum), a recompilação
+nativa de *The Legend of Zelda: Ocarina of Time 3D*, por **Gustavo Henrique Rocha**, com renderizador deko3d,
+legendas em português do Brasil e uma tela só. Nenhuma ROM acompanha o projeto: o jogo é montado no console a
+partir do dump do seu próprio cartucho.
 
-**You need** a Switch running Atmosphère and a decrypted dump of your own *Ocarina of Time 3D* cartridge
-(`.3ds` or `.cci`): USA Rev 1 (En, Fr, Es) or European (original or Rev 1). GodMode9 on a modded 3DS can
-dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
+![Switch: Campo de Hyrule com o HUD em PT-BR](docs/images/switch-campo-de-hyrule.jpg)
 
-1. Download `oot3dre-<version>-switch.zip` from [Releases](https://github.com/JohnUzoka/TriAevum-Switch/releases)
-   and extract it to the root of the SD card. It creates `switch/oot3dre/`.
-2. Copy your dump into `switch/oot3dre/`.
-3. Start the game with a game's memory: hold R while starting any game, then open it from the homebrew menu.
-   The first start turns your dump into the game files (about a minute), then asks whether to keep (A) or
-   delete (Y) the dump. A forwarder on the HOME menu made with [Sphaira](https://github.com/NaGaa95/sphaira)
-   works too; forwarders from the nsp-forwarder website have been reported to close the game, so if you try
-   one, please send `switch/oot3dre/boot-status.txt` and the `logs` folder.
+| | |
+|---|---|
+| ![Switch: pôr do sol no Campo de Hyrule](docs/images/switch-por-do-sol.jpg) | ![Switch: Rancho Lon Lon](docs/images/switch-rancho-lon-lon.jpg) |
+| ![Switch: Mercado do Castelo](docs/images/switch-mercado.jpg) | |
 
-- **Menu:** press both sticks in (L3+R3) for settings, the performance overlay, updates and Exit game.
-  Touch works in the menu too.
-- **Controls:** gyro aiming with the console, a Pro Controller or a pair of Joy-Cons; tap the on-screen
-  item, X/Y and D-pad icons; drag a finger on empty screen to aim. L3+R3 → Controls → Camera → Free
-  camera → Smoothing Off makes the free camera stop as soon as you let go of the stick.
-- **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept. The game
-  also checks when it starts and shows a notice for a few seconds when a newer version is out; L3+R3 →
-  Updates → Check at launch turns that off.
-- **Performance:** at stock clocks lighter areas run at full speed and busy ones slow down (the CPU is
-  the limit). L3+R3 → Video → **Performance mode** On raises the CPU to 1224 MHz, the GPU to 460.8 MHz
-  and the memory to 1600 MHz (each also on its own row; off by default, more battery use); the clocks
-  go back to normal when you turn it off, press HOME, sleep or exit. sys-clk still works and takes
-  precedence.
-- **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
-  unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
-- **Gameplay (L3+R3 → Game → Gameplay):** *Landing roll (N64)* (on by default) rolls after a run jump off a
-  ledge as on N64; *Roll dash* (off by default) is Single Screen Experience's Roll Dash: keep A held after
-  a roll and Link dashes. Its dash animations come with the HUD art download below; a game set up with an
-  earlier version is offered the download again at the next start once Roll dash is on.
-- **HUD art, downloaded on the console:** the single-screen HUD's art comes from the TopScreen mod
-  ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0), whose license
-  lets you download and install it but not share it. The first start offers to download it from
-  GameBanana (56 MB) and builds the HUD textures, the HD HUD art and the HD text font from your game
-  files: A downloads, B asks again next time, X never asks (L3+R3 → Updates turns the offer back on).
-  Without internet, download `singlescreen_322.zip` from that page on a PC and copy it into
-  `switch/oot3dre/`. Without the mod the game still runs, with the game's own HUD art.
+Prints tirados no próprio console (Switch Lite).
+
+## Como instalar
+
+**Você precisa** de um Switch com Atmosphère e de um dump decriptado do seu cartucho de *Ocarina of Time 3D*
+(`.3ds` ou `.cci`): USA Rev 1 (En, Fr, Es) ou europeu (original ou Rev 1). O GodMode9 num 3DS desbloqueado faz o
+dump. Cópias da eShop (`.cia`) e outras versões não funcionam.
+
+1. Baixe `oot3dre-<versão>-switch.zip` em [Releases](https://github.com/GustavoHenriqueRocha/TriAevum-Switch/releases)
+   e extraia na raiz do cartão SD. Ele cria `switch/oot3dre/`.
+2. Copie o seu dump para `switch/oot3dre/`.
+3. Abra o jogo com a memória de um jogo: segure R ao abrir qualquer jogo e escolha o TriAevum no menu de
+   homebrew. O primeiro início transforma o dump nos arquivos do jogo (cerca de um minuto) e pergunta se
+   mantém (A) ou apaga (Y) o dump. Um forwarder no menu HOME feito com o [Sphaira](https://github.com/ITotalJustice/sphaira)
+   também funciona.
+4. **Português:** a tradução ocupa o lugar do espanhol. Aperte os dois analógicos (L3+R3), aba **Language**, e
+   escolha **Espanol**.
+
+- **Menu:** L3+R3 abre as configurações, o painel de desempenho e Sair do jogo. O toque funciona no menu.
+- **Controles:** mira por giroscópio (console, Pro Controller ou par de Joy-Cons) e ícones de item, X/Y e
+  direcional na tela de toque.
+- **Padrões:** 60 fps por interpolação (apague `switch/oot3dre/config/fps60` para 30 fps).
+- **HUD de tela única:** a arte vem do mod [Single Screen Experience](https://gamebanana.com/mods/695893)
+  (rlgcarrot/M-1, CC BY-NC-ND 4.0), que a licença deixa baixar e instalar, mas não redistribuir. No primeiro
+  início o console oferece baixá-lo do GameBanana e monta o HUD a partir dos arquivos do seu jogo.
+- **Atualizações:** o botão de atualizar do menu ainda não consulta este repositório; baixe a release nova aqui.
+
+## Créditos
+
+- **coccofresco** e os contribuidores do [TriAevum](https://github.com/coccofresco/TriAevum): a recompilação, o
+  runtime e o renderizador. Os créditos completos do projeto original estão abaixo e em
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- **[John Uzoka](https://github.com/JohnUzoka/TriAevum-Switch)**: importação do dump no console, giroscópio,
+  toque, painel de desempenho, atualizador e otimizações do port.
+- **SolidOne e LordeJabiraca**: o texto em português do mod PT-BR do Ship of Harkinian, convertido para o 3DS
+  neste port.
+- **rlgcarrot/M-1**: TopScreen / Single Screen Experience.
+- Fontes M PLUS Rounded 1c e Belleza (SIL Open Font License) nos menus em PT-BR.
+- **devkitPro / deko3d**, **Azahar**, **Ship of Harkinian** e **libultraship**.
+- **Nintendo e Grezzo**, que criaram o jogo. Este projeto não tem relação com a Nintendo.
+
+Notas do port: [SWITCH_PORT.md](SWITCH_PORT.md). Para portar outros jogos de 3DS:
+[docs/PORTING_GUIDE_3DS_SWITCH.md](docs/PORTING_GUIDE_3DS_SWITCH.md).
+
+## Extras (instruções em inglês, do fork do John)
 
 ### HD textures (optional)
 
@@ -280,19 +290,7 @@ implemented". Ray tracing is a wishlist item, not a feature of this release.
 
 [Release notes and known limitations](docs/releases/v0.6.0-alpha.2b.md).
 
-## Screenshots
-
-Captured directly from the alpha.2 framebuffer on Windows and Linux with the
-default profile: toon shading, outlines, grass, 1.10x FOV, x2 interpolation and
-TopScreen. No additional HD texture pack.
-
-![Windows: Kokiri Forest outside Link's house, with the TopScreen HUD](docs/images/alpha2-kokiri.png)
-
-![Windows: Link and Epona in the title intro](docs/images/alpha2-title.png)
-
-![Linux Flatpak: mounted gameplay with the TopScreen HUD](docs/images/alpha2-mounted-linux.png)
-
-## Source and license
+## Screenshots\n\nPrints do Switch no topo desta página.\n\n## Source and license
 
 Original contributions are licensed under **GPL-3.0-or-later**. Third-party
 components retain their own licenses and notices:
