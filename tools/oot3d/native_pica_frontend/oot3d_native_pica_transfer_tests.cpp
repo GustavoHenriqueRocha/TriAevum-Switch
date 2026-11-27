@@ -3,7 +3,9 @@
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
 
 #include <array>
+#include <optional>
 #include <utility>
+#include <vector>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -60,9 +62,70 @@ void VerifyImageRegions(const Oot3dNativeGame::Oot3dPicaTextureCopyPlan& plan) {
     Require(actual == expected, "GPU image copy differs from raw bytes or modifies padding");
 }
 
+// O fill escreve no lugar, sem o vetor do tamanho da faixa (0,63 ms/quadro no
+// MM3D, 2026-11-27-mm3d-proximos-passos.md): os mesmos bytes e a mesma
+// contabilidade de escrita do WriteBytes que ele usava.
+void TestMemoryFillInPlace() {
+    Oot3dNativeGame::NativeA32Memory memory;
+    std::string error;
+    constexpr uint32_t base = 0x18000000U;
+    constexpr size_t regionSize = 0x20000U;
+    Require(memory.MapRegion({"vram", base, regionSize, true, false, {}}, &error), error);
+    const std::array<uint8_t, 4> value{0x11U, 0x22U, 0x33U, 0x44U};
+    for (const uint16_t control : {uint16_t{0x0001U}, uint16_t{0x0101U}, uint16_t{0x0201U}}) {
+        const size_t element = (control & 0x200U) != 0U ? 4U : ((control & 0x100U) != 0U ? 3U : 2U);
+        for (const size_t size : {size_t{1}, size_t{2}, size_t{3}, size_t{5}, size_t{13},
+                                  size_t{4096}, size_t{4099}, size_t{0x10001}}) {
+            for (const uint32_t offset : {0U, 1U, 7U}) {
+                const std::vector<uint8_t> seed(regionSize, 0xEEU);
+                Require(memory.WriteBytes(base, seed), "cannot seed the fill region");
+                const uint32_t start = base + 0x100U + offset;
+                const std::array<std::pair<uint32_t, uint32_t>, 1> watched{
+                    {{start, start + static_cast<uint32_t>(size)}}};
+                memory.SetRangeWatch(watched);
+                const uint64_t writesBefore = memory.WatchCounters().ByteWrites;
+                // Contrato de geração do John (oot3d_native_a32_memory.h):
+                // WriteGeneration muda entre duas chamadas exatamente quando
+                // houve escrita, e o certificado da faixa só fica igual se
+                // nada a escreveu.
+                const uint64_t generationBefore = memory.WriteGeneration();
+                const std::optional<uint64_t> certificateBefore =
+                    memory.RangeWriteGeneration(start, size);
+                Require(certificateBefore.has_value() &&
+                            memory.RangeWriteGeneration(start, size) == certificateBefore,
+                        "the fill range has no stable certificate before the fill");
+                Require(Oot3dNativeGame::ExecuteOot3dPicaMemoryFill(
+                            {start, start + static_cast<uint32_t>(size), 0x44332211U, control},
+                            memory, &error),
+                        error);
+                std::vector<uint8_t> after(regionSize);
+                Require(memory.ReadBytes(base, after), "cannot read the fill region");
+                for (size_t index = 0; index < regionSize; ++index) {
+                    const size_t at = base + index;
+                    const bool inside = at >= start && at < start + size;
+                    Require(after[index] == (inside ? value[(at - start) % element] : 0xEEU),
+                            "in-place fill wrote the wrong byte or outside its range");
+                }
+                Require(memory.WatchCounters().ByteWrites == writesBefore + 1U,
+                        "in-place fill is not counted as one byte write");
+                const std::optional<uint64_t> certificateAfter =
+                    memory.RangeWriteGeneration(start, size);
+                Require(memory.WriteGeneration() != generationBefore &&
+                            certificateAfter.has_value() && certificateAfter != certificateBefore,
+                        "in-place fill did not mark its range written");
+                memory.ClearRangeWatch();
+            }
+        }
+    }
+    Require(!Oot3dNativeGame::ExecuteOot3dPicaMemoryFill(
+                {base + regionSize - 4U, base + regionSize + 4U, 0U, 0x0001U}, memory, &error),
+            "a fill past the region end was accepted");
+}
+
 } // namespace
 
 int main() {
+    TestMemoryFillInPlace();
     std::vector<uint8_t> rgba(16 * 16 * 4);
     for (uint32_t y = 0; y < 16; ++y) for (uint32_t x = 0; x < 16; ++x) {
         const size_t i = (y * 16 + x) * 4;

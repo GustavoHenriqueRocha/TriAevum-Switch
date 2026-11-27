@@ -1354,6 +1354,47 @@ bool NativeA32Memory::EndHostUpdate(uint32_t address, size_t size) {
     return true;
 }
 
+// O MemoryFill montava um vetor do tamanho da faixa e passava pelo WriteBytes:
+// zerar, preencher e copiar, 0,63 ms/quadro no MM3D
+// (2026-11-27-mm3d-proximos-passos.md). Aqui o padrão dobra direto na região;
+// a contabilidade é a do WriteBytes, que o fill usava.
+bool NativeA32Memory::FillPattern(uint32_t address, size_t size,
+                                  std::span<const uint8_t> element) {
+    const KernelGuard kernel;
+    if (size == 0) {
+        return true;
+    }
+    if (element.empty()) {
+        return false;
+    }
+    auto* region = FindRegion(address, size);
+    if (region == nullptr || !region->Writable) {
+        return false;
+    }
+    uint8_t* destination =
+        region->Bytes.data() + static_cast<size_t>(address - region->BaseAddress);
+    const size_t first = std::min(element.size(), size);
+    std::copy_n(element.begin(), first, destination);
+    for (size_t filled = first; filled < size;) {
+        const size_t chunk = std::min(filled, size - filled);
+        std::memcpy(destination + filled, destination, chunk);
+        filled += chunk;
+    }
+    if (Watches(address, size)) [[unlikely]] {
+        if (mWatchSuppressed) {
+            ++mWatchCounters.SuppressedByteWrites;
+        } else {
+            ++mWatchCounters.ByteWrites;
+        }
+    }
+    if (mTraceWriteFingerprint) [[unlikely]] {
+        RecordTracedWrite(address, std::span<const uint8_t>(destination, size));
+    }
+    NoteWrite(address, size);
+    NotifyObservedWrite(address, size);
+    return true;
+}
+
 bool NativeA32Memory::Fill(uint32_t address, size_t size, uint8_t value) {
     const KernelGuard kernel;
     if (size == 0) {

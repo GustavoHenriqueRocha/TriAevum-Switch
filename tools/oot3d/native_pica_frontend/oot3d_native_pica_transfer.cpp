@@ -263,17 +263,12 @@ bool ExecuteOot3dPicaMemoryFill(const Oot3dPicaMemoryFill& fill,
         static_cast<uint8_t>(fill.Value >> 8U),
         static_cast<uint8_t>(fill.Value >> 16U),
         static_cast<uint8_t>(fill.Value >> 24U)};
-    // One element, then doubling copies: a byte loop with a division per
-    // byte cost 7 ms per 768 KB fill at -O1 (SM3DL clears 3 per frame).
-    std::vector<uint8_t> bytes(size);
-    const size_t first = std::min(elementSize, size);
-    std::copy_n(value.begin(), first, bytes.begin());
-    for (size_t filled = first; filled < size;) {
-        const size_t chunk = std::min(filled, size - filled);
-        std::copy_n(bytes.begin(), chunk, bytes.begin() + static_cast<std::ptrdiff_t>(filled));
-        filled += chunk;
-    }
-    return memory.WriteBytes(fill.StartAddress, bytes);
+    // One element, then doubling copies in place: a byte loop with a division
+    // per byte cost 7 ms per 768 KB fill at -O1 (SM3DL clears 3 per frame), and
+    // a staging vector plus WriteBytes 0.63 ms/frame in MM3D.
+    return memory.FillPattern(
+        fill.StartAddress, size,
+        std::span<const uint8_t>(value.data(), elementSize));
 }
 
 bool ExecuteOot3dPicaDisplayTransfer(

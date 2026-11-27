@@ -328,6 +328,10 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     GetGuestAddress(const void* pointer, size_t size = 1) const noexcept;
     bool WriteBytes(uint32_t address, std::span<const uint8_t> bytes);
     bool Fill(uint32_t address, size_t size, uint8_t value);
+    // Repete o elemento no lugar (o MemoryFill do PICA), com a contabilidade do
+    // WriteBytes; o fim da faixa pode cortar o último elemento.
+    bool FillPattern(uint32_t address, size_t size,
+                     std::span<const uint8_t> element);
 
     // Service-owned shared memory remains host-writable even when the guest
     // maps it read-only.

@@ -3259,11 +3259,17 @@ GUARDS = [
           r'LatestSnapshotCompletion\(.*?bottomSelection\.CompletionId = \*executed;.*?'
           r'PicaPresentationMode::\s*PictureInPicture\)',
           "oot3d_native_pica_vulkan_bridge_tests (modo PictureInPicture e LatestSnapshotCompletion)"),
+    # O dobramento do 497828a7 mudou do transfer para o NativeA32Memory::FillPattern (27/11).
     Guard("MemoryFill do PICA montava o padrão byte a byte com divisão: 7 ms por fill de 768 KB (SM3DL 3/quadro)",
-          "tools/oot3d/native_pica_frontend/oot3d_native_pica_transfer.cpp",
-          r'std::copy_n\(value\.begin\(\), first, bytes\.begin\(\)\);\s*'
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'std::copy_n\(element\.begin\(\), first, destination\);\s*'
           r'for \(size_t filled = first; filled < size;\)',
           "oot3d_native_pica_transfer_tests (fill 16/24/32 bits)"),
+    Guard("MemoryFill do PICA montava um vetor do tamanho do fill e copiava de novo: 0,63 ms/quadro no MM3D",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_transfer.cpp",
+          r'return memory\.FillPattern\(\s*fill\.StartAddress, size,',
+          "oot3d_native_pica_transfer_tests (TestMemoryFillInPlace)",
+          forbid=r'std::vector<uint8_t> bytes\(size\);'),
     Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'
